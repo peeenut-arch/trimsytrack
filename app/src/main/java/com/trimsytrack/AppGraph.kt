@@ -12,6 +12,9 @@ import com.trimsytrack.data.TripRepository
 import com.trimsytrack.distance.RoutesApi
 import com.trimsytrack.distance.RoutesDistanceService
 import com.trimsytrack.geofence.GeofenceSyncManager
+import com.trimsytrack.data.Migrations
+import com.trimsytrack.data.sync.BackendSyncManager
+import com.trimsytrack.data.sync.BackendSyncRepository
 import com.trimsytrack.notifications.Notifications
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -49,6 +52,12 @@ object AppGraph {
     lateinit var geofenceSyncManager: GeofenceSyncManager
         private set
 
+    lateinit var backendSyncRepository: BackendSyncRepository
+        private set
+
+    lateinit var backendSyncManager: BackendSyncManager
+        private set
+
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
@@ -59,6 +68,10 @@ object AppGraph {
             settings = SettingsStore(appContext)
 
             db = Room.databaseBuilder(appContext, AppDatabase::class.java, "trimsytrack.db")
+                .addMigrations(
+                    Migrations.MIGRATION_3_4,
+                    Migrations.MIGRATION_4_5,
+                )
                 .fallbackToDestructiveMigration()
                 .build()
 
@@ -67,6 +80,9 @@ object AppGraph {
             promptRepository = PromptRepository(db.promptDao())
             tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao())
             distanceRepository = DistanceRepository(db.distanceCacheDao(), buildRoutesService())
+
+            backendSyncRepository = BackendSyncRepository(appContext, settings)
+            backendSyncManager = BackendSyncManager(appContext)
 
             Notifications.ensureChannels(appContext)
             geofenceSyncManager = GeofenceSyncManager(appContext, settings, storeRepository)

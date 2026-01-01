@@ -323,7 +323,7 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
     )
 
     val now = Instant.now()
-    return AppGraph.tripRepository.createTrip(
+    val tripId = AppGraph.tripRepository.createTrip(
         TripEntity(
             createdAt = now,
             day = LocalDate.now(),
@@ -342,6 +342,13 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             mileageRateMicros = null,
         )
     )
+
+    runCatching {
+        AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
+        AppGraph.backendSyncManager.scheduleImmediate("manual-trip")
+    }
+
+    return tripId
 }
 
 @Composable
@@ -400,8 +407,11 @@ private fun StoreThumbnailButton(
 package com.trimsytrack.ui.screens
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.location.Geocoder
+import android.net.Uri
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -412,25 +422,35 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Recycling
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.filled.LocalPostOffice
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -448,21 +468,36 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import coil.compose.AsyncImage
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.BusinessHours
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.distance.MapsKeyProvider
 import java.time.Instant
+import java.time.DayOfWeek
 import java.time.LocalDate
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import retrofit2.Retrofit
+import retrofit2.converter.scalars.ScalarsConverterFactory
 
 private data class StorePolar(
     val store: StoreEntity,
@@ -473,14 +508,25 @@ private data class StorePolar(
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun ManualTripScreen(
+    onBack: () -> Unit,
     onOpenTrip: (Long) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+
+    val manualTripStoreSortMode by AppGraph.settings.manualTripStoreSortMode.collectAsState(initial = "NAME")
+    val storeBusinessHours by AppGraph.settings.storeBusinessHours.collectAsState(initial = emptyMap())
+    val businessHomeLat by AppGraph.settings.businessHomeLat.collectAsState(initial = null)
+    val businessHomeLng by AppGraph.settings.businessHomeLng.collectAsState(initial = null)
 
     var activeStores by remember { mutableStateOf<List<StoreEntity>>(emptyList()) }
     val storeImages by AppGraph.settings.storeImages.collectAsState(initial = emptyMap())
     var error by remember { mutableStateOf<String?>(null) }
     var isSaving by remember { mutableStateOf(false) }
+
+    var storeVisitCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+
+    var hoursDialogStore by remember { mutableStateOf<StoreEntity?>(null) }
+    var hoursDraft by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     var currentCity by remember { mutableStateOf<String?>(null) }
     var allCities by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -490,6 +536,8 @@ fun ManualTripScreen(
 
     var expandStores by rememberSaveable { mutableStateOf(false) }
     var expandPostOmbud by rememberSaveable { mutableStateOf(false) }
+
+    var homeToStoreDistanceMeters by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
 
 
     LaunchedEffect(Unit) {
@@ -524,6 +572,15 @@ fun ManualTripScreen(
         }
     }
 
+    LaunchedEffect(Unit) {
+        storeVisitCounts = runCatching {
+            AppGraph.db.tripDao().getStoreVisitCounts().associate { it.storeId to it.count }
+        }.getOrDefault(emptyMap())
+    }
+
+    // NOTE: Distance sorting/display uses Business Home -> Store (Google + cached).
+    // We still use location for city-detection elsewhere.
+
     var userLocation by remember { mutableStateOf<Pair<Double, Double>?>(null) }
     LaunchedEffect(Unit) {
         try {
@@ -545,12 +602,8 @@ fun ManualTripScreen(
             }
 
             userLocation = if (loc != null) loc.latitude to loc.longitude else null
-            if (loc == null && error.isNullOrBlank()) {
-                error = "Could not get your location. Please check location permissions and try again."
-            }
         } catch (e: Exception) {
             android.util.Log.e("ManualTripScreen", "Location error", e)
-            error = "Location error: ${e.message ?: e.javaClass.simpleName}"
         }
     }
 
@@ -560,16 +613,48 @@ fun ManualTripScreen(
         else activeStores.filter { it.city.equals(city, ignoreCase = true) }
     }
 
-    val storesPolar = remember(visibleStores, userLocation) {
-        val loc = userLocation ?: return@remember emptyList()
-        val userLat = loc.first
-        val userLng = loc.second
+    // Cache Google driving distances: Business home -> store. First time = Google call; after that = DB cache.
+    LaunchedEffect(visibleStores, businessHomeLat, businessHomeLng) {
+        val homeLat = businessHomeLat
+        val homeLng = businessHomeLng
+        if (homeLat == null || homeLng == null) {
+            homeToStoreDistanceMeters = emptyMap()
+            return@LaunchedEffect
+        }
+
+        val computed = withContext(Dispatchers.IO) {
+            val map = LinkedHashMap<String, Int>(visibleStores.size)
+            for (store in visibleStores) {
+                val meters = runCatching {
+                    AppGraph.distanceRepository.getOrComputeDrivingDistanceMeters(
+                        startLat = homeLat,
+                        startLng = homeLng,
+                        destLat = store.lat,
+                        destLng = store.lng,
+                        startLocationId = BUSINESS_HOME_LOCATION_ID,
+                        endLocationId = store.id,
+                    )
+                }.getOrNull()
+                if (meters != null) {
+                    map[store.id] = meters
+                }
+            }
+            map
+        }
+
+        homeToStoreDistanceMeters = computed
+    }
+
+    val storesPolar = remember(visibleStores, businessHomeLat, businessHomeLng, homeToStoreDistanceMeters, userLocation) {
+        val originLat = businessHomeLat ?: userLocation?.first ?: return@remember emptyList()
+        val originLng = businessHomeLng ?: userLocation?.second ?: return@remember emptyList()
+        val isHomeOrigin = businessHomeLat != null && businessHomeLng != null
 
         visibleStores.mapNotNull { store ->
             try {
-                val dLat = Math.toRadians(store.lat - userLat)
-                val dLng = Math.toRadians(store.lng - userLng)
-                val lat1 = Math.toRadians(userLat)
+                val dLat = Math.toRadians(store.lat - originLat)
+                val dLng = Math.toRadians(store.lng - originLng)
+                val lat1 = Math.toRadians(originLat)
                 val lat2 = Math.toRadians(store.lat)
 
                 val a =
@@ -577,7 +662,12 @@ fun ManualTripScreen(
                         Math.cos(lat1) * Math.cos(lat2) *
                         Math.sin(dLng / 2) * Math.sin(dLng / 2)
                 val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-                val distance = 6371000.0 * c
+                val fallbackMeters = 6371000.0 * c
+                val distance = if (isHomeOrigin) {
+                    homeToStoreDistanceMeters[store.id]?.toDouble() ?: fallbackMeters
+                } else {
+                    fallbackMeters
+                }
 
                 val y = Math.sin(dLng) * Math.cos(lat2)
                 val x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng)
@@ -596,7 +686,18 @@ fun ManualTripScreen(
         }
     }
 
-    val sortedPolar = remember(storesPolar) { storesPolar.sortedBy { it.distance } }
+    val sortedPolar = remember(storesPolar, manualTripStoreSortMode, storeVisitCounts) {
+        when (manualTripStoreSortMode) {
+            "NAME" -> storesPolar.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.store.name })
+            "VISITS" -> {
+                storesPolar.sortedWith(
+                    compareByDescending<StorePolar> { storeVisitCounts[it.store.id] ?: 0 }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.store.name }
+                )
+            }
+            else -> storesPolar.sortedBy { it.distance } // DISTANCE (default)
+        }
+    }
 
     val titleCity = currentCity?.trim().orEmpty().ifBlank { "Stores" }
 
@@ -628,6 +729,14 @@ fun ManualTripScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                        )
+                    }
+                },
                 title = {
                     OutlinedTextField(
                         value = cityQuery,
@@ -685,6 +794,59 @@ fun ManualTripScreen(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
+                        Text(
+                            "Sort",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                        )
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            val isName = manualTripStoreSortMode == "NAME"
+                            val isDistance = manualTripStoreSortMode == "DISTANCE"
+                            val isVisits = manualTripStoreSortMode == "VISITS"
+
+                            if (isName) {
+                                Button(
+                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("NAME") } },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text("A–Z") }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("NAME") } },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text("A–Z") }
+                            }
+
+                            Spacer(Modifier.width(10.dp))
+
+                            if (isDistance) {
+                                Button(
+                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("DISTANCE") } },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text("Closest") }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("DISTANCE") } },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text("Closest") }
+                            }
+
+                            Spacer(Modifier.width(10.dp))
+
+                            if (isVisits) {
+                                Button(
+                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("VISITS") } },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text("Most") }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("VISITS") } },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text("Most") }
+                            }
+                        }
+                    }
+
+                    item(span = { GridItemSpan(maxLineSpan) }) {
                         SectionHeaderRow(
                             title = "Butiker",
                             subtitle = "${storePolar.size}",
@@ -704,8 +866,14 @@ fun ManualTripScreen(
                             StoreThumbnailButton(
                                 name = displayName,
                                 imageUri = uri,
+                                defaultIcon = defaultIconForStoreName(polar.store.name),
                                 distanceMeters = polar.distance,
                                 enabled = !isSaving,
+                                onSet = {
+                                    hoursDialogStore = polar.store
+                                    val existing = storeBusinessHours[polar.store.id]?.byDay.orEmpty()
+                                    hoursDraft = existing
+                                },
                                 onClick = {
                                     scope.launch {
                                         isSaving = true
@@ -744,8 +912,14 @@ fun ManualTripScreen(
                             StoreThumbnailButton(
                                 name = displayName,
                                 imageUri = uri,
+                                defaultIcon = Icons.Filled.LocalPostOffice,
                                 distanceMeters = polar.distance,
                                 enabled = !isSaving,
+                                onSet = {
+                                    hoursDialogStore = polar.store
+                                    val existing = storeBusinessHours[polar.store.id]?.byDay.orEmpty()
+                                    hoursDraft = existing
+                                },
                                 onClick = {
                                     scope.launch {
                                         isSaving = true
@@ -766,6 +940,225 @@ fun ManualTripScreen(
                 }
             }
         }
+    }
+
+    val storeForDialog = hoursDialogStore
+    if (storeForDialog != null) {
+        val scroll = rememberScrollState()
+        val json = remember { Json { ignoreUnknownKeys = true } }
+        val retrofit = remember {
+            Retrofit.Builder()
+                .baseUrl("https://places.googleapis.com/")
+                .addConverterFactory(ScalarsConverterFactory.create())
+                .build()
+        }
+        val placesApi = remember { retrofit.create(RawPlacesDetailsApi::class.java) }
+        var fetchError by remember { mutableStateOf<String?>(null) }
+
+        val dayOrder = remember {
+            listOf(
+                DayOfWeek.MONDAY,
+                DayOfWeek.TUESDAY,
+                DayOfWeek.WEDNESDAY,
+                DayOfWeek.THURSDAY,
+                DayOfWeek.FRIDAY,
+                DayOfWeek.SATURDAY,
+                DayOfWeek.SUNDAY,
+            )
+        }
+
+        AlertDialog(
+            onDismissRequest = { hoursDialogStore = null },
+            title = { Text("Set hours") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(scroll)) {
+                    Text(
+                        storeForDialog.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    if (!fetchError.isNullOrBlank()) {
+                        Text(
+                            fetchError.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+
+                    dayOrder.forEach { day ->
+                        val key = day.name
+                        val current = hoursDraft[key].orEmpty()
+                        OutlinedTextField(
+                            value = current,
+                            onValueChange = { v ->
+                                hoursDraft = hoursDraft.toMutableMap().apply {
+                                    if (v.isBlank()) remove(key) else put(key, v)
+                                }
+                            },
+                            label = { Text(dayLabelSv(day)) },
+                            placeholder = { Text("09:00-18:00 or Closed") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                fetchError = null
+                                scope.launch {
+                                    try {
+                                        val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
+
+                                        val raw = placesApi.getPlaceDetailsRaw(
+                                            placeId = storeForDialog.id,
+                                            apiKey = apiKey,
+                                            fieldMask = "regularOpeningHours.weekdayDescriptions",
+                                        )
+
+                                        val desc: List<String> = runCatching {
+                                            val root = json.parseToJsonElement(raw).jsonObject
+                                            val arr = root["regularOpeningHours"]
+                                                ?.jsonObject
+                                                ?.get("weekdayDescriptions")
+                                                ?.jsonArray
+                                                .orEmpty()
+
+                                            arr.mapNotNull { el ->
+                                                runCatching { el.jsonPrimitive.content }.getOrNull()
+                                            }
+                                        }.getOrDefault(emptyList())
+
+                                        if (desc.isEmpty()) {
+                                            fetchError = "No opening hours found on Google for this place."
+                                            return@launch
+                                        }
+
+                                        val mapped: Map<String, String> = desc.mapNotNull { line: String ->
+                                            val parts = line.split(":", limit = 2)
+                                            if (parts.size < 2) return@mapNotNull null
+                                            val dayKey = weekdayKeyFromLabel(parts[0].trim()) ?: return@mapNotNull null
+                                            dayKey to parts[1].trim()
+                                        }.toMap()
+
+                                        if (mapped.isEmpty()) {
+                                            fetchError = "Could not parse Google hours."
+                                        } else {
+                                            hoursDraft = hoursDraft.toMutableMap().apply {
+                                                mapped.forEach { (k, v) ->
+                                                    if (v.isBlank()) remove(k) else put(k, v)
+                                                }
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        fetchError = "Fetch failed: ${e.message ?: e.javaClass.simpleName}"
+                                    }
+                                }
+                            },
+                        ) {
+                            Text("Fetch from Google")
+                        }
+
+                        Spacer(Modifier.width(10.dp))
+
+                        TextButton(
+                            onClick = {
+                                val url = "https://www.google.com/maps/search/?api=1&query_place_id=${storeForDialog.id}"
+                                runCatching {
+                                    AppGraph.appContext.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                            },
+                        ) {
+                            Text("Open Google profile")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            AppGraph.settings.setStoreBusinessHours(
+                                storeForDialog.id,
+                                BusinessHours(byDay = hoursDraft.filterValues { it.isNotBlank() }),
+                            )
+                            hoursDialogStore = null
+                        }
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                AppGraph.settings.clearStoreBusinessHours(storeForDialog.id)
+                                hoursDraft = emptyMap()
+                                hoursDialogStore = null
+                            }
+                        },
+                    ) { Text("Clear") }
+
+                    TextButton(onClick = { hoursDialogStore = null }) { Text("Cancel") }
+                }
+            },
+        )
+    }
+}
+
+private fun dayLabelSv(day: DayOfWeek): String {
+    return when (day) {
+        DayOfWeek.MONDAY -> "Måndag"
+        DayOfWeek.TUESDAY -> "Tisdag"
+        DayOfWeek.WEDNESDAY -> "Onsdag"
+        DayOfWeek.THURSDAY -> "Torsdag"
+        DayOfWeek.FRIDAY -> "Fredag"
+        DayOfWeek.SATURDAY -> "Lördag"
+        DayOfWeek.SUNDAY -> "Söndag"
+    }
+}
+
+private fun defaultIconForStoreName(name: String): ImageVector {
+    val n = name.lowercase()
+    return if (
+        n.contains("second hand") ||
+        n.contains("secondhand") ||
+        n.contains("loppis") ||
+        n.contains("loopis") ||
+        n.contains("thrift")
+    ) {
+        Icons.Filled.Recycling
+    } else {
+        Icons.Filled.Storefront
+    }
+}
+
+private interface RawPlacesDetailsApi {
+    @retrofit2.http.GET("v1/places/{placeId}")
+    suspend fun getPlaceDetailsRaw(
+        @retrofit2.http.Path("placeId") placeId: String,
+        @retrofit2.http.Header("X-Goog-Api-Key") apiKey: String,
+        @retrofit2.http.Header("X-Goog-FieldMask") fieldMask: String,
+    ): String
+}
+
+private fun weekdayKeyFromLabel(label: String): String? {
+    val d = label.trim().lowercase()
+    return when {
+        d.startsWith("mon") || d.startsWith("mån") || d.startsWith("mand") -> DayOfWeek.MONDAY.name
+        d.startsWith("tue") || d.startsWith("tis") -> DayOfWeek.TUESDAY.name
+        d.startsWith("wed") || d.startsWith("ons") -> DayOfWeek.WEDNESDAY.name
+        d.startsWith("thu") || d.startsWith("tor") -> DayOfWeek.THURSDAY.name
+        d.startsWith("fri") || d.startsWith("fre") -> DayOfWeek.FRIDAY.name
+        d.startsWith("sat") || d.startsWith("lör") || d.startsWith("lor") -> DayOfWeek.SATURDAY.name
+        d.startsWith("sun") || d.startsWith("sön") || d.startsWith("son") -> DayOfWeek.SUNDAY.name
+        else -> null
     }
 }
 
@@ -883,8 +1276,10 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
 private fun StoreThumbnailButton(
     name: String,
     imageUri: String?,
+    defaultIcon: ImageVector,
     distanceMeters: Double,
     enabled: Boolean,
+    onSet: () -> Unit,
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(18.dp)
@@ -917,11 +1312,33 @@ private fun StoreThumbnailButton(
                     )
                 } else {
                     Icon(
-                        imageVector = Icons.Filled.Storefront,
+                        imageVector = defaultIcon,
                         contentDescription = null,
                         modifier = Modifier.size(48.dp),
                         tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
                     )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
+                ) {
+                    IconButton(
+                        onClick = onSet,
+                        enabled = enabled,
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "Set",
+                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        )
+                    }
                 }
 
                 Box(

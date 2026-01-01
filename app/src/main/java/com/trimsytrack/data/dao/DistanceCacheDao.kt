@@ -30,4 +30,13 @@ interface DistanceCacheDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: DistanceCacheEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entities: List<DistanceCacheEntity>): List<Long>
+
+    @Query("SELECT * FROM distance_cache")
+    suspend fun listAll(): List<DistanceCacheEntity>
+
+    @Query("SELECT COUNT(*) FROM distance_cache")
+    suspend fun countAll(): Int
 }

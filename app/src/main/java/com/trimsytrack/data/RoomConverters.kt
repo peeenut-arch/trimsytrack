@@ -2,6 +2,7 @@ package com.trimsytrack.data
 
 import androidx.room.TypeConverter
 import com.trimsytrack.data.entities.PromptStatus
+import com.trimsytrack.data.entities.SyncStatus
 import java.time.Instant
 import java.time.LocalDate
 
@@ -23,4 +24,10 @@ class RoomConverters {
 
     @TypeConverter
     fun stringToPromptStatus(value: String?): PromptStatus? = value?.let { PromptStatus.valueOf(it) }
+
+    @TypeConverter
+    fun syncStatusToString(value: SyncStatus?): String? = value?.name
+
+    @TypeConverter
+    fun stringToSyncStatus(value: String?): SyncStatus? = value?.let { SyncStatus.valueOf(it) }
 }

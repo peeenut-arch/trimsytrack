@@ -58,6 +58,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.ActiveHoursPreset
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.DwellPreset
 import com.trimsytrack.data.IndustryProfile
 import com.trimsytrack.data.ProfileCategoryGroup
@@ -875,6 +876,23 @@ fun OnboardingScreen(
                                             AppGraph.storeRepository.ensureRegionLoaded(regionCode)
                                             AppGraph.settings.setTrackingEnabled(true)
                                             AppGraph.geofenceSyncManager.scheduleSync("onboarding_sync")
+
+                                            // Save the actual Google driving distance once: Home -> Store.
+                                            syncStatus = "Beräknar avstånd (hem → butik)…"
+                                            withContext(Dispatchers.IO) {
+                                                stores.forEach { s ->
+                                                    runCatching {
+                                                        AppGraph.distanceRepository.getOrComputeDrivingDistanceMeters(
+                                                            startLat = lat,
+                                                            startLng = lng,
+                                                            destLat = s.lat,
+                                                            destLng = s.lng,
+                                                            startLocationId = BUSINESS_HOME_LOCATION_ID,
+                                                            endLocationId = s.id,
+                                                        )
+                                                    }
+                                                }
+                                            }
 
                                             AppGraph.settings.setOnboardingCompleted(true)
                                             syncStatus = "Klart!"

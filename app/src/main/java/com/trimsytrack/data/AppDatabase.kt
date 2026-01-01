@@ -8,12 +8,14 @@ import com.trimsytrack.data.dao.DistanceCacheDao
 import com.trimsytrack.data.dao.PromptDao
 import com.trimsytrack.data.dao.RunDao
 import com.trimsytrack.data.dao.StoreDao
+import com.trimsytrack.data.dao.SyncOutboxDao
 import com.trimsytrack.data.dao.TripDao
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.DistanceCacheEntity
 import com.trimsytrack.data.entities.PromptEventEntity
 import com.trimsytrack.data.entities.RunEntity
 import com.trimsytrack.data.entities.StoreEntity
+import com.trimsytrack.data.entities.SyncOutboxEntity
 import com.trimsytrack.data.entities.TripEntity
 
 @Database(
@@ -24,8 +26,9 @@ import com.trimsytrack.data.entities.TripEntity
         AttachmentEntity::class,
         DistanceCacheEntity::class,
         RunEntity::class,
+        SyncOutboxEntity::class,
     ],
-    version = 3,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(RoomConverters::class)
@@ -36,4 +39,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun attachmentDao(): AttachmentDao
     abstract fun distanceCacheDao(): DistanceCacheDao
     abstract fun runDao(): RunDao
+    abstract fun syncOutboxDao(): SyncOutboxDao
 }

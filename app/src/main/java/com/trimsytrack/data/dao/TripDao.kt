@@ -9,10 +9,18 @@ import com.trimsytrack.data.entities.TripEntity
 import kotlinx.coroutines.flow.Flow
 import java.time.LocalDate
 
+data class StoreVisitCount(
+    val storeId: String,
+    val count: Int,
+)
+
 @Dao
 interface TripDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: TripEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(entities: List<TripEntity>): List<Long>
 
     @Update
     suspend fun update(entity: TripEntity)
@@ -31,6 +39,15 @@ interface TripDao {
 
     @Query("SELECT * FROM trips WHERE day = :day ORDER BY createdAt DESC LIMIT 1")
     suspend fun getLatestForDay(day: LocalDate): TripEntity?
+
+    @Query("SELECT * FROM trips")
+    suspend fun listAll(): List<TripEntity>
+
+    @Query("SELECT COUNT(*) FROM trips")
+    suspend fun countAll(): Int
+
+    @Query("SELECT storeId as storeId, COUNT(*) as count FROM trips GROUP BY storeId")
+    suspend fun getStoreVisitCounts(): List<StoreVisitCount>
 
     @Query("DELETE FROM trips WHERE id = :id")
     suspend fun deleteById(id: Long)

@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -33,6 +34,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -41,6 +44,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Image
@@ -65,10 +69,16 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.RegionPayload
 import com.trimsytrack.data.StorePayload
+import com.trimsytrack.data.driverdata.DriverDataRepository
+import com.trimsytrack.data.sync.BackendSyncMode
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.export.KorjournalExporter
 import com.trimsytrack.ui.components.HomeTileIds
@@ -76,6 +86,10 @@ import java.io.File
 import java.time.LocalDate
 import kotlin.math.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -95,10 +109,18 @@ import retrofit2.converter.scalars.ScalarsConverterFactory
 fun SettingsScreen(
     onBack: () -> Unit,
     onOpenOnboarding: () -> Unit,
+    onOpenAuth: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    val driverDataRepository = remember {
+        DriverDataRepository(
+            context = context.applicationContext,
+            settings = AppGraph.settings,
+        )
+    }
 
     val showSyncDialog = rememberSaveable { mutableStateOf(false) }
 
@@ -109,7 +131,6 @@ fun SettingsScreen(
     val radius by AppGraph.settings.radiusMeters.collectAsState(initial = 120)
     val limit by AppGraph.settings.dailyPromptLimit.collectAsState(initial = 20)
     val suppression by AppGraph.settings.suppressionMinutes.collectAsState(initial = 240)
-    val manualTripStoreSortMode by AppGraph.settings.manualTripStoreSortMode.collectAsState(initial = "NAME")
 
     val activeStartMinutes by AppGraph.settings.activeStartMinutes.collectAsState(initial = 7 * 60)
     val activeEndMinutes by AppGraph.settings.activeEndMinutes.collectAsState(initial = 18 * 60)
@@ -119,6 +140,7 @@ fun SettingsScreen(
     val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
     val ignoredStoreIds by AppGraph.settings.ignoredStoreIds.collectAsState(initial = emptySet())
     val expandedStoreCities by AppGraph.settings.expandedStoreCities.collectAsState(initial = emptySet())
+    val storeBusinessHours by AppGraph.settings.storeBusinessHours.collectAsState(initial = emptyMap())
 
     val vehicleRegNumber by AppGraph.settings.vehicleRegNumber.collectAsState(initial = "")
     val driverName by AppGraph.settings.driverName.collectAsState(initial = "")
@@ -127,6 +149,38 @@ fun SettingsScreen(
     val odometerYearStartKm by AppGraph.settings.odometerYearStartKm.collectAsState(initial = "")
     val odometerYearEndKm by AppGraph.settings.odometerYearEndKm.collectAsState(initial = "")
 
+    val backendBaseUrl by AppGraph.settings.backendBaseUrl.collectAsState(initial = "http://79.76.38.94/")
+    val backendDriverId by AppGraph.settings.backendDriverId.collectAsState(initial = "")
+
+    val backendSyncMode by AppGraph.settings.backendSyncMode.collectAsState(initial = BackendSyncMode.INSTANT)
+    val backendDailySyncMinutes by AppGraph.settings.backendDailySyncMinutes.collectAsState(initial = 3 * 60)
+    val backendLastSyncAtMillis by AppGraph.settings.backendLastSyncAtMillis.collectAsState(initial = null)
+    val backendLastSyncResult by AppGraph.settings.backendLastSyncResult.collectAsState(initial = "")
+
+    var backendDailySyncText by rememberSaveable { mutableStateOf(minutesToTime(backendDailySyncMinutes)) }
+    var backendDailySyncError by remember { mutableStateOf<String?>(null) }
+
+    val workManager = remember { WorkManager.getInstance(context) }
+    val syncWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("backend-sync") }
+        .collectAsState(initial = emptyList())
+
+    val hourlyWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("backend-sync-hourly") }
+        .collectAsState(initial = emptyList())
+
+    val dailyWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("backend-sync-daily") }
+        .collectAsState(initial = emptyList())
+
+    fun deriveState(infos: List<WorkInfo>): WorkInfo.State? = infos.firstOrNull()?.state
+    val syncState = deriveState(syncWorkInfos)
+    val hourlyState = deriveState(hourlyWorkInfos)
+    val dailyState = deriveState(dailyWorkInfos)
+    val anyRunning = listOf(syncState, hourlyState, dailyState).any { it == WorkInfo.State.RUNNING }
+    val anyQueued = listOf(syncState, hourlyState, dailyState).any { it == WorkInfo.State.ENQUEUED }
+
+    LaunchedEffect(backendDailySyncMinutes) {
+        backendDailySyncText = minutesToTime(backendDailySyncMinutes)
+    }
+
     val allStores by AppGraph.storeRepository.observeAllStores().collectAsState(initial = emptyList())
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
@@ -134,6 +188,8 @@ fun SettingsScreen(
 
     var homeTilesExpanded by rememberSaveable { mutableStateOf(false) }
     var automationExpanded by rememberSaveable { mutableStateOf(false) }
+    var syncedStoresExpanded by rememberSaveable { mutableStateOf(false) }
+    var resehanterareExpanded by rememberSaveable { mutableStateOf(false) }
 
     var activeStartText by rememberSaveable { mutableStateOf(minutesToTime(activeStartMinutes)) }
     var activeEndText by rememberSaveable { mutableStateOf(minutesToTime(activeEndMinutes)) }
@@ -160,6 +216,38 @@ fun SettingsScreen(
 
     val refreshTick = remember { mutableIntStateOf(0) }
     val permissionHint = remember { mutableStateOf<String?>(null) }
+
+    data class StoredDataCounts(
+        val trips: Int = 0,
+        val stores: Int = 0,
+        val promptEvents: Int = 0,
+        val runs: Int = 0,
+        val distanceCache: Int = 0,
+    )
+
+    var storedDataCounts by remember { mutableStateOf(StoredDataCounts()) }
+    var storedDataError by remember { mutableStateOf<String?>(null) }
+
+    var driverDataBusy by remember { mutableStateOf(false) }
+    var driverDataStatus by remember { mutableStateOf<String?>(null) }
+
+    suspend fun loadStoredDataCounts(): StoredDataCounts = withContext(Dispatchers.IO) {
+        StoredDataCounts(
+            trips = AppGraph.db.tripDao().countAll(),
+            stores = AppGraph.db.storeDao().countAll(),
+            promptEvents = AppGraph.db.promptDao().countAll(),
+            runs = AppGraph.db.runDao().countAll(),
+            distanceCache = AppGraph.db.distanceCacheDao().countAll(),
+        )
+    }
+
+    LaunchedEffect(Unit) {
+        storedDataError = null
+        runCatching {
+            loadStoredDataCounts()
+        }.onSuccess { storedDataCounts = it }
+            .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -309,7 +397,14 @@ fun SettingsScreen(
             Column {
                 TopAppBar(
                     title = { Text("Settings") },
-                    navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                            )
+                        }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.background,
                         titleContentColor = MaterialTheme.colorScheme.onBackground,
@@ -391,6 +486,352 @@ fun SettingsScreen(
                 }
 
                 item {
+                    SettingsSectionCard(title = "Account") {
+                        ListItem(
+                            headlineContent = { Text("Sign in") },
+                            supportingContent = { Text("Google or email/password") },
+                            trailingContent = {
+                                Button(
+                                    onClick = onOpenAuth,
+                                    contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
+                                ) {
+                                    Icon(Icons.Filled.KeyboardArrowRight, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Open")
+                                }
+                            },
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Stored data") {
+                        Text(
+                            "Saved locally on this device (database + settings).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+
+                        if (!storedDataError.isNullOrBlank()) {
+                            Text(
+                                "Could not load counts: ${storedDataError}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                            )
+                            Spacer(Modifier.height(10.dp))
+                        }
+
+                        ListItem(
+                            headlineContent = { Text("Trips") },
+                            supportingContent = { Text("Includes start GPS + destination store + saved distance") },
+                            trailingContent = { Text(storedDataCounts.trips.toString()) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Stores") },
+                            supportingContent = { Text("Saved places with name + lat/lng") },
+                            trailingContent = { Text(storedDataCounts.stores.toString()) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Prompts") },
+                            supportingContent = { Text("Geofence prompt history (when it asked)") },
+                            trailingContent = { Text(storedDataCounts.promptEvents.toString()) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Distance cache") },
+                            supportingContent = { Text("Cached route distances (reduces repeated lookups)") },
+                            trailingContent = { Text(storedDataCounts.distanceCache.toString()) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Runs") },
+                            supportingContent = { Text("Saved run groupings") },
+                            trailingContent = { Text(storedDataCounts.runs.toString()) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Store photos") },
+                            supportingContent = { Text("Custom images you picked") },
+                            trailingContent = { Text(storeImages.size.toString()) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Store hours") },
+                            supportingContent = { Text("Opening hours you saved") },
+                            trailingContent = { Text(storeBusinessHours.size.toString()) },
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "DriverData (backend sync)") {
+                        Text(
+                            "Upload/download a full snapshot (DB + settings). Download replaces local data.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+
+                        OutlinedTextField(
+                            value = backendBaseUrl,
+                            onValueChange = { v ->
+                                scope.launch {
+                                    AppGraph.settings.setBackendBaseUrl(v)
+                                }
+                            },
+                            label = { Text("Backend base URL") },
+                            singleLine = true,
+                            enabled = !driverDataBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+
+                        OutlinedTextField(
+                            value = backendDriverId,
+                            onValueChange = { v ->
+                                scope.launch {
+                                    AppGraph.settings.setBackendDriverId(v)
+                                }
+                            },
+                            label = { Text("Driver ID") },
+                            singleLine = true,
+                            enabled = !driverDataBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+
+                        var syncModeExpanded by remember { mutableStateOf(false) }
+                        val syncModeLabel = when (backendSyncMode) {
+                            BackendSyncMode.INSTANT -> "Sync instantly"
+                            BackendSyncMode.HOURLY -> "Sync every hour"
+                            BackendSyncMode.DAILY_AT_TIME -> "Sync every day (set time)"
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            ListItem(
+                                headlineContent = { Text("Sync schedule") },
+                                supportingContent = { Text(syncModeLabel) },
+                                trailingContent = {
+                                    Icon(
+                                        if (syncModeExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                        contentDescription = null,
+                                    )
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !driverDataBusy) { syncModeExpanded = true },
+                            )
+
+                            DropdownMenu(
+                                expanded = syncModeExpanded,
+                                onDismissRequest = { syncModeExpanded = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Sync instantly") },
+                                    onClick = {
+                                        syncModeExpanded = false
+                                        scope.launch {
+                                            AppGraph.settings.setBackendSyncMode(BackendSyncMode.INSTANT)
+                                            AppGraph.backendSyncManager.applySchedule(
+                                                BackendSyncMode.INSTANT,
+                                                backendDailySyncMinutes,
+                                            )
+                                        }
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Sync every hour") },
+                                    onClick = {
+                                        syncModeExpanded = false
+                                        scope.launch {
+                                            AppGraph.settings.setBackendSyncMode(BackendSyncMode.HOURLY)
+                                            AppGraph.backendSyncManager.applySchedule(
+                                                BackendSyncMode.HOURLY,
+                                                backendDailySyncMinutes,
+                                            )
+                                        }
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Sync every day (set time)") },
+                                    onClick = {
+                                        syncModeExpanded = false
+                                        scope.launch {
+                                            AppGraph.settings.setBackendSyncMode(BackendSyncMode.DAILY_AT_TIME)
+                                            AppGraph.backendSyncManager.applySchedule(
+                                                BackendSyncMode.DAILY_AT_TIME,
+                                                backendDailySyncMinutes,
+                                            )
+                                        }
+                                    },
+                                )
+                            }
+                        }
+
+                        if (backendSyncMode == BackendSyncMode.DAILY_AT_TIME) {
+                            OutlinedTextField(
+                                value = backendDailySyncText,
+                                onValueChange = { v ->
+                                    backendDailySyncText = v
+                                    val parsed = parseTimeToMinutes(v)
+                                    if (parsed == null) {
+                                        backendDailySyncError = "Use HH:MM (00:00-23:59)"
+                                    } else {
+                                        backendDailySyncError = null
+                                        scope.launch {
+                                            AppGraph.settings.setBackendDailySyncMinutes(parsed)
+                                            AppGraph.backendSyncManager.applySchedule(
+                                                BackendSyncMode.DAILY_AT_TIME,
+                                                parsed,
+                                            )
+                                        }
+                                    }
+                                },
+                                label = { Text("Daily sync time (HH:MM)") },
+                                singleLine = true,
+                                isError = !backendDailySyncError.isNullOrBlank(),
+                                enabled = !driverDataBusy,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            )
+                            if (!backendDailySyncError.isNullOrBlank()) {
+                                Text(
+                                    backendDailySyncError ?: "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                                )
+                            }
+                        }
+
+                        ListItem(
+                            headlineContent = { Text("Backend sync") },
+                            supportingContent = {
+                                val status = when {
+                                    anyRunning -> "Syncing…"
+                                    anyQueued -> "Queued / scheduled"
+                                    else -> "Idle"
+                                }
+
+                                val last = backendLastSyncAtMillis
+                                val lastText = if (last != null) {
+                                    val dt = java.time.Instant.ofEpochMilli(last)
+                                        .atZone(java.time.ZoneId.systemDefault())
+                                        .toLocalDateTime()
+                                    "Last: %02d:%02d (%s)".format(dt.hour, dt.minute, backendLastSyncResult.ifBlank { "unknown" })
+                                } else {
+                                    "Last: never"
+                                }
+
+                                Text("$status · $lastText")
+                            },
+                            trailingContent = {
+                                OutlinedButton(
+                                    onClick = { AppGraph.backendSyncManager.scheduleNow("user") },
+                                    enabled = !anyRunning,
+                                ) { Text("Sync now") }
+                            },
+                        )
+
+                        if (anyRunning) {
+                            LinearProgressIndicator(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                            )
+                        }
+
+                        if (!driverDataStatus.isNullOrBlank()) {
+                            Text(
+                                driverDataStatus ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        driverDataBusy = true
+                                        driverDataStatus = "Uploading (backend-authoritative)…"
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                driverDataRepository.uploadSnapshot()
+                                            }
+                                        }.onSuccess {
+                                            storedDataError = null
+                                            runCatching { loadStoredDataCounts() }
+                                                .onSuccess { storedDataCounts = it }
+                                                .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+                                            driverDataStatus = "Upload complete (local overwritten by backend)."
+                                        }.onFailure {
+                                            driverDataStatus = "Upload failed: ${it.message ?: it.javaClass.simpleName}"
+                                        }
+                                        driverDataBusy = false
+                                    }
+                                },
+                                enabled = !driverDataBusy,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Upload")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        driverDataBusy = true
+                                        driverDataStatus = "Downloading + restoring…"
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                driverDataRepository.downloadAndRestore()
+                                            }
+                                        }.onSuccess {
+                                            storedDataError = null
+                                            runCatching { loadStoredDataCounts() }
+                                                .onSuccess { storedDataCounts = it }
+                                                .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+                                            driverDataStatus = "Restore complete."
+                                        }.onFailure {
+                                            driverDataStatus = "Restore failed: ${it.message ?: it.javaClass.simpleName}"
+                                        }
+                                        driverDataBusy = false
+                                    }
+                                },
+                                enabled = !driverDataBusy,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Download & restore")
+                            }
+                        }
+                    }
+                }
+
+                item {
                     SettingsSectionCard(title = "Home tiles") {
                         ListItem(
                             headlineContent = { Text("Home tiles") },
@@ -434,140 +875,283 @@ fun SettingsScreen(
 
                 item {
                     SettingsSectionCard(title = "Synced stores") {
-                        if (allStores.isEmpty()) {
-                            Text(
-                                "No stores synced yet.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                            )
-                        } else {
-                            val hiddenSyncedIds = remember(allStores, ignoredStoreIds) {
-                                val storeIds = allStores.asSequence().map { it.id }.toSet()
-                                ignoredStoreIds.intersect(storeIds)
-                            }
+                        ListItem(
+                            headlineContent = { Text("Synced stores") },
+                            supportingContent = { Text(if (syncedStoresExpanded) "Expanded" else "Collapsed") },
+                            trailingContent = {
+                                Icon(
+                                    if (syncedStoresExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { syncedStoresExpanded = !syncedStoresExpanded },
+                        )
 
-                            if (hiddenSyncedIds.isNotEmpty()) {
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            val ids = hiddenSyncedIds.toList()
-                                            AppGraph.db.storeDao().deleteByIds(ids)
-                                            ids.forEach { id ->
-                                                AppGraph.settings.setStoreIgnored(id, false)
-                                                AppGraph.settings.clearStoreImage(id)
-                                                deleteStorePhotoBestEffort(context, id)
+                        if (syncedStoresExpanded) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                            if (allStores.isEmpty()) {
+                                Text(
+                                    "No stores synced yet.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                )
+                            } else {
+                                val hiddenSyncedIds = remember(allStores, ignoredStoreIds) {
+                                    val storeIds = allStores.asSequence().map { it.id }.toSet()
+                                    ignoredStoreIds.intersect(storeIds)
+                                }
+
+                                if (hiddenSyncedIds.isNotEmpty()) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            scope.launch {
+                                                val ids = hiddenSyncedIds.toList()
+                                                AppGraph.db.storeDao().deleteByIds(ids)
+                                                ids.forEach { id ->
+                                                    AppGraph.settings.setStoreIgnored(id, false)
+                                                    AppGraph.settings.clearStoreImage(id)
+                                                    deleteStorePhotoBestEffort(context, id)
+                                                }
+                                                snackbarHostState.showSnackbar(
+                                                    message = "Removed ${ids.size} hidden stores.",
+                                                    withDismissAction = true,
+                                                )
                                             }
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                                    ) {
+                                        Text("Remove hidden stores (${hiddenSyncedIds.size})")
+                                    }
+                                    Text(
+                                        "They are deleted from your synced list, but can come back next sync.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                }
+
+                                val visibleStores = remember(allStores, ignoredStoreIds) {
+                                    allStores.filterNot { ignoredStoreIds.contains(it.id) }
+                                }
+
+                                StoresByCityList(
+                                    stores = visibleStores,
+                                    storeImages = storeImages,
+                                    expandedCities = expandedStoreCities,
+                                    userLocation = userLocation,
+                                    onToggleCityExpanded = { city, expanded ->
+                                        scope.launch { AppGraph.settings.setStoreCityExpanded(city, expanded) }
+                                    },
+                                    onToggleFavorite = { store ->
+                                        scope.launch {
+                                            AppGraph.db.storeDao().setFavorite(store.id, !store.isFavorite)
+                                        }
+                                    },
+                                    onRemoveStore = { store ->
+                                        scope.launch {
+                                            AppGraph.db.storeDao().deleteByIds(listOf(store.id))
+                                            AppGraph.settings.setStoreIgnored(store.id, false)
+                                            AppGraph.settings.clearStoreImage(store.id)
+                                            deleteStorePhotoBestEffort(context, store.id)
                                             snackbarHostState.showSnackbar(
-                                                message = "Removed ${ids.size} hidden stores.",
+                                                message = "Removed: ${store.name}",
                                                 withDismissAction = true,
                                             )
                                         }
                                     },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                                ) {
-                                    Text("Remove hidden stores (${hiddenSyncedIds.size})")
-                                }
-                                Text(
-                                    "They are deleted from your synced list, but can come back next sync.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
                                 )
-                                Spacer(Modifier.height(6.dp))
                             }
-
-                            StoresByCityList(
-                                stores = allStores,
-                                storeImages = storeImages,
-                                ignoredStoreIds = ignoredStoreIds,
-                                expandedCities = expandedStoreCities,
-                                userLocation = userLocation,
-                                onToggleCityExpanded = { city, expanded ->
-                                    scope.launch { AppGraph.settings.setStoreCityExpanded(city, expanded) }
-                                },
-                                onToggleFavorite = { store ->
-                                    scope.launch {
-                                        AppGraph.db.storeDao().setFavorite(store.id, !store.isFavorite)
-                                    }
-                                },
-                                onToggleIgnored = { store, ignored ->
-                                    scope.launch { AppGraph.settings.setStoreIgnored(store.id, ignored) }
-                                },
-                                onRemoveHiddenStore = { store ->
-                                    scope.launch {
-                                        AppGraph.db.storeDao().deleteByIds(listOf(store.id))
-                                        AppGraph.settings.setStoreIgnored(store.id, false)
-                                        AppGraph.settings.clearStoreImage(store.id)
-                                        deleteStorePhotoBestEffort(context, store.id)
-                                        snackbarHostState.showSnackbar(
-                                            message = "Removed: ${store.name}",
-                                            withDismissAction = true,
-                                        )
-                                    }
-                                },
-                            )
                         }
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "Manual trips") {
-                        Text(
-                            "Store list sort",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                        )
-                        Row(
+                    SettingsSectionCard(title = "Resehanterare") {
+                        ListItem(
+                            headlineContent = { Text("Resehanterare") },
+                            supportingContent = { Text(if (resehanterareExpanded) "Expanded" else "Collapsed") },
+                            trailingContent = {
+                                Icon(
+                                    if (resehanterareExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = if (resehanterareExpanded) "Collapse" else "Expand",
+                                )
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                        ) {
-                            val isName = manualTripStoreSortMode == "NAME"
-                            val isDistance = manualTripStoreSortMode == "DISTANCE"
-                            val isVisits = manualTripStoreSortMode == "VISITS"
+                                .clickable { resehanterareExpanded = !resehanterareExpanded },
+                        )
 
-                        if (isName) {
-                            Button(
-                                onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("NAME") } },
-                                modifier = Modifier.weight(1f),
-                            ) { Text("A–Z") }
-                        } else {
-                            OutlinedButton(
-                                onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("NAME") } },
-                                modifier = Modifier.weight(1f),
-                            ) { Text("A–Z") }
-                        }
+                        if (resehanterareExpanded) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                        Spacer(Modifier.width(10.dp))
+                            Text(
+                                "Körjournal",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
 
-                        if (isDistance) {
-                            Button(
-                                onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("DISTANCE") } },
-                                modifier = Modifier.weight(1f),
-                            ) { Text("Closest") }
-                        } else {
-                            OutlinedButton(
-                                onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("DISTANCE") } },
-                                modifier = Modifier.weight(1f),
-                            ) { Text("Closest") }
-                        }
+                            OutlinedTextField(
+                                value = journalYear.toString(),
+                                onValueChange = { raw ->
+                                    val parsed = raw.filter { it.isDigit() }.take(4).toIntOrNull()
+                                    if (parsed != null) scope.launch { AppGraph.settings.setJournalYear(parsed) }
+                                },
+                                label = { Text("Year") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                singleLine = true,
+                            )
 
-                        Spacer(Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = vehicleRegNumber,
+                                onValueChange = { scope.launch { AppGraph.settings.setVehicleRegNumber(it) } },
+                                label = { Text("Vehicle registration number") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                singleLine = true,
+                            )
 
-                            if (isVisits) {
-                                Button(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("VISITS") } },
+                            OutlinedTextField(
+                                value = driverName,
+                                onValueChange = { scope.launch { AppGraph.settings.setDriverName(it) } },
+                                label = { Text("Driver name") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                singleLine = true,
+                            )
+
+                            OutlinedTextField(
+                                value = businessHomeAddress,
+                                onValueChange = { scope.launch { AppGraph.settings.setBusinessHomeAddress(it) } },
+                                label = { Text("Business home address") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                singleLine = false,
+                            )
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                            ) {
+                                OutlinedTextField(
+                                    value = odometerYearStartKm,
+                                    onValueChange = { scope.launch { AppGraph.settings.setOdometerYearStartKm(it) } },
+                                    label = { Text("Odometer (year start, km)") },
                                     modifier = Modifier.weight(1f),
-                                ) { Text("Most visited") }
-                            } else {
-                                OutlinedButton(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("VISITS") } },
+                                    singleLine = true,
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                OutlinedTextField(
+                                    value = odometerYearEndKm,
+                                    onValueChange = { scope.launch { AppGraph.settings.setOdometerYearEndKm(it) } },
+                                    label = { Text("Odometer (year end, km)") },
                                     modifier = Modifier.weight(1f),
-                                ) { Text("Most visited") }
+                                    singleLine = true,
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (exporting) return@OutlinedButton
+                                    exporting = true
+                                    exportMessage = null
+                                    scope.launch {
+                                        try {
+                                            val result = KorjournalExporter.exportYearCsv(
+                                                context = context,
+                                                settings = AppGraph.settings,
+                                                trips = AppGraph.tripRepository,
+                                                year = journalYear,
+                                            )
+
+                                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/csv"
+                                                putExtra(Intent.EXTRA_SUBJECT, "Körjournal ${journalYear}")
+                                                putExtra(Intent.EXTRA_STREAM, result.uri)
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(Intent.createChooser(shareIntent, "Share körjournal"))
+                                            exportMessage = "Exported ${result.tripCount} trips: ${result.displayName}"
+                                        } catch (e: Exception) {
+                                            exportMessage = "Export failed: ${e.message ?: e.javaClass.simpleName}"
+                                        } finally {
+                                            exporting = false
+                                        }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                enabled = !exporting,
+                            ) {
+                                Text(if (exporting) "Exporting..." else "Export körjournal (CSV)")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (exporting) return@OutlinedButton
+                                    val defaultName = "korjournal_${journalYear}_${LocalDate.now()}.csv"
+                                    saveKorjournalLauncher.launch(defaultName)
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                enabled = !exporting,
+                            ) {
+                                Text("Spara körjournal som fil (CSV)")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (exporting) return@OutlinedButton
+                                    exporting = true
+                                    exportMessage = null
+                                    scope.launch {
+                                        try {
+                                            val defaultName = "korjournal_${journalYear}_${LocalDate.now()}.csv"
+                                            val result = KorjournalExporter.exportYearCsvToDownloads(
+                                                context = context,
+                                                settings = AppGraph.settings,
+                                                trips = AppGraph.tripRepository,
+                                                year = journalYear,
+                                                displayName = defaultName,
+                                            )
+                                            exportMessage = "Saved ${result.tripCount} trips to Downloads/TrimsyTRACK."
+                                        } catch (e: Exception) {
+                                            exportMessage = "Save to Downloads failed: ${e.message ?: e.javaClass.simpleName}"
+                                        } finally {
+                                            exporting = false
+                                        }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                enabled = !exporting,
+                            ) {
+                                Text("Spara i Hämtade filer (Download)")
+                            }
+
+                            if (exportMessage != null) {
+                                Text(
+                                    exportMessage ?: "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
                             }
                         }
                     }
@@ -778,9 +1362,11 @@ fun SettingsScreen(
             if (selectedTab == 2) {
                 item {
                     SettingsSectionCard(title = "Saved places") {
-                        if (allStores.isEmpty()) {
+                        val savedPlaces = remember(allStores) { allStores.filter { it.isFavorite } }
+
+                        if (savedPlaces.isEmpty()) {
                             Text(
-                                "No places saved yet.",
+                                "No saved places yet. Tap ⭐ on a synced store to save it here.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -802,8 +1388,8 @@ fun SettingsScreen(
                                     onCheckedChange = { showHiddenPlaces = it },
                                 )
                             }
-                            SavedPlacesByCityList(
-                                stores = allStores,
+                            SavedPlacesByCategoryList(
+                                stores = savedPlaces,
                                 userLocation = userLocation,
                                 ignoredStoreIds = ignoredStoreIds,
                                 showHidden = showHiddenPlaces,
@@ -825,168 +1411,6 @@ fun SettingsScreen(
                                 },
                             )
                         }
-                    }
-                }
-            }
-
-            if (selectedTab == 0) {
-                item {
-                    SettingsSectionCard(title = "Körjournal") {
-                    OutlinedTextField(
-                        value = journalYear.toString(),
-                        onValueChange = { raw ->
-                            val parsed = raw.filter { it.isDigit() }.take(4).toIntOrNull()
-                            if (parsed != null) scope.launch { AppGraph.settings.setJournalYear(parsed) }
-                        },
-                        label = { Text("Year") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        singleLine = true,
-                    )
-
-                    OutlinedTextField(
-                        value = vehicleRegNumber,
-                        onValueChange = { scope.launch { AppGraph.settings.setVehicleRegNumber(it) } },
-                        label = { Text("Vehicle registration number") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        singleLine = true,
-                    )
-
-                    OutlinedTextField(
-                        value = driverName,
-                        onValueChange = { scope.launch { AppGraph.settings.setDriverName(it) } },
-                        label = { Text("Driver name") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        singleLine = true,
-                    )
-
-                    OutlinedTextField(
-                        value = businessHomeAddress,
-                        onValueChange = { scope.launch { AppGraph.settings.setBusinessHomeAddress(it) } },
-                        label = { Text("Business home address") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        singleLine = false,
-                    )
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                    ) {
-                        OutlinedTextField(
-                            value = odometerYearStartKm,
-                            onValueChange = { scope.launch { AppGraph.settings.setOdometerYearStartKm(it) } },
-                            label = { Text("Odometer (year start, km)") },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        OutlinedTextField(
-                            value = odometerYearEndKm,
-                            onValueChange = { scope.launch { AppGraph.settings.setOdometerYearEndKm(it) } },
-                            label = { Text("Odometer (year end, km)") },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                        )
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            if (exporting) return@OutlinedButton
-                            exporting = true
-                            exportMessage = null
-                            scope.launch {
-                                try {
-                                    val result = KorjournalExporter.exportYearCsv(
-                                        context = context,
-                                        settings = AppGraph.settings,
-                                        trips = AppGraph.tripRepository,
-                                        year = journalYear,
-                                    )
-
-                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/csv"
-                                        putExtra(Intent.EXTRA_SUBJECT, "Körjournal ${journalYear}")
-                                        putExtra(Intent.EXTRA_STREAM, result.uri)
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    }
-                                    context.startActivity(Intent.createChooser(shareIntent, "Share körjournal"))
-                                    exportMessage = "Exported ${result.tripCount} trips: ${result.displayName}"
-                                } catch (e: Exception) {
-                                    exportMessage = "Export failed: ${e.message ?: e.javaClass.simpleName}"
-                                } finally {
-                                    exporting = false
-                                }
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        enabled = !exporting,
-                    ) {
-                        Text(if (exporting) "Exporting..." else "Export körjournal (CSV)")
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            if (exporting) return@OutlinedButton
-                            val defaultName = "korjournal_${journalYear}_${LocalDate.now()}.csv"
-                            saveKorjournalLauncher.launch(defaultName)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        enabled = !exporting,
-                    ) {
-                        Text("Spara körjournal som fil (CSV)")
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            if (exporting) return@OutlinedButton
-                            exporting = true
-                            exportMessage = null
-                            scope.launch {
-                                try {
-                                    val defaultName = "korjournal_${journalYear}_${LocalDate.now()}.csv"
-                                    val result = KorjournalExporter.exportYearCsvToDownloads(
-                                        context = context,
-                                        settings = AppGraph.settings,
-                                        trips = AppGraph.tripRepository,
-                                        year = journalYear,
-                                        displayName = defaultName,
-                                    )
-                                    exportMessage = "Saved ${result.tripCount} trips to Downloads/TrimsyTRACK."
-                                } catch (e: Exception) {
-                                    exportMessage = "Save to Downloads failed: ${e.message ?: e.javaClass.simpleName}"
-                                } finally {
-                                    exporting = false
-                                }
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        enabled = !exporting,
-                    ) {
-                        Text("Spara i Hämtade filer (Download)")
-                    }
-
-                    if (exportMessage != null) {
-                        Text(
-                            exportMessage ?: "",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        )
-                    }
                     }
                 }
             }
@@ -1059,10 +1483,12 @@ private fun SettingsIconActionButton(
     contentDescription: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    colors: IconButtonColors = IconButtonDefaults.filledTonalIconButtonColors(),
 ) {
     FilledTonalIconButton(
         onClick = onClick,
         enabled = enabled,
+        colors = colors,
     ) {
         Icon(icon, contentDescription = contentDescription)
     }
@@ -1420,6 +1846,26 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                     AppGraph.storeRepository.ensureRegionLoaded(regionCode)
                     AppGraph.geofenceSyncManager.scheduleSync("manual_sync")
 
+                    // Save the actual Google driving distance once: Home -> Store.
+                    val homeLat = AppGraph.settings.businessHomeLat.first()
+                    val homeLng = AppGraph.settings.businessHomeLng.first()
+                    if (homeLat != null && homeLng != null) {
+                        withContext(Dispatchers.IO) {
+                            stores.forEach { s ->
+                                runCatching {
+                                    AppGraph.distanceRepository.getOrComputeDrivingDistanceMeters(
+                                        startLat = homeLat,
+                                        startLng = homeLng,
+                                        destLat = s.lat,
+                                        destLng = s.lng,
+                                        startLocationId = BUSINESS_HOME_LOCATION_ID,
+                                        endLocationId = s.id,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     onDismiss()
                 }
             }, enabled = selected.isNotEmpty()) {
@@ -1453,13 +1899,11 @@ private interface RawPlacesApi {
 private fun StoresByCityList(
     stores: List<StoreEntity>,
     storeImages: Map<String, String>,
-    ignoredStoreIds: Set<String>,
     expandedCities: Set<String>,
     userLocation: Pair<Double, Double>?,
     onToggleCityExpanded: (String, Boolean) -> Unit,
     onToggleFavorite: (StoreEntity) -> Unit,
-    onToggleIgnored: (StoreEntity, Boolean) -> Unit,
-    onRemoveHiddenStore: (StoreEntity) -> Unit,
+    onRemoveStore: (StoreEntity) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1547,14 +1991,12 @@ private fun StoresByCityList(
 
                 items(sortedStores, key = { it.id }) { store ->
                     val hasPhoto = storeImages[store.id]?.isNotBlank() == true
-                    val isIgnored = ignoredStoreIds.contains(store.id)
 
                     ListItem(
                         headlineContent = { Text(store.name) },
                         supportingContent = {
                             val bits = buildList {
                                 if (store.isFavorite) add("Favorit")
-                                if (isIgnored) add("Ignorerad")
                                 if (hasPhoto) add("Bild")
                             }
                             if (bits.isNotEmpty()) {
@@ -1586,22 +2028,19 @@ private fun StoresByCityList(
                                         },
                                     )
                                 }
-                                if (isIgnored) {
-                                    SettingsIconActionButton(
-                                        icon = Icons.Filled.Delete,
-                                        contentDescription = "Remove store",
-                                        onClick = { onRemoveHiddenStore(store) },
-                                    )
-                                }
                                 SettingsIconActionButton(
                                     icon = if (store.isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
                                     contentDescription = if (store.isFavorite) "Unfavorite" else "Favorite",
                                     onClick = { onToggleFavorite(store) },
                                 )
                                 SettingsIconActionButton(
-                                    icon = if (isIgnored) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                                    contentDescription = if (isIgnored) "Unignore" else "Ignore",
-                                    onClick = { onToggleIgnored(store, !isIgnored) },
+                                    icon = Icons.Filled.Delete,
+                                    contentDescription = "Remove store",
+                                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                                        contentColor = MaterialTheme.colorScheme.error,
+                                    ),
+                                    onClick = { onRemoveStore(store) },
                                 )
                             }
                         },
@@ -1758,8 +2197,17 @@ private fun formatKm(meters: Double): String {
     return if (km < 10.0) "%.1f km".format(km) else "%.0f km".format(km)
 }
 
+private fun WorkManager.uniqueWorkInfosFlow(name: String): Flow<List<WorkInfo>> = callbackFlow {
+    val liveData = getWorkInfosForUniqueWorkLiveData(name)
+    val observer = Observer<List<WorkInfo>> { infos ->
+        trySend(infos)
+    }
+    liveData.observeForever(observer)
+    awaitClose { liveData.removeObserver(observer) }
+}
+
 @Composable
-private fun SavedPlacesByCityList(
+private fun SavedPlacesByCategoryList(
     stores: List<StoreEntity>,
     userLocation: Pair<Double, Double>?,
     ignoredStoreIds: Set<String>,
@@ -1771,36 +2219,41 @@ private fun SavedPlacesByCityList(
         if (showHidden) stores else stores.filterNot { ignoredStoreIds.contains(it.id) }
     }
 
-    val grouped = remember(filteredStores) {
-        filteredStores
-            .groupBy {
-                val raw = it.city.trim()
-                if (raw.isNotBlank()) raw else "Unknown"
-            }
-            .toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    val groupedByCategory = remember(filteredStores) {
+        filteredStores.groupBy { categorizeSavedPlace(it) }
     }
 
-    val expandedByCity = remember { mutableStateMapOf<String, Boolean>() }
+    val expandedByCategory = remember { mutableStateMapOf<String, Boolean>() }
 
     LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 420.dp)
     ) {
-        grouped.forEach { (city, cityStores) ->
-            val expanded = expandedByCity[city] ?: false
+        SavedPlaceCategory.entries.forEach { category ->
+            val catStores = groupedByCategory[category].orEmpty()
+            if (catStores.isEmpty()) return@forEach
 
-            item(key = "saved_city_$city") {
+            val expanded = expandedByCategory[category.title] ?: true
+
+            item(key = "saved_cat_${category.title}") {
                 Spacer(Modifier.height(8.dp))
                 ListItem(
-                    headlineContent = { Text(city) },
+                    headlineContent = { Text(category.title) },
                     supportingContent = {
                         Text(
-                            "${cityStores.size} platser",
+                            "${catStores.size}",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                         )
                     },
-                    leadingContent = { Icon(Icons.Filled.LocationCity, contentDescription = null) },
+                    leadingContent = {
+                        val icon = when (category) {
+                            SavedPlaceCategory.POST_OFFICE -> Icons.Filled.Place
+                            SavedPlaceCategory.STORES -> Icons.Filled.LocationCity
+                            SavedPlaceCategory.OTHER -> Icons.Filled.Place
+                        }
+                        Icon(icon, contentDescription = null)
+                    },
                     trailingContent = {
                         Icon(
                             if (expanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
@@ -1809,7 +2262,7 @@ private fun SavedPlacesByCityList(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { expandedByCity[city] = !expanded },
+                        .clickable { expandedByCategory[category.title] = !expanded },
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
@@ -1817,9 +2270,9 @@ private fun SavedPlacesByCityList(
             if (expanded) {
                 val loc = userLocation
                 val sorted = if (loc == null) {
-                    cityStores.sortedBy { it.name.lowercase() }
+                    catStores.sortedBy { it.name.lowercase() }
                 } else {
-                    cityStores.sortedBy { store ->
+                    catStores.sortedBy { store ->
                         haversineMeters(loc.first, loc.second, store.lat, store.lng)
                     }
                 }
@@ -1832,10 +2285,12 @@ private fun SavedPlacesByCityList(
                         formatKm(haversineMeters(loc.first, loc.second, store.lat, store.lng))
                     }
 
+                    val displayName = cleanSavedPlaceName(store)
+
                     ListItem(
                         headlineContent = {
                             Text(
-                                store.name,
+                                displayName,
                                 color = if (isHidden) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
                                 else MaterialTheme.colorScheme.onSurface,
                             )
@@ -1867,4 +2322,76 @@ private fun SavedPlacesByCityList(
             }
         }
     }
+}
+
+private enum class SavedPlaceCategory(val title: String) {
+    STORES("Stores"),
+    POST_OFFICE("Post office"),
+    OTHER("Other"),
+}
+
+private fun categorizeSavedPlace(store: StoreEntity): SavedPlaceCategory {
+    val n = store.name.lowercase()
+    return when {
+        n.contains("postnord") ||
+            n.contains("postombud") ||
+            n.contains("paketombud") ||
+            n.contains("ombud") ||
+            n.contains("post ") ||
+            n.contains("post-") ||
+            n.contains("post office") ||
+            n.contains("posten") -> SavedPlaceCategory.POST_OFFICE
+        else -> SavedPlaceCategory.STORES
+    }
+}
+
+private fun cleanSavedPlaceName(store: StoreEntity): String {
+    val fullName = store.name
+    val lower = fullName.lowercase()
+
+    // Prefer common brand names for quick navigation.
+    val known = listOf(
+        "coop" to "Coop",
+        "ica" to "Ica",
+        "direkten" to "Direkten",
+        "hemköp" to "Hemköp",
+        "hemkop" to "Hemköp",
+        "willys" to "Willys",
+        "city gross" to "City Gross",
+        "pressbyrån" to "Pressbyrån",
+        "pressbyran" to "Pressbyrån",
+        "7-eleven" to "7-Eleven",
+        "7 eleven" to "7-Eleven",
+        "circle k" to "Circle K",
+        "okq8" to "OKQ8",
+    )
+    known.firstOrNull { (key, _) -> lower.contains(key) }?.let { return it.second }
+
+    // Remove typical postal/address fluff.
+    val withoutFluff = fullName
+        .replace(Regex("(?i)postnord"), "")
+        .replace(Regex("(?i)postombud"), "")
+        .replace(Regex("(?i)paketombud"), "")
+        .replace(Regex("(?i)ombud"), "")
+        .replace(Regex("\""), "")
+        .trim()
+
+    // Remove the city name if it appears in the store name.
+    val city = store.city.trim()
+    val withoutCity = if (city.isBlank()) {
+        withoutFluff
+    } else {
+        withoutFluff
+            .replace(Regex("(?i)\\b" + Regex.escape(city) + "\\b"), "")
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    // If the name contains an address part after a separator, keep only the left side.
+    val cutIdx = withoutCity.indexOfAny(charArrayOf('–', '—', '-', ',', '|', '(', ')'))
+    val base = if (cutIdx > 0) withoutCity.substring(0, cutIdx).trim() else withoutCity
+
+    // If still empty, fallback to the original name (better than blank).
+    val candidate = base.ifBlank { fullName.trim() }
+    return candidate.replace(Regex("\\s{2,}"), " ").trim()
 }

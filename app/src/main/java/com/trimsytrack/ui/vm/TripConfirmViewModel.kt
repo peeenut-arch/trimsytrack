@@ -71,12 +71,23 @@ class TripConfirmViewModel(
                 prompt.storeLngSnapshot
             ) <= 10.0
 
-            _state.update {
-                it.copy(
+            _state.update { prev ->
+                // Default behavior: if we likely came from another store today, assume "store -> this store".
+                // This makes every confirmed journey populate the internal distance cache graph.
+                val autoStartLabel = if (canUseLast) "Last store: ${last!!.storeNameSnapshot}" else prev.startLabel
+                val autoStartLat = if (canUseLast) last!!.storeLatSnapshot else prev.startLat
+                val autoStartLng = if (canUseLast) last!!.storeLngSnapshot else prev.startLng
+                val autoStartStoreId = if (canUseLast) last!!.storeId else prev.startStoreId
+
+                prev.copy(
                     storeName = prompt.storeNameSnapshot,
                     storeLat = prompt.storeLatSnapshot,
                     storeLng = prompt.storeLngSnapshot,
                     canUseLastStore = canUseLast,
+                    startLabel = autoStartLabel,
+                    startLat = autoStartLat,
+                    startLng = autoStartLng,
+                    startStoreId = autoStartStoreId,
                 )
             }
             recomputeCanConfirm()
@@ -172,6 +183,12 @@ class TripConfirmViewModel(
                         mileageRateMicros = null,
                     )
                 )
+
+                // Backend-authoritative sync: enqueue create intent + attempt immediate send.
+                runCatching {
+                    AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
+                    AppGraph.backendSyncManager.scheduleImmediate("trip-confirm")
+                }
 
                 AppGraph.promptRepository.updateStatus(promptId, PromptStatus.CONFIRMED, now)
 

@@ -16,6 +16,9 @@ interface PromptDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: PromptEventEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(entities: List<PromptEventEntity>): List<Long>
+
     @Update
     suspend fun update(entity: PromptEventEntity)
 
@@ -28,11 +31,17 @@ interface PromptDao {
     @Query("SELECT * FROM prompt_events WHERE id = :id")
     suspend fun getById(id: Long): PromptEventEntity?
 
+    @Query("SELECT * FROM prompt_events")
+    suspend fun listAll(): List<PromptEventEntity>
+
     @Query("SELECT * FROM prompt_events WHERE storeId = :storeId AND day = :day AND status != :deletedStatus ORDER BY triggeredAt DESC LIMIT 1")
     suspend fun getLatestForStoreDay(storeId: String, day: LocalDate, deletedStatus: PromptStatus = PromptStatus.DELETED): PromptEventEntity?
 
     @Query("SELECT COUNT(*) FROM prompt_events WHERE day = :day AND status != :deletedStatus")
     suspend fun countByDay(day: LocalDate, deletedStatus: PromptStatus = PromptStatus.DELETED): Int
+
+    @Query("SELECT COUNT(*) FROM prompt_events WHERE status != :deletedStatus")
+    suspend fun countAll(deletedStatus: PromptStatus = PromptStatus.DELETED): Int
 
     @Query("UPDATE prompt_events SET status = :status, lastUpdatedAt = :updatedAt WHERE id = :id")
     suspend fun updateStatus(id: Long, status: PromptStatus, updatedAt: Instant)

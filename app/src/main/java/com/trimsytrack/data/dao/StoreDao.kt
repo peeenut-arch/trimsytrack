@@ -43,6 +43,12 @@ interface StoreDao {
     @Query("SELECT * FROM stores ORDER BY city, name")
     fun observeAll(): Flow<List<StoreEntity>>
 
+    @Query("SELECT * FROM stores")
+    suspend fun listAll(): List<StoreEntity>
+
+    @Query("SELECT COUNT(*) FROM stores")
+    suspend fun countAll(): Int
+
     @Query("UPDATE stores SET isFavorite = :isFavorite WHERE id = :storeId")
     suspend fun setFavorite(storeId: String, isFavorite: Boolean)
 }

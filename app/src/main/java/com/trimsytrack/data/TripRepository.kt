@@ -5,10 +5,12 @@ import com.trimsytrack.data.dao.RunDao
 import com.trimsytrack.data.dao.TripDao
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.RunEntity
+import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
 import kotlinx.coroutines.flow.Flow
 import java.time.Instant
 import java.time.LocalDate
+import java.util.UUID
 
 class TripRepository(
     private val tripDao: TripDao,
@@ -21,7 +23,13 @@ class TripRepository(
 
     suspend fun get(id: Long): TripEntity? = tripDao.getById(id)
 
-    suspend fun createTrip(entity: TripEntity): Long = tripDao.insert(entity)
+    suspend fun createTrip(entity: TripEntity): Long {
+        val ensured = entity.copy(
+            clientRef = entity.clientRef ?: UUID.randomUUID().toString(),
+            syncStatus = if (entity.syncStatus == SyncStatus.LOCAL_ONLY) SyncStatus.PENDING else entity.syncStatus,
+        )
+        return tripDao.insert(ensured)
+    }
 
     suspend fun updateTrip(entity: TripEntity) = tripDao.update(entity)
 
@@ -39,6 +47,8 @@ class TripRepository(
     suspend fun createRun(day: LocalDate, label: String): Long {
         return runDao.insert(
             RunEntity(
+                clientRef = UUID.randomUUID().toString(),
+                syncStatus = SyncStatus.PENDING,
                 day = day,
                 createdAt = Instant.now(),
                 label = label

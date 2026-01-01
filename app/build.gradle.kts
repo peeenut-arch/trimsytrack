@@ -7,6 +7,19 @@ plugins {
 
 import java.util.Properties
 
+// Firebase configuration is provided via google-services.json.
+// Keep the project buildable without it (prep work), and enable the plugin only when the file exists.
+val hasGoogleServices =
+    file("google-services.json").exists() ||
+        file("src/debug/google-services.json").exists() ||
+        file("src/release/google-services.json").exists()
+
+if (hasGoogleServices) {
+    apply(plugin = "com.google.gms.google-services")
+} else {
+    logger.lifecycle("google-services.json missing; Google Services plugin not applied (Firebase disabled).")
+}
+
 android {
     namespace = "com.trimsytrack"
     compileSdk = 35
@@ -14,7 +27,7 @@ android {
     val localProperties = Properties().apply {
         val file = rootProject.file("local.properties")
         if (file.exists()) {
-            file.inputStream().use { load(it) }
+            file.inputStream().use { input -> this.load(input) }
         }
     }
 
@@ -94,6 +107,7 @@ dependencies {
     ksp(libs.androidx.room.compiler)
 
     implementation(libs.play.services.location)
+    implementation(libs.play.services.auth)
     implementation(libs.google.places)
 
     implementation(libs.retrofit)
@@ -104,6 +118,10 @@ dependencies {
     implementation(libs.serialization.json)
 
     implementation(libs.coil.compose)
+
+    // Firebase (email auth + verification/reset emails)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth.ktx)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

@@ -3,6 +3,7 @@ package com.trimsytrack.data.entities
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.trimsytrack.data.entities.SyncStatus
 import java.time.Instant
 import java.time.LocalDate
 
@@ -14,6 +15,11 @@ import java.time.LocalDate
 )
 data class TripEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+
+    // Backend-authoritative sync fields
+    val clientRef: String? = null,
+    val backendId: String? = null,
+    val syncStatus: SyncStatus = SyncStatus.LOCAL_ONLY,
 
     val createdAt: Instant,
     val day: LocalDate,

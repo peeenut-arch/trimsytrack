@@ -3,18 +3,28 @@ package com.trimsytrack.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.time.LocalDate
 import java.time.DayOfWeek
+import com.trimsytrack.data.driverdata.DriverSettings
+import com.trimsytrack.data.sync.BackendSyncMode
 
 private val Context.dataStore by preferencesDataStore(name = "settings")
+
+@Serializable
+data class BusinessHours(
+    // Keys are DayOfWeek names, e.g. "MONDAY". Values are free-form (e.g. "09:00-18:00" or "Closed").
+    val byDay: Map<String, String> = emptyMap(),
+)
 
 class SettingsStore(private val context: Context) {
     private object Keys {
@@ -56,6 +66,9 @@ class SettingsStore(private val context: Context) {
         // Store photos (storeId -> fileprovider uri)
         val storeImagesJson = stringPreferencesKey("storeImagesJson")
 
+        // Store business hours (storeId -> BusinessHours)
+        val storeBusinessHoursJson = stringPreferencesKey("storeBusinessHoursJson")
+
         // Home tile icon images (tileId -> fileprovider uri)
         val homeTileIconImagesJson = stringPreferencesKey("homeTileIconImagesJson")
 
@@ -73,6 +86,18 @@ class SettingsStore(private val context: Context) {
 
         // Manual trip UI
         val manualTripStoreSortMode = stringPreferencesKey("manualTripStoreSortMode")
+
+        // Backend sync
+        val backendBaseUrl = stringPreferencesKey("backendBaseUrl")
+        val backendDriverId = stringPreferencesKey("backendDriverId")
+
+        // Backend sync scheduling (device behavior)
+        val backendSyncMode = stringPreferencesKey("backendSyncMode")
+        val backendDailySyncMinutes = intPreferencesKey("backendDailySyncMinutes")
+
+        // Backend sync status (device behavior)
+        val backendLastSyncAtMillis = longPreferencesKey("backendLastSyncAtMillis")
+        val backendLastSyncResult = stringPreferencesKey("backendLastSyncResult")
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -124,6 +149,12 @@ class SettingsStore(private val context: Context) {
         if (raw.isBlank()) emptyMap() else runCatching { json.decodeFromString<Map<String, String>>(raw) }.getOrDefault(emptyMap())
     }
 
+    val storeBusinessHours: Flow<Map<String, BusinessHours>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.storeBusinessHoursJson].orEmpty()
+        if (raw.isBlank()) emptyMap() else runCatching { json.decodeFromString<Map<String, BusinessHours>>(raw) }
+            .getOrDefault(emptyMap())
+    }
+
     val homeTileIconImages: Flow<Map<String, String>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.homeTileIconImagesJson].orEmpty()
         if (raw.isBlank()) emptyMap() else runCatching { json.decodeFromString<Map<String, String>>(raw) }.getOrDefault(emptyMap())
@@ -155,8 +186,107 @@ class SettingsStore(private val context: Context) {
         it[Keys.manualTripStoreSortMode] ?: "NAME"
     }
 
+    val backendBaseUrl: Flow<String> = context.dataStore.data.map {
+        it[Keys.backendBaseUrl] ?: "http://79.76.38.94/"
+    }
+
+    val backendDriverId: Flow<String> = context.dataStore.data.map {
+        it[Keys.backendDriverId].orEmpty()
+    }
+
+    val backendSyncMode: Flow<BackendSyncMode> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.backendSyncMode] ?: BackendSyncMode.INSTANT.name
+        runCatching { BackendSyncMode.valueOf(raw) }.getOrDefault(BackendSyncMode.INSTANT)
+    }
+
+    /** Minutes after midnight local time for daily sync. */
+    val backendDailySyncMinutes: Flow<Int> = context.dataStore.data.map {
+        it[Keys.backendDailySyncMinutes] ?: (3 * 60)
+    }
+
+    val backendLastSyncAtMillis: Flow<Long?> = context.dataStore.data.map { prefs ->
+        prefs[Keys.backendLastSyncAtMillis]
+    }
+
+    val backendLastSyncResult: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.backendLastSyncResult].orEmpty()
+    }
+
     suspend fun setTrackingEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.trackingEnabled] = enabled }
+    }
+
+    suspend fun setBackendBaseUrl(value: String) {
+        val v = value.trim()
+        context.dataStore.edit { it[Keys.backendBaseUrl] = v }
+    }
+
+    suspend fun setBackendDriverId(value: String) {
+        val v = value.trim()
+        context.dataStore.edit { it[Keys.backendDriverId] = v }
+    }
+
+    suspend fun setBackendSyncMode(value: BackendSyncMode) {
+        context.dataStore.edit { it[Keys.backendSyncMode] = value.name }
+    }
+
+    suspend fun setBackendDailySyncMinutes(value: Int) {
+        context.dataStore.edit { it[Keys.backendDailySyncMinutes] = value.coerceIn(0, 24 * 60 - 1) }
+    }
+
+    suspend fun setBackendLastSync(atMillis: Long, result: String) {
+        context.dataStore.edit {
+            it[Keys.backendLastSyncAtMillis] = atMillis
+            it[Keys.backendLastSyncResult] = result
+        }
+    }
+
+    /** Bulk import used by DriverData restore. */
+    suspend fun importDriverSettings(s: DriverSettings) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.profileId] = s.profileId
+            prefs[Keys.profileName] = s.profileName
+            prefs[Keys.onboardingCompleted] = s.onboardingCompleted
+
+            prefs[Keys.trackingEnabled] = s.trackingEnabled
+            prefs[Keys.regionCode] = s.regionCode
+
+            prefs[Keys.activeStartMinutes] = s.activeStartMinutes
+            prefs[Keys.activeEndMinutes] = s.activeEndMinutes
+            prefs[Keys.activeDaysCsv] = s.activeDays.joinToString(",")
+
+            prefs[Keys.dwellMinutes] = s.dwellMinutes
+            prefs[Keys.radiusMeters] = s.radiusMeters
+            prefs[Keys.responsivenessSeconds] = s.responsivenessSeconds
+
+            prefs[Keys.dailyPromptLimit] = s.dailyPromptLimit
+            prefs[Keys.perStorePerDay] = s.perStorePerDay
+            prefs[Keys.suppressionMinutes] = s.suppressionMinutes
+
+            prefs[Keys.maxActiveGeofences] = s.maxActiveGeofences
+            prefs[Keys.suggestLinkingWindowMinutes] = s.suggestLinkingWindowMinutes
+
+            prefs[Keys.vehicleRegNumber] = s.vehicleRegNumber
+            prefs[Keys.driverName] = s.driverName
+            prefs[Keys.businessHomeAddress] = s.businessHomeAddress
+            prefs[Keys.businessHomeLat] = s.businessHomeLat?.toString().orEmpty()
+            prefs[Keys.businessHomeLng] = s.businessHomeLng?.toString().orEmpty()
+            prefs[Keys.journalYear] = s.journalYear
+            prefs[Keys.odometerYearStartKm] = s.odometerYearStartKm
+            prefs[Keys.odometerYearEndKm] = s.odometerYearEndKm
+
+            prefs[Keys.storeImagesJson] = json.encodeToString(s.storeImages)
+            prefs[Keys.storeBusinessHoursJson] = json.encodeToString(s.storeBusinessHours)
+            prefs[Keys.homeTileIconImagesJson] = json.encodeToString(s.homeTileIconImages)
+            prefs[Keys.preferredCategoriesJson] = json.encodeToString(s.preferredCategories)
+            prefs[Keys.storeSyncRadiusKm] = s.storeSyncRadiusKm
+            prefs[Keys.ignoredStoreIdsJson] = json.encodeToString(s.ignoredStoreIds)
+            prefs[Keys.expandedStoreCitiesJson] = json.encodeToString(s.expandedStoreCities)
+            prefs[Keys.manualTripStoreSortMode] = s.manualTripStoreSortMode
+
+            prefs[Keys.backendBaseUrl] = s.backendBaseUrl
+            prefs[Keys.backendDriverId] = s.backendDriverId
+        }
     }
 
     suspend fun setProfile(profileId: String, profileName: String) {
@@ -306,6 +436,30 @@ class SettingsStore(private val context: Context) {
             }.getOrDefault(emptyMap())
             val updated = map.toMutableMap().apply { remove(storeId) }
             prefs[Keys.storeImagesJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun setStoreBusinessHours(storeId: String, hours: BusinessHours) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.storeBusinessHoursJson].orEmpty()
+            val map = if (current.isBlank()) emptyMap() else runCatching {
+                json.decodeFromString<Map<String, BusinessHours>>(current)
+            }.getOrDefault(emptyMap())
+
+            val updated = map.toMutableMap().apply { put(storeId, hours) }
+            prefs[Keys.storeBusinessHoursJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun clearStoreBusinessHours(storeId: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.storeBusinessHoursJson].orEmpty()
+            val map = if (current.isBlank()) emptyMap() else runCatching {
+                json.decodeFromString<Map<String, BusinessHours>>(current)
+            }.getOrDefault(emptyMap())
+
+            val updated = map.toMutableMap().apply { remove(storeId) }
+            prefs[Keys.storeBusinessHoursJson] = json.encodeToString(updated)
         }
     }
 

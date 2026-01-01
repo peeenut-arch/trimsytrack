@@ -12,6 +12,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.trimsytrack.AppGraph
+import com.trimsytrack.ui.screens.AuthScreen
 import com.trimsytrack.ui.screens.HomeScreen
 import com.trimsytrack.ui.screens.JournalScreen
 import com.trimsytrack.ui.screens.ManualTripScreen
@@ -28,6 +29,7 @@ object Routes {
     const val Review = "review"
     const val Journal = "journal"
     const val Settings = "settings"
+    const val Auth = "auth"
     const val Confirm = "confirm"
     const val Trip = "trip"
 }
@@ -75,6 +77,7 @@ fun AppNavHost(intent: Intent) {
         }
         composable(Routes.Manual) {
             ManualTripScreen(
+                onBack = { navController.popBackStack() },
                 onOpenTrip = { navController.navigate("${Routes.Trip}/$it") },
             )
         }
@@ -95,6 +98,13 @@ fun AppNavHost(intent: Intent) {
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 onOpenOnboarding = { navController.navigate(Routes.Onboarding) },
+                onOpenAuth = { navController.navigate(Routes.Auth) },
+            )
+        }
+
+        composable(Routes.Auth) {
+            AuthScreen(
+                onBack = { navController.popBackStack() },
             )
         }
         composable(

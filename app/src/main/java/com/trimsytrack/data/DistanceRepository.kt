@@ -100,6 +100,9 @@ class DistanceRepository(
     }
 }
 
+/** Stable cache key for "business home" origin when computing home -> store routes. */
+const val BUSINESS_HOME_LOCATION_ID: String = "BUSINESS_HOME"
+
 private data class QuantizedLatLngPair(
     val startLatE5: Int,
     val startLngE5: Int,
