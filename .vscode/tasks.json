@@ -1,0 +1,75 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Android app (Gradle)",
+			"type": "shell",
+			"command": "./gradlew assembleDebug",
+			"isBackground": false,
+			"problemMatcher": [
+				"$javac"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Install app on device (Gradle)",
+			"type": "shell",
+			"command": "./gradlew installDebug",
+			"isBackground": false,
+			"problemMatcher": [
+				"$javac"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Install app on device (Gradle)",
+			"type": "shell",
+			"command": "./gradlew installDebug",
+			"isBackground": false,
+			"problemMatcher": [
+				"$javac"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build app after ManualTripScreen city selection update",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Build app after fixing dropdown imports",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Build app after switching to standard DropdownMenu",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Build app after fixing clickable and icon imports",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Build app after fixing dropdown syntax",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Build app after fixing duplicate code and braces",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Build app after adding missing imports",
+			"type": "shell",
+			"command": "./gradlew assembleDebug"
+		},
+		{
+			"label": "Install app on device after successful build",
+			"type": "shell",
+			"command": "./gradlew installDebug"
+		}
+	]
+}

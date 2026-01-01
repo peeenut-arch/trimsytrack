@@ -1,0 +1,9 @@
+{
+  "regionCode": "demo",
+  "regionName": "Demo Region",
+  "stores": [
+    {"id": "store_001", "name": "Second-Hand Demo A", "lat": 45.5019, "lng": -73.5674, "radiusMeters": 120},
+    {"id": "store_002", "name": "Second-Hand Demo B", "lat": 45.5088, "lng": -73.5617, "radiusMeters": 120},
+    {"id": "store_003", "name": "Test Store (Pin)", "lat": 59.635118, "lng": 17.080024, "radiusMeters": 120}
+  ]
+}
