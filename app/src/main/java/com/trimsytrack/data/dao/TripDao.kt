@@ -31,6 +31,9 @@ interface TripDao {
     @Query("SELECT * FROM trips WHERE day = :day ORDER BY createdAt DESC")
     fun observeByDay(day: LocalDate): Flow<List<TripEntity>>
 
+    @Query("SELECT * FROM trips ORDER BY day DESC, createdAt DESC")
+    fun observeAll(): Flow<List<TripEntity>>
+
     @Query("SELECT * FROM trips ORDER BY day DESC, createdAt DESC LIMIT :limit")
     fun observeRecent(limit: Int): Flow<List<TripEntity>>
 

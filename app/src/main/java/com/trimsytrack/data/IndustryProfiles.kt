@@ -15,7 +15,6 @@ enum class IndustryProfile(
             "Byggvaruhus",
             "Postombud",
             "Paketutlämning",
-            "Lager",
             "Förråd",
             "Verkstad",
             "Företagsadress",
@@ -29,7 +28,6 @@ enum class IndustryProfile(
             "Trähandel",
             "Byggmaterialgrossist",
             "Postombud",
-            "Lager",
             "Förråd",
             "Verkstad",
             "Företagsadress",
@@ -42,7 +40,6 @@ enum class IndustryProfile(
             "VVS-grossist",
             "Byggvaruhus",
             "Postombud",
-            "Lager",
             "Förråd",
             "Verkstad",
             "Företagsadress",
@@ -59,7 +56,6 @@ enum class IndustryProfile(
             "Postombud",
             "Speditör",
             "Återvinningscentral",
-            "Lager",
             "Butik",
             "Företagsadress",
         ),
@@ -73,7 +69,6 @@ enum class IndustryProfile(
             "Auktionshus",
             "Postombud",
             "Speditör",
-            "Lager",
             "Packplats",
             "Företagsadress",
         ),
@@ -188,32 +183,32 @@ object ProfileDefaults {
             IndustryProfile.ELECTRICIAN -> listOf(
                 ProfileCategoryGroup("Material", listOf("Elgrossist", "Byggvaruhus")),
                 ProfileCategoryGroup("Logistik", listOf("Postombud", "Paketutlämning")),
-                ProfileCategoryGroup("Bas", listOf("Lager", "Förråd", "Verkstad", "Företagsadress")),
+                ProfileCategoryGroup("Bas", listOf("Förråd", "Verkstad", "Företagsadress")),
             )
 
             IndustryProfile.CARPENTER_BUILD -> listOf(
                 ProfileCategoryGroup("Material", listOf("Byggvaruhus", "Trähandel", "Byggmaterialgrossist")),
                 ProfileCategoryGroup("Logistik", listOf("Postombud")),
-                ProfileCategoryGroup("Bas", listOf("Lager", "Förråd", "Verkstad", "Företagsadress")),
+                ProfileCategoryGroup("Bas", listOf("Förråd", "Verkstad", "Företagsadress")),
             )
 
             IndustryProfile.PLUMBER_HVAC -> listOf(
                 ProfileCategoryGroup("Material", listOf("VVS-grossist", "Byggvaruhus")),
                 ProfileCategoryGroup("Logistik", listOf("Postombud")),
-                ProfileCategoryGroup("Bas", listOf("Lager", "Förråd", "Verkstad", "Företagsadress")),
+                ProfileCategoryGroup("Bas", listOf("Förråd", "Verkstad", "Företagsadress")),
             )
 
             IndustryProfile.ANTIQUE_DEALER -> listOf(
                 ProfileCategoryGroup("Inköp", listOf("Antikaffär", "Auktionshus", "Loppis", "Second hand-butik")),
                 ProfileCategoryGroup("Logistik", listOf("Postombud", "Speditör")),
                 ProfileCategoryGroup("Avfall", listOf("Återvinningscentral")),
-                ProfileCategoryGroup("Bas", listOf("Lager", "Butik", "Företagsadress")),
+                ProfileCategoryGroup("Bas", listOf("Butik", "Företagsadress")),
             )
 
             IndustryProfile.RESELLER -> listOf(
                 ProfileCategoryGroup("Inköp", listOf("Second hand-butik", "Loppis", "Auktionshus")),
                 ProfileCategoryGroup("Logistik", listOf("Postombud", "Speditör")),
-                ProfileCategoryGroup("Bas", listOf("Lager", "Packplats", "Företagsadress")),
+                ProfileCategoryGroup("Bas", listOf("Packplats", "Företagsadress")),
             )
 
             IndustryProfile.CONSULTANT -> listOf(

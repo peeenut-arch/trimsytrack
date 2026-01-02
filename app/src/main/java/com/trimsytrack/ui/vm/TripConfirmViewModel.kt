@@ -134,7 +134,7 @@ class TripConfirmViewModel(
             }
     }
 
-    fun confirm(notes: String, onDone: () -> Unit) {
+    fun confirm(notes: String, onCreated: (Long) -> Unit) {
         viewModelScope.launch {
             val s = _state.value
             val destLat = s.storeLat
@@ -190,9 +190,9 @@ class TripConfirmViewModel(
                     AppGraph.backendSyncManager.scheduleImmediate("trip-confirm")
                 }
 
-                AppGraph.promptRepository.updateStatus(promptId, PromptStatus.CONFIRMED, now)
+                AppGraph.promptRepository.confirmWithTrip(promptId, tripId, now)
 
-                onDone()
+                onCreated(tripId)
             } catch (e: Exception) {
                 _state.update { it.copy(error = e.message ?: "Failed", isConfirming = false) }
             }

@@ -45,4 +45,7 @@ interface PromptDao {
 
     @Query("UPDATE prompt_events SET status = :status, lastUpdatedAt = :updatedAt WHERE id = :id")
     suspend fun updateStatus(id: Long, status: PromptStatus, updatedAt: Instant)
+
+    @Query("UPDATE prompt_events SET status = :status, linkedTripId = :linkedTripId, lastUpdatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateStatusAndLinkTrip(id: Long, status: PromptStatus, linkedTripId: Long, updatedAt: Instant)
 }

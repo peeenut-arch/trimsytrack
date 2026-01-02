@@ -13,8 +13,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,9 +65,13 @@ fun AuthScreen(
 
     val currentUser = rememberFirebaseUser()
 
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var confirmPassword by remember { mutableStateOf("") }
+    var choice by remember { mutableStateOf(AuthChoice.ROOT) }
+    var mailDialog by remember { mutableStateOf<MailDialog?>(null) }
+
+    var mailEmail by remember { mutableStateOf("") }
+    var mailPassword by remember { mutableStateOf("") }
+
+    var showDeleteAccount by remember { mutableStateOf(false) }
 
     var busy by remember { mutableStateOf(false) }
 
@@ -110,10 +116,23 @@ fun AuthScreen(
             )
         },
     ) { padding ->
-        fun emailTrimmed(): String = email.trim()
+        fun emailTrimmed(value: String): String = value.trim()
         fun isProbablyValidEmail(value: String): Boolean {
             val v = value.trim()
             return v.contains("@").and(v.contains("."))
+        }
+
+        fun startGoogle() {
+            scope.launch {
+                busy = true
+                try {
+                    val intent = googleService.signInIntent(context)
+                    googleLauncher.launch(intent)
+                } catch (t: Throwable) {
+                    snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                    busy = false
+                }
+            }
         }
 
         Column(
@@ -134,208 +153,273 @@ fun AuthScreen(
                 },
                 trailingContent = {
                     if (currentUser != null) {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    busy = true
-                                    try {
-                                        emailService.signOut()
-                                        googleService.signOut()
-                                        snackbarHostState.showSnackbar("Signed out")
-                                    } catch (t: Throwable) {
-                                        snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                                    } finally {
-                                        busy = false
+                        Column {
+                            IconButton(
+                                onClick = { showDeleteAccount = true },
+                                enabled = !busy,
+                            ) {
+                                Icon(Icons.Filled.DeleteForever, contentDescription = "Delete account")
+                            }
+                            IconButton(
+                                onClick = {
+                                    scope.launch {
+                                        busy = true
+                                        try {
+                                            emailService.signOut()
+                                            googleService.signOut()
+                                            snackbarHostState.showSnackbar("Signed out")
+                                        } catch (t: Throwable) {
+                                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                                        } finally {
+                                            busy = false
+                                        }
                                     }
-                                }
-                            },
-                            enabled = !busy,
-                        ) {
-                            Icon(Icons.Filled.Logout, contentDescription = "Sign out")
+                                },
+                                enabled = !busy,
+                            ) {
+                                Icon(Icons.Filled.Logout, contentDescription = "Sign out")
+                            }
                         }
                     }
                 }
             )
 
-            Button(
-                onClick = {
-                    scope.launch {
-                        busy = true
-                        try {
-                            val intent = googleService.signInIntent(context)
-                            googleLauncher.launch(intent)
-                        } catch (t: Throwable) {
-                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                            busy = false
-                        }
+            when (choice) {
+                AuthChoice.ROOT -> {
+                    Button(
+                        onClick = { choice = AuthChoice.LOGIN },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Login")
                     }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Continue with Google")
-            }
 
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Sign in with email",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-
-            Text(
-                "Use the password you chose when you created the account.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-
-            OutlinedTextField(
-                value = email,
-                onValueChange = { email = it },
-                label = { Text("Email") },
-                singleLine = true,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("Password") },
-                singleLine = true,
-                enabled = !busy,
-                visualTransformation = if (password.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Button(
-                onClick = {
-                    scope.launch {
-                        busy = true
-                        try {
-                            val e = emailTrimmed()
-                            if (e.isBlank()) {
-                                snackbarHostState.showSnackbar("Enter your email")
-                                return@launch
-                            }
-                            if (!isProbablyValidEmail(e)) {
-                                snackbarHostState.showSnackbar("Enter a valid email")
-                                return@launch
-                            }
-                            if (password.length < 6) {
-                                snackbarHostState.showSnackbar("Password must be at least 6 characters")
-                                return@launch
-                            }
-                            emailService.signInWithEmailPassword(e, password)
-                            snackbarHostState.showSnackbar("Signed in")
-                        } catch (t: Throwable) {
-                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                        } finally {
-                            busy = false
-                        }
+                    Button(
+                        onClick = { choice = AuthChoice.CREATE },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Create")
                     }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Sign in with email")
-            }
+                }
 
-            TextButton(
-                onClick = {
-                    scope.launch {
-                        busy = true
-                        try {
-                            val e = emailTrimmed()
-                            if (e.isBlank()) {
-                                snackbarHostState.showSnackbar("Enter your email")
-                                return@launch
-                            }
-                            if (!isProbablyValidEmail(e)) {
-                                snackbarHostState.showSnackbar("Enter a valid email")
-                                return@launch
-                            }
-
-                            emailService.sendPasswordReset(e)
-                            snackbarHostState.showSnackbar("Password reset link sent (check your email)")
-                        } catch (t: Throwable) {
-                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                        } finally {
-                            busy = false
-                        }
+                AuthChoice.LOGIN -> {
+                    Button(
+                        onClick = { startGoogle() },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Login using Google")
                     }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Forgot password? Send reset link")
-            }
 
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Create a new account",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-
-            Text(
-                "You choose a password (Firebase doesn’t email you one).",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-
-            OutlinedTextField(
-                value = confirmPassword,
-                onValueChange = { confirmPassword = it },
-                label = { Text("Confirm password") },
-                singleLine = true,
-                enabled = !busy,
-                visualTransformation = if (confirmPassword.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        busy = true
-                        try {
-                            val e = emailTrimmed()
-                            if (e.isBlank()) {
-                                snackbarHostState.showSnackbar("Enter your email")
-                                return@launch
-                            }
-                            if (!isProbablyValidEmail(e)) {
-                                snackbarHostState.showSnackbar("Enter a valid email")
-                                return@launch
-                            }
-                            if (password.length < 6) {
-                                snackbarHostState.showSnackbar("Password must be at least 6 characters")
-                                return@launch
-                            }
-                            if (password != confirmPassword) {
-                                snackbarHostState.showSnackbar("Passwords do not match")
-                                return@launch
-                            }
-
-                            emailService.createUserWithEmailPassword(e, password)
-                            runCatching { emailService.sendEmailVerification() }
-                            snackbarHostState.showSnackbar("Account created (verification email sent if supported)")
-                        } catch (t: Throwable) {
-                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                        } finally {
-                            busy = false
-                        }
+                    OutlinedButton(
+                        onClick = { mailDialog = MailDialog.LOGIN },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Login using Mail")
                     }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Create account with email")
+
+                    TextButton(
+                        onClick = { choice = AuthChoice.ROOT },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Back")
+                    }
+                }
+
+                AuthChoice.CREATE -> {
+                    Button(
+                        onClick = { startGoogle() },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Create using Google")
+                    }
+
+                    OutlinedButton(
+                        onClick = { mailDialog = MailDialog.CREATE },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Create using Mail")
+                    }
+
+                    TextButton(
+                        onClick = { choice = AuthChoice.ROOT },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Back")
+                    }
+                }
             }
         }
+
+        val dialog = mailDialog
+        if (dialog != null) {
+            val title = if (dialog == MailDialog.LOGIN) "Login using Mail" else "Create using Mail"
+            AlertDialog(
+                onDismissRequest = { if (!busy) mailDialog = null },
+                title = { Text(title) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(
+                            value = mailEmail,
+                            onValueChange = { mailEmail = it },
+                            label = { Text("Email") },
+                            singleLine = true,
+                            enabled = !busy,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = mailPassword,
+                            onValueChange = { mailPassword = it },
+                            label = { Text("Password") },
+                            singleLine = true,
+                            enabled = !busy,
+                            visualTransformation = if (mailPassword.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+
+                        if (dialog == MailDialog.LOGIN) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        busy = true
+                                        try {
+                                            val e = emailTrimmed(mailEmail)
+                                            if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                                snackbarHostState.showSnackbar("Enter a valid email")
+                                                return@launch
+                                            }
+                                            emailService.sendPasswordReset(e)
+                                            snackbarHostState.showSnackbar("Recovery email sent")
+                                        } catch (t: Throwable) {
+                                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                                        } finally {
+                                            busy = false
+                                        }
+                                    }
+                                },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("Recover password")
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                busy = true
+                                try {
+                                    val e = emailTrimmed(mailEmail)
+                                    if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                        snackbarHostState.showSnackbar("Enter a valid email")
+                                        return@launch
+                                    }
+                                    if (mailPassword.length < 6) {
+                                        snackbarHostState.showSnackbar("Password must be at least 6 characters")
+                                        return@launch
+                                    }
+
+                                    if (dialog == MailDialog.LOGIN) {
+                                        emailService.signInWithEmailPassword(e, mailPassword)
+                                        snackbarHostState.showSnackbar("Logged in")
+                                    } else {
+                                        emailService.createUserWithEmailPassword(e, mailPassword)
+                                        snackbarHostState.showSnackbar("Account created")
+                                    }
+
+                                    mailDialog = null
+                                } catch (t: Throwable) {
+                                    snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        },
+                        enabled = !busy,
+                    ) {
+                        Text(if (dialog == MailDialog.LOGIN) "Login" else "Create")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { if (!busy) mailDialog = null },
+                        enabled = !busy,
+                    ) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
+
+        if (showDeleteAccount) {
+            AlertDialog(
+                onDismissRequest = { if (!busy) showDeleteAccount = false },
+                title = { Text("Delete account") },
+                text = {
+                    Text(
+                        "This permanently deletes your Firebase account (including ${currentUser?.email.orEmpty()}). " +
+                            "You can create a new account again afterwards.",
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                busy = true
+                                try {
+                                    emailService.deleteCurrentUser()
+                                    emailService.signOut()
+                                    googleService.signOut()
+                                    snackbarHostState.showSnackbar("Account deleted")
+                                    showDeleteAccount = false
+                                } catch (t: Throwable) {
+                                    // Common Firebase error: requires-recent-login
+                                    snackbarHostState.showSnackbar(
+                                        t.message
+                                            ?: "Delete failed (try signing in again, then delete)."
+                                    )
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        },
+                        enabled = !busy,
+                    ) {
+                        Text("Delete")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { if (!busy) showDeleteAccount = false },
+                        enabled = !busy,
+                    ) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
     }
+}
+
+private enum class AuthChoice {
+    ROOT,
+    LOGIN,
+    CREATE,
+}
+
+private enum class MailDialog {
+    LOGIN,
+    CREATE,
 }
 
 @Composable

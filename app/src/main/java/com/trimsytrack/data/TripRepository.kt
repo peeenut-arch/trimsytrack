@@ -21,6 +21,8 @@ class TripRepository(
 
     fun observeRecent(limit: Int = 200): Flow<List<TripEntity>> = tripDao.observeRecent(limit)
 
+    fun observeAllTrips(): Flow<List<TripEntity>> = tripDao.observeAll()
+
     suspend fun get(id: Long): TripEntity? = tripDao.getById(id)
 
     suspend fun createTrip(entity: TripEntity): Long {
@@ -39,6 +41,8 @@ class TripRepository(
         tripDao.listBetweenDays(startDay, endDay)
 
     fun observeAttachments(tripId: Long): Flow<List<AttachmentEntity>> = attachmentDao.observeByTrip(tripId)
+
+    fun observeAllAttachments(): Flow<List<AttachmentEntity>> = attachmentDao.observeAll()
 
     suspend fun addAttachment(entity: AttachmentEntity): Long = attachmentDao.insert(entity)
 

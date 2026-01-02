@@ -36,6 +36,11 @@ class FirebaseEmailService(
         auth.createUserWithEmailAndPassword(email.trim(), password).awaitUnit()
     }
 
+    suspend fun deleteCurrentUser() {
+        val user = auth.currentUser ?: throw IllegalStateException("No signed-in user")
+        user.delete().awaitUnit()
+    }
+
     fun signOut() {
         auth.signOut()
     }

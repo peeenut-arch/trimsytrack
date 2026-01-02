@@ -1,6 +1,7 @@
 package com.trimsytrack.ui.theme
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -37,10 +38,45 @@ private val TrimsyLightColors = lightColorScheme(
     scrim = Color.Black,
 )
 
+private val TrimsyDarkColors = darkColorScheme(
+    // Keep the same brand accents, but use a dark surface/background.
+    primary = Color(0xFF2F62FF),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF244FE0),
+    onPrimaryContainer = Color.White,
+
+    secondary = Color(0xFF2ECC71),
+    onSecondary = Color.Black,
+    secondaryContainer = Color(0xFF1EA85A),
+    onSecondaryContainer = Color.White,
+
+    tertiary = Color(0xFFFFC857),
+    onTertiary = Color.Black,
+    tertiaryContainer = Color(0xFFE2A62B),
+    onTertiaryContainer = Color.Black,
+
+    background = Color(0xFF0F1115),
+    onBackground = Color(0xFFEAECEF),
+
+    surface = Color(0xFF141821),
+    onSurface = Color(0xFFEAECEF),
+
+    surfaceVariant = Color(0xFF1B2130),
+    onSurfaceVariant = Color(0xFFEAECEF),
+
+    outline = Color.White.copy(alpha = 0.28f),
+    outlineVariant = Color.White.copy(alpha = 0.18f),
+
+    scrim = Color.Black,
+)
+
 @Composable
-fun TrimsyTheme(content: @Composable () -> Unit) {
+fun TrimsyTheme(
+    darkTheme: Boolean,
+    content: @Composable () -> Unit,
+) {
     MaterialTheme(
-        colorScheme = TrimsyLightColors,
-        content = content
+        colorScheme = if (darkTheme) TrimsyDarkColors else TrimsyLightColors,
+        content = content,
     )
 }

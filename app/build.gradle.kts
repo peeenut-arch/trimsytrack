@@ -110,6 +110,11 @@ dependencies {
     implementation(libs.play.services.auth)
     implementation(libs.google.places)
 
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.exifinterface)
+
     implementation(libs.retrofit)
     implementation(libs.retrofit.converter.scalars)
     implementation(libs.retrofit.kotlinx.serialization)

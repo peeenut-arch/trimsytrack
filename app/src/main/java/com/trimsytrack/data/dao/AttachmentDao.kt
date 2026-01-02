@@ -18,6 +18,9 @@ interface AttachmentDao {
     @Query("SELECT * FROM attachments WHERE tripId = :tripId ORDER BY addedAt DESC")
     fun observeByTrip(tripId: Long): Flow<List<AttachmentEntity>>
 
+    @Query("SELECT * FROM attachments ORDER BY addedAt DESC")
+    fun observeAll(): Flow<List<AttachmentEntity>>
+
     @Query("SELECT * FROM attachments")
     suspend fun listAll(): List<AttachmentEntity>
 

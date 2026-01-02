@@ -19,4 +19,8 @@ class PromptRepository(private val dao: PromptDao) {
     suspend fun updateStatus(id: Long, status: PromptStatus, now: Instant) {
         dao.updateStatus(id, status, now)
     }
+
+    suspend fun confirmWithTrip(id: Long, tripId: Long, now: Instant) {
+        dao.updateStatusAndLinkTrip(id, PromptStatus.CONFIRMED, tripId, now)
+    }
 }

@@ -26,6 +26,13 @@ data class BusinessHours(
     val byDay: Map<String, String> = emptyMap(),
 )
 
+@Serializable
+data class HiddenTripPlace(
+    val id: String,
+    val name: String,
+    val city: String = "",
+)
+
 class SettingsStore(private val context: Context) {
     private object Keys {
         // Onboarding / profile
@@ -81,11 +88,17 @@ class SettingsStore(private val context: Context) {
         // Private zones (minimal): storeIds to never prompt for
         val ignoredStoreIdsJson = stringPreferencesKey("ignoredStoreIdsJson")
 
+        // Manual trip: hidden places metadata (for items not stored in DB)
+        val hiddenTripPlacesJson = stringPreferencesKey("hiddenTripPlacesJson")
+
         // UI: expanded store city sections in Settings
         val expandedStoreCitiesJson = stringPreferencesKey("expandedStoreCitiesJson")
 
         // Manual trip UI
         val manualTripStoreSortMode = stringPreferencesKey("manualTripStoreSortMode")
+
+        // UI theme
+        val darkModeEnabled = booleanPreferencesKey("darkModeEnabled")
 
         // Backend sync
         val backendBaseUrl = stringPreferencesKey("backendBaseUrl")
@@ -174,6 +187,14 @@ class SettingsStore(private val context: Context) {
             .toSet()
     }
 
+    val hiddenTripPlaces: Flow<List<HiddenTripPlace>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.hiddenTripPlacesJson].orEmpty()
+        if (raw.isBlank()) emptyList() else runCatching { json.decodeFromString<List<HiddenTripPlace>>(raw) }
+            .getOrDefault(emptyList())
+            .distinctBy { it.id }
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    }
+
     val expandedStoreCities: Flow<Set<String>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.expandedStoreCitiesJson].orEmpty()
         if (raw.isBlank()) emptySet() else runCatching { json.decodeFromString<List<String>>(raw) }
@@ -184,6 +205,10 @@ class SettingsStore(private val context: Context) {
     // Manual trip store list sort mode. Values: NAME | DISTANCE | VISITS
     val manualTripStoreSortMode: Flow<String> = context.dataStore.data.map {
         it[Keys.manualTripStoreSortMode] ?: "NAME"
+    }
+
+    val darkModeEnabled: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.darkModeEnabled] ?: false
     }
 
     val backendBaseUrl: Flow<String> = context.dataStore.data.map {
@@ -216,6 +241,10 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[Keys.trackingEnabled] = enabled }
     }
 
+    suspend fun setDarkModeEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.darkModeEnabled] = enabled }
+    }
+
     suspend fun setBackendBaseUrl(value: String) {
         val v = value.trim()
         context.dataStore.edit { it[Keys.backendBaseUrl] = v }
@@ -238,6 +267,17 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit {
             it[Keys.backendLastSyncAtMillis] = atMillis
             it[Keys.backendLastSyncResult] = result
+        }
+    }
+
+    /**
+     * Clears ALL saved settings for this app (DataStore preferences).
+     *
+     * Use to restart onboarding / simulate a fresh install.
+     */
+    suspend fun clearAll() {
+        context.dataStore.edit { prefs ->
+            prefs.clear()
         }
     }
 
@@ -414,6 +454,40 @@ class SettingsStore(private val context: Context) {
             }.toList()
 
             prefs[Keys.ignoredStoreIdsJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun upsertHiddenTripPlaceMeta(place: HiddenTripPlace) {
+        val normalizedId = place.id.trim()
+        if (normalizedId.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.hiddenTripPlacesJson].orEmpty()
+            val list = if (current.isBlank()) emptyList() else runCatching {
+                json.decodeFromString<List<HiddenTripPlace>>(current)
+            }.getOrDefault(emptyList())
+
+            val updated = list
+                .filterNot { it.id == normalizedId }
+                .plus(place.copy(id = normalizedId))
+                .distinctBy { it.id }
+
+            prefs[Keys.hiddenTripPlacesJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun removeHiddenTripPlaceMeta(id: String) {
+        val normalizedId = id.trim()
+        if (normalizedId.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.hiddenTripPlacesJson].orEmpty()
+            val list = if (current.isBlank()) emptyList() else runCatching {
+                json.decodeFromString<List<HiddenTripPlace>>(current)
+            }.getOrDefault(emptyList())
+
+            val updated = list.filterNot { it.id == normalizedId }
+            prefs[Keys.hiddenTripPlacesJson] = json.encodeToString(updated)
         }
     }
 

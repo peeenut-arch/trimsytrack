@@ -4,8 +4,6 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,6 +23,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -46,7 +45,12 @@ import java.time.Instant
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-fun TripDetailScreen(tripId: Long, onBack: () -> Unit) {
+fun TripDetailScreen(
+    tripId: Long,
+    showAddMediaImmediately: Boolean = false,
+    onOpenMediaReviewForTrip: (Long) -> Unit,
+    onBack: () -> Unit,
+) {
     val vm: TripDetailViewModel = viewModel(factory = TripDetailViewModel.factory(tripId))
 
     val trip by vm.trip.collectAsState()
@@ -55,29 +59,16 @@ fun TripDetailScreen(tripId: Long, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val importMessage = remember { mutableStateOf<String?>(null) }
+    val showAddMediaPrompt = remember { mutableStateOf(showAddMediaImmediately) }
 
-    val addReceiptLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-        onResult = { pickedUri ->
-            if (pickedUri == null) return@rememberLauncherForActivityResult
-            importMessage.value = null
-            scope.launch {
-                try {
-                    val imported = withContext(Dispatchers.IO) {
-                        importReceiptToAppFiles(
-                            context = context,
-                            tripId = tripId,
-                            sourceUri = pickedUri,
-                        )
-                    }
-                    AppGraph.tripRepository.addAttachment(imported)
-                    importMessage.value = "Receipt saved."
-                } catch (e: Exception) {
-                    importMessage.value = "Failed to save receipt: ${e.message ?: e.javaClass.simpleName}"
-                }
-            }
-        }
-    )
+    val autoOpenedReview = remember { mutableStateOf(false) }
+    LaunchedEffect(showAddMediaImmediately) {
+        if (!showAddMediaImmediately) return@LaunchedEffect
+        if (autoOpenedReview.value) return@LaunchedEffect
+        autoOpenedReview.value = true
+        showAddMediaPrompt.value = false
+        onOpenMediaReviewForTrip(tripId)
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -114,16 +105,36 @@ fun TripDetailScreen(tripId: Long, onBack: () -> Unit) {
             Text(trip?.notes ?: "", style = MaterialTheme.typography.bodyMedium)
 
             Spacer(Modifier.height(18.dp))
-            Text("Receipts", style = MaterialTheme.typography.titleMedium)
+            Text("Pictures/Recipts", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
+
+            if (showAddMediaPrompt.value) {
+                Text(
+                    "Add media to this trip now?",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
+                )
+                Spacer(Modifier.height(8.dp))
+            }
 
             OutlinedButton(
                 onClick = {
-                    addReceiptLauncher.launch(arrayOf("image/*", "application/pdf"))
+                    showAddMediaPrompt.value = false
+                    onOpenMediaReviewForTrip(tripId)
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Add receipt")
+                Text("Add media")
+            }
+
+            if (showAddMediaPrompt.value) {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    TextButton(
+                        onClick = { showAddMediaPrompt.value = false },
+                    ) {
+                        Text("Not now")
+                    }
+                }
             }
 
             if (importMessage.value != null) {
@@ -138,7 +149,7 @@ fun TripDetailScreen(tripId: Long, onBack: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             if (attachments.isEmpty()) {
                 Text(
-                    "No receipts saved yet.",
+                    "No pictures/recipts saved yet.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )
@@ -187,6 +198,8 @@ fun TripDetailScreen(tripId: Long, onBack: () -> Unit) {
 private fun importReceiptToAppFiles(
     context: android.content.Context,
     tripId: Long,
+    tripDay: java.time.LocalDate?,
+    tripStoreNameSnapshot: String?,
     sourceUri: Uri,
 ): AttachmentEntity {
     val resolver = context.contentResolver
@@ -204,8 +217,18 @@ private fun importReceiptToAppFiles(
         else -> ""
     }
 
-    val destDir = File(context.filesDir, "receipts/${tripId}").apply { mkdirs() }
-    val destFile = File(destDir, "${System.currentTimeMillis()}_${safeName}${extension}")
+    val tripPrefix = buildString {
+        if (tripDay != null) append(tripDay.toString())
+        if (!tripStoreNameSnapshot.isNullOrBlank()) {
+            if (isNotEmpty()) append(" ")
+            append(tripStoreNameSnapshot)
+        }
+    }.trim()
+
+    val safeTripPrefix = sanitizeFileName(tripPrefix).ifBlank { "trip_${tripId}" }
+
+    val destDir = File(context.filesDir, "evidence/${tripId}").apply { mkdirs() }
+    val destFile = File(destDir, "${safeTripPrefix}_${System.currentTimeMillis()}_${safeName}${extension}")
 
     resolver.openInputStream(sourceUri).use { input ->
         requireNotNull(input) { "Could not open selected file" }
@@ -224,7 +247,7 @@ private fun importReceiptToAppFiles(
         tripId = tripId,
         uri = contentUri.toString(),
         mimeType = mimeType,
-        displayName = originalName,
+        displayName = if (tripPrefix.isBlank()) originalName else "$tripPrefix — $originalName",
         addedAt = Instant.now(),
     )
 }

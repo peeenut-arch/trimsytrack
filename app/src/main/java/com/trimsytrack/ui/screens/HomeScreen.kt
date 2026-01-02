@@ -1,6 +1,8 @@
 package com.trimsytrack.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,27 +18,56 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Place
-import androidx.compose.material.icons.automirrored.rounded.MenuBook
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Place
-import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import coil.compose.AsyncImage
 import com.trimsytrack.AppGraph
+import com.trimsytrack.R
 import com.trimsytrack.ui.components.HomeTileIds
-import com.trimsytrack.ui.components.LargeActionTile
 
 @Composable
 fun HomeScreen(
-    onManualTrip: () -> Unit,
+    onAddTrip: (withMedia: Boolean) -> Unit,
     onReviewPlaces: () -> Unit,
     onJournal: () -> Unit,
+    onCamera: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
+    
+    @Composable
+    fun HomeIconButton(
+        iconResId: Int,
+        iconImageUri: String?,
+        onClick: () -> Unit,
+    ) {
+        val size = 130.dp
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!iconImageUri.isNullOrBlank()) {
+                AsyncImage(
+                    model = iconImageUri,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Image(
+                    painter = painterResource(id = iconResId),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -66,31 +97,28 @@ fun HomeScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
-            LargeActionTile(
-                label = "Manual Trip",
-                baseColor = MaterialTheme.colorScheme.primary,
-                icon = Icons.Rounded.Add,
-                frameIcon = Icons.Outlined.Add,
+            HomeIconButton(
+                iconResId = R.drawable.trip,
                 iconImageUri = homeTileIconImages[HomeTileIds.ManualTrip],
-                onClick = onManualTrip,
+                onClick = { onAddTrip(false) },
             )
 
-            LargeActionTile(
-                label = "Review Places",
-                baseColor = MaterialTheme.colorScheme.secondary,
-                icon = Icons.Rounded.Place,
-                frameIcon = Icons.Outlined.Place,
+            HomeIconButton(
+                iconResId = R.drawable.notifications,
                 iconImageUri = homeTileIconImages[HomeTileIds.ReviewPlaces],
                 onClick = onReviewPlaces,
             )
 
-            LargeActionTile(
-                label = "Journal",
-                baseColor = MaterialTheme.colorScheme.tertiary,
-                icon = Icons.AutoMirrored.Rounded.MenuBook,
-                frameIcon = Icons.AutoMirrored.Outlined.MenuBook,
+            HomeIconButton(
+                iconResId = R.drawable.journal,
                 iconImageUri = homeTileIconImages[HomeTileIds.Journal],
                 onClick = onJournal,
+            )
+
+            HomeIconButton(
+                iconResId = R.drawable.camera,
+                iconImageUri = homeTileIconImages[HomeTileIds.Camera],
+                onClick = onCamera,
             )
         }
     }

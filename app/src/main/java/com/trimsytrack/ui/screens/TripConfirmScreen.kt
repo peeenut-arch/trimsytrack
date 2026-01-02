@@ -27,7 +27,11 @@ import com.trimsytrack.ui.vm.TripConfirmViewModel
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-fun TripConfirmScreen(promptId: Long, onDone: () -> Unit) {
+fun TripConfirmScreen(
+    promptId: Long,
+    onAddTrip: (Long) -> Unit,
+    onAddTripWithMedia: (Long) -> Unit,
+) {
     val vm: TripConfirmViewModel = viewModel(factory = TripConfirmViewModel.factory(promptId))
 
     val state by vm.state.collectAsState()
@@ -91,9 +95,20 @@ fun TripConfirmScreen(promptId: Long, onDone: () -> Unit) {
 
             Button(
                 enabled = state.canConfirm,
-                onClick = { vm.confirm(notes.value, onDone) }
+                onClick = { vm.confirm(notes.value, onCreated = onAddTrip) },
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (state.isConfirming) "Saving…" else "Confirm & calculate distance")
+                Text(if (state.isConfirming) "Saving…" else "Add trip")
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Button(
+                enabled = state.canConfirm,
+                onClick = { vm.confirm(notes.value, onCreated = onAddTripWithMedia) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (state.isConfirming) "Saving…" else "Add trip & media")
             }
 
             if (state.error != null) {

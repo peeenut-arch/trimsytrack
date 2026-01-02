@@ -55,7 +55,7 @@ fun ReviewPlacesScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
-                title = { Text("Review places") },
+                title = { Text("Notifications") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
