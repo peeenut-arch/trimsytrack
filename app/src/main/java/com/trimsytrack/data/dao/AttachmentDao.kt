@@ -24,6 +24,12 @@ interface AttachmentDao {
     @Query("SELECT * FROM attachments WHERE profileId = :profileId")
     suspend fun listAll(profileId: String): List<AttachmentEntity>
 
+    @Query("SELECT COUNT(*) FROM attachments WHERE profileId = :profileId AND tripId = :tripId")
+    suspend fun countByTrip(profileId: String, tripId: Long): Int
+
+    @Query("SELECT * FROM attachments WHERE profileId = :profileId AND id = :id")
+    suspend fun getById(profileId: String, id: Long): AttachmentEntity?
+
     @Query("DELETE FROM attachments WHERE profileId = :profileId AND id = :id")
     suspend fun deleteById(profileId: String, id: Long)
 

@@ -1,9 +1,13 @@
 package com.trimsytrack.ui.screens
 
+import android.app.Activity
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,7 +38,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.ui.vm.TripDetailViewModel
 import kotlinx.coroutines.Dispatchers
@@ -58,9 +66,61 @@ fun TripDetailScreen(
     val attachments by AppGraph.tripRepository.observeAttachments(tripId).collectAsState(initial = emptyList())
 
     val context = LocalContext.current
+    val activity = context as? Activity
     val scope = rememberCoroutineScope()
     val importMessage = remember { mutableStateOf<String?>(null) }
     val showAddMediaPrompt = remember { mutableStateOf(showAddMediaImmediately) }
+
+    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
+
+    val scannerOptions = remember {
+        GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(6)
+            .setResultFormats(
+                GmsDocumentScannerOptions.RESULT_FORMAT_PDF,
+                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
+            )
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+    }
+    val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+
+        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data) ?: return@rememberLauncherForActivityResult
+        val uri = scanResult.pdf?.uri ?: scanResult.pages?.firstOrNull()?.imageUri ?: return@rememberLauncherForActivityResult
+
+        val profileId = activeProfileId.ifBlank { "default" }
+        val t = trip
+        if (t == null) {
+            importMessage.value = "Trip not loaded yet. Try again."
+            return@rememberLauncherForActivityResult
+        }
+
+        scope.launch {
+            try {
+                val receiptSeq = AppGraph.settings.nextReceiptSequence(profileId)
+                val receiptId = SettingsStore.formatReceiptId(receiptSeq)
+                val entity = importReceiptToAppFiles(
+                    context = context,
+                    profileId = profileId,
+                    tripId = tripId,
+                    tripDay = t.day,
+                    tripStoreNameSnapshot = t.storeNameSnapshot,
+                    sourceUri = uri,
+                    receiptId = receiptId,
+                )
+                AppGraph.tripRepository.addAttachment(entity)
+
+                // No backend media uploads: receipts/media are local-only.
+
+                importMessage.value = "Receipt scanned and linked to trip."
+            } catch (e: Exception) {
+                importMessage.value = e.message ?: "Failed to import scanned receipt"
+            }
+        }
+    }
 
     val autoOpenedReview = remember { mutableStateOf(false) }
     LaunchedEffect(showAddMediaImmediately) {
@@ -108,6 +168,30 @@ fun TripDetailScreen(
             Spacer(Modifier.height(18.dp))
             Text("Pictures/Recipts", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = {
+                    val a = activity
+                    if (a == null) {
+                        importMessage.value = "Scanner not available in this context."
+                        return@OutlinedButton
+                    }
+
+                    importMessage.value = null
+                    scanner.getStartScanIntent(a)
+                        .addOnSuccessListener { intentSender ->
+                            scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                        }
+                        .addOnFailureListener { e ->
+                            importMessage.value = e.message ?: "Failed to start scanner"
+                        }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Experimental: Scan receipt")
+            }
+
+            Spacer(Modifier.height(10.dp))
 
             if (showAddMediaPrompt.value) {
                 Text(
@@ -203,6 +287,7 @@ private fun importReceiptToAppFiles(
     tripDay: java.time.LocalDate?,
     tripStoreNameSnapshot: String?,
     sourceUri: Uri,
+    receiptId: String,
 ): AttachmentEntity {
     val resolver = context.contentResolver
 
@@ -230,7 +315,8 @@ private fun importReceiptToAppFiles(
     val safeTripPrefix = sanitizeFileName(tripPrefix).ifBlank { "trip_${tripId}" }
 
     val destDir = File(context.filesDir, "evidence/${tripId}").apply { mkdirs() }
-    val destFile = File(destDir, "${safeTripPrefix}_${System.currentTimeMillis()}_${safeName}${extension}")
+    val safeReceiptId = sanitizeFileName(receiptId)
+    val destFile = File(destDir, "${safeReceiptId}_${safeTripPrefix}_${System.currentTimeMillis()}_${safeName}${extension}")
 
     resolver.openInputStream(sourceUri).use { input ->
         requireNotNull(input) { "Could not open selected file" }
@@ -250,7 +336,10 @@ private fun importReceiptToAppFiles(
         tripId = tripId,
         uri = contentUri.toString(),
         mimeType = mimeType,
-        displayName = if (tripPrefix.isBlank()) originalName else "$tripPrefix — $originalName",
+        displayName = when {
+            tripPrefix.isBlank() -> "$receiptId — $originalName"
+            else -> "$receiptId — $tripPrefix — $originalName"
+        },
         addedAt = Instant.now(),
     )
 }

@@ -9,6 +9,14 @@ Android (Kotlin) app that stays idle and relies on Android system geofencing to 
 - Use Android geofencing with DWELL + loitering delay.
 - Transparent, user-controlled, Play Store compliant.
 
+## Multi-app isolation (shared auth + shared backend)
+- This app's fixed `app_id` is **trimsytrack**.
+- The other app's fixed `app_id` is **trimsyapp**.
+- Every backend request must include `Authorization` (Firebase ID token), `X-App-Id`, and `X-Profile-Id`.
+- In this repo, `X-App-Id` is compiled into the APK via `BuildConfig.APP_ID`.
+  - Default: `trimsytrack`
+  - Override at build time: `./gradlew assembleDebug -PAPP_ID=trimsytrack`
+
 ## Current implementation status (in repo)
 - Project scaffolding + Compose UI theme (black minimal).
 - Room database schema for stores, prompts, trips, attachments (foundation).

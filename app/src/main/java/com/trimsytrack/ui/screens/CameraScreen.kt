@@ -1,6 +1,7 @@
 package com.trimsytrack.ui.screens
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -9,6 +10,7 @@ import android.graphics.Paint
 import android.location.Location
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
@@ -38,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +48,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -65,12 +69,16 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import coil.compose.AsyncImage
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.common.util.concurrent.ListenableFuture
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.ui.media.importDocumentToTripFiles
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.flow.first
@@ -90,7 +98,12 @@ import kotlinx.coroutines.withContext
 fun CameraScreen(
     tripId: Long? = null,
     returnCaptureToCaller: Boolean = false,
-    onCaptureConfirmed: (uri: String, capturedAtEpochMillis: Long) -> Unit = { _, _ -> },
+    onCaptureConfirmed: (
+        uri: String,
+        mimeType: String,
+        isTempLocalFileProviderUri: Boolean,
+        capturedAtEpochMillis: Long,
+    ) -> Unit = { _, _, _, _ -> },
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -140,6 +153,196 @@ fun CameraScreen(
     val pendingCapturedAt = remember { mutableStateOf<Instant?>(null) }
     val pendingLocation = remember { mutableStateOf<Location?>(null) }
     val saveStatus = remember { mutableStateOf<String?>(null) }
+    val pendingMimeType = remember { mutableStateOf<String?>(null) }
+    val pendingIsTempLocalFileProviderUri = remember { mutableStateOf<Boolean?>(null) }
+
+    val showCaptureChooser = remember { mutableStateOf(false) }
+
+    val activity = context as? Activity
+    val scannerOptions = remember {
+        GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(6)
+            .setResultFormats(
+                GmsDocumentScannerOptions.RESULT_FORMAT_PDF,
+                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
+            )
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+    }
+    val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
+            ?: return@rememberLauncherForActivityResult
+
+        val uri = scanResult.pdf?.uri ?: scanResult.pages?.firstOrNull()?.imageUri
+            ?: return@rememberLauncherForActivityResult
+
+        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        val capturedAt = Instant.now()
+
+        // Replace any pending temp capture.
+        pendingTempFile.value?.let { runCatching { it.delete() } }
+        pendingTempFile.value = null
+        pendingPreviewUri.value = uri.toString()
+        pendingCapturedAt.value = capturedAt
+        pendingLocation.value = null
+        pendingMimeType.value = mime
+        pendingIsTempLocalFileProviderUri.value = false
+
+        // If caller wants the captured media returned (review flow), return now.
+        if (returnCaptureToCaller) {
+            onCaptureConfirmed(uri.toString(), mime, false, capturedAt.toEpochMilli())
+            return@rememberLauncherForActivityResult
+        }
+
+        // If we navigated here from a specific trip, save immediately.
+        val targetTripId = tripId
+        if (targetTripId != null && targetTripId > 0L) {
+            saveStatus.value = null
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val trip = AppGraph.tripRepository.get(targetTripId)
+                            ?: throw IllegalStateException("Trip not found")
+                        val saved = importDocumentToTripFiles(
+                            context = context,
+                            profileId = trip.profileId,
+                            tripId = targetTripId,
+                            tripDay = trip.day,
+                            tripStoreNameSnapshot = trip.storeNameSnapshot,
+                            sourceUri = uri,
+                        )
+                        AppGraph.tripRepository.addAttachment(saved)
+                    }
+                }.onSuccess {
+                    saveStatus.value = "Saved."
+                    pendingPreviewUri.value = null
+                    pendingCapturedAt.value = null
+                    pendingMimeType.value = null
+                    pendingIsTempLocalFileProviderUri.value = null
+                }.onFailure {
+                    saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
+                }
+            }
+        }
+    }
+
+    fun startScan() {
+        val a = activity
+        if (a == null) {
+            captureError.value = "Scanner not available in this context."
+            return
+        }
+        scanner.getStartScanIntent(a)
+            .addOnSuccessListener { intentSender ->
+                scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+            }
+            .addOnFailureListener { e ->
+                captureError.value = e.message ?: "Failed to start scanner"
+            }
+    }
+
+    fun startPhotoCapture() {
+        captureError.value = null
+        saveStatus.value = null
+
+        // Ensure correct rotation for portrait JPEGs.
+        val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
+        imageCapture.targetRotation = rotation
+
+        val tmpDir = File(context.cacheDir, "camera_tmp").apply { mkdirs() }
+        val tempFile = File(tmpDir, "capture_${System.currentTimeMillis()}.jpg")
+        pendingTempFile.value = tempFile
+
+        val output = ImageCapture.OutputFileOptions.Builder(tempFile).build()
+        val mainExecutor = ContextCompat.getMainExecutor(context)
+
+        val capturedAt = Instant.now()
+        pendingCapturedAt.value = capturedAt
+        pendingMimeType.value = "image/jpeg"
+        pendingIsTempLocalFileProviderUri.value = true
+
+        scope.launch {
+            pendingLocation.value = if (hasFineLocationPermission) {
+                runCatching { getCurrentLocation(context) }.getOrNull()
+            } else {
+                null
+            }
+        }
+
+        imageCapture.takePicture(
+            output,
+            mainExecutor,
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    if (!tempFile.exists() || tempFile.length() < 10_000L) {
+                        captureError.value = "Saved image is empty"
+                        return
+                    }
+                    runCatching {
+                        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeFile(tempFile.absolutePath, opts)
+                        if (opts.outWidth <= 0 || opts.outHeight <= 0) {
+                            throw IllegalStateException("Invalid JPEG")
+                        }
+                    }.onFailure {
+                        captureError.value = "Saved image invalid"
+                        return
+                    }
+
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        tempFile,
+                    )
+                    pendingPreviewUri.value = uri.toString()
+
+                    // If caller wants the captured media returned (review flow), do not auto-save.
+                    if (returnCaptureToCaller) return
+
+                    // If we navigated here from a specific trip, save immediately.
+                    val targetTripId = tripId
+                    if (targetTripId != null && targetTripId > 0L) {
+                        saveStatus.value = null
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    val trip = AppGraph.tripRepository.get(targetTripId)
+                                        ?: throw IllegalStateException("Trip not found")
+                                    val saved = saveCapturedPhotoToTrip(
+                                        context = context,
+                                        trip = trip,
+                                        profileId = trip.profileId,
+                                        tempFile = tempFile,
+                                        capturedAt = capturedAt,
+                                        location = pendingLocation.value,
+                                    )
+                                    AppGraph.tripRepository.addAttachment(saved)
+                                }
+                            }.onSuccess {
+                                saveStatus.value = "Saved."
+                                runCatching { tempFile.delete() }
+                                pendingTempFile.value = null
+                                pendingPreviewUri.value = null
+                                pendingCapturedAt.value = null
+                                pendingLocation.value = null
+                                pendingMimeType.value = null
+                                pendingIsTempLocalFileProviderUri.value = null
+                            }.onFailure {
+                                saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
+                            }
+                        }
+                    }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    captureError.value = exception.message ?: exception.javaClass.simpleName
+                }
+            }
+        )
+    }
 
     val zoomRatio = remember { mutableStateOf(1f) }
 
@@ -279,99 +482,7 @@ fun CameraScreen(
                 ) {
                     Button(
                         onClick = {
-                            captureError.value = null
-                            saveStatus.value = null
-
-                            // Ensure correct rotation for portrait JPEGs.
-                            val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
-                            imageCapture.targetRotation = rotation
-
-                            val tmpDir = File(context.cacheDir, "camera_tmp").apply { mkdirs() }
-                            val tempFile = File(tmpDir, "capture_${System.currentTimeMillis()}.jpg")
-                            pendingTempFile.value = tempFile
-
-                            val output = ImageCapture.OutputFileOptions.Builder(tempFile).build()
-                            val mainExecutor = ContextCompat.getMainExecutor(context)
-
-                            val capturedAt = Instant.now()
-                            pendingCapturedAt.value = capturedAt
-
-                            scope.launch {
-                                pendingLocation.value = if (hasFineLocationPermission) {
-                                    runCatching { getCurrentLocation(context) }.getOrNull()
-                                } else {
-                                    null
-                                }
-                            }
-
-                            imageCapture.takePicture(
-                                output,
-                                mainExecutor,
-                                object : ImageCapture.OnImageSavedCallback {
-                                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                        if (!tempFile.exists() || tempFile.length() < 10_000L) {
-                                            captureError.value = "Saved image is empty"
-                                            return
-                                        }
-                                        runCatching {
-                                            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                            BitmapFactory.decodeFile(tempFile.absolutePath, opts)
-                                            if (opts.outWidth <= 0 || opts.outHeight <= 0) {
-                                                throw IllegalStateException("Invalid JPEG")
-                                            }
-                                        }.onFailure {
-                                            captureError.value = "Saved image invalid"
-                                            return
-                                        }
-
-                                        val uri = FileProvider.getUriForFile(
-                                            context,
-                                            "${context.packageName}.fileprovider",
-                                            tempFile,
-                                        )
-                                        pendingPreviewUri.value = uri.toString()
-
-                                        // If caller wants the captured media returned (review flow), do not auto-save.
-                                        if (returnCaptureToCaller) return
-
-                                        // If we navigated here from a specific trip, save immediately.
-                                        val targetTripId = tripId
-                                        if (targetTripId != null && targetTripId > 0L) {
-                                            saveStatus.value = null
-                                            scope.launch {
-                                                runCatching {
-                                                    withContext(Dispatchers.IO) {
-                                                        val trip = AppGraph.tripRepository.get(targetTripId)
-                                                            ?: throw IllegalStateException("Trip not found")
-                                                        val saved = saveCapturedPhotoToTrip(
-                                                            context = context,
-                                                            trip = trip,
-                                                            profileId = trip.profileId,
-                                                            tempFile = tempFile,
-                                                            capturedAt = capturedAt,
-                                                            location = pendingLocation.value,
-                                                        )
-                                                        AppGraph.tripRepository.addAttachment(saved)
-                                                    }
-                                                }.onSuccess {
-                                                    saveStatus.value = "Saved."
-                                                    runCatching { tempFile.delete() }
-                                                    pendingTempFile.value = null
-                                                    pendingPreviewUri.value = null
-                                                    pendingCapturedAt.value = null
-                                                    pendingLocation.value = null
-                                                }.onFailure {
-                                                    saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    override fun onError(exception: ImageCaptureException) {
-                                        captureError.value = exception.message ?: exception.javaClass.simpleName
-                                    }
-                                }
-                            )
+                            showCaptureChooser.value = true
                         },
                         shape = CircleShape,
                         contentPadding = PaddingValues(0.dp),
@@ -384,18 +495,55 @@ fun CameraScreen(
                         )
                     }
                 }
+
+                if (showCaptureChooser.value) {
+                    AlertDialog(
+                        onDismissRequest = { showCaptureChooser.value = false },
+                        title = { Text("Camera") },
+                        text = { Text("Choose capture mode") },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showCaptureChooser.value = false
+                                    startPhotoCapture()
+                                },
+                            ) {
+                                Text("Take photo")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    showCaptureChooser.value = false
+                                    startScan()
+                                },
+                            ) {
+                                Text("Scan document")
+                            }
+                        },
+                    )
+                }
             } else {
                 Text(
                     "Preview",
                     style = MaterialTheme.typography.titleMedium,
                 )
-                AsyncImage(
-                    model = pendingPreviewUri.value,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(220.dp),
-                )
+                val mime = pendingMimeType.value
+                if (mime != null && mime.startsWith("image/")) {
+                    AsyncImage(
+                        model = pendingPreviewUri.value,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                    )
+                } else {
+                    Text(
+                        "Preview not available for ${mime ?: "file"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
 
                 Spacer(Modifier.height(4.dp))
 
@@ -408,11 +556,13 @@ fun CameraScreen(
                             onClick = {
                                 val uri = pendingPreviewUri.value ?: return@Button
                                 val capturedAt = pendingCapturedAt.value ?: Instant.now()
-                                onCaptureConfirmed(uri, capturedAt.toEpochMilli())
+                                val mt = pendingMimeType.value ?: "application/octet-stream"
+                                val isTemp = pendingIsTempLocalFileProviderUri.value ?: false
+                                onCaptureConfirmed(uri, mt, isTemp, capturedAt.toEpochMilli())
                             },
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text("Use photo")
+                            Text("Use")
                         }
                         Button(
                             onClick = {
@@ -421,6 +571,8 @@ fun CameraScreen(
                                 pendingPreviewUri.value = null
                                 pendingCapturedAt.value = null
                                 pendingLocation.value = null
+                                pendingMimeType.value = null
+                                pendingIsTempLocalFileProviderUri.value = null
                             },
                             modifier = Modifier.weight(1f),
                         ) {
@@ -450,30 +602,44 @@ fun CameraScreen(
                                 .clickable {
                                     val tempFile = pendingTempFile.value
                                     val capturedAt = pendingCapturedAt.value
-                                    if (tempFile == null || capturedAt == null) return@clickable
+                                    val previewUri = pendingPreviewUri.value
+                                    if (capturedAt == null || previewUri.isNullOrBlank()) return@clickable
 
                                     saveStatus.value = null
 
                                     scope.launch {
                                         runCatching {
                                             withContext(Dispatchers.IO) {
-                                                val saved = saveCapturedPhotoToTrip(
-                                                    context = context,
-                                                    trip = t,
-                                                    profileId = t.profileId,
-                                                    tempFile = tempFile,
-                                                    capturedAt = capturedAt,
-                                                    location = pendingLocation.value,
-                                                )
+                                                val saved = if (tempFile != null) {
+                                                    saveCapturedPhotoToTrip(
+                                                        context = context,
+                                                        trip = t,
+                                                        profileId = t.profileId,
+                                                        tempFile = tempFile,
+                                                        capturedAt = capturedAt,
+                                                        location = pendingLocation.value,
+                                                    )
+                                                } else {
+                                                    importDocumentToTripFiles(
+                                                        context = context,
+                                                        profileId = t.profileId,
+                                                        tripId = t.id,
+                                                        tripDay = t.day,
+                                                        tripStoreNameSnapshot = t.storeNameSnapshot,
+                                                        sourceUri = android.net.Uri.parse(previewUri),
+                                                    )
+                                                }
                                                 AppGraph.tripRepository.addAttachment(saved)
                                             }
                                         }.onSuccess {
                                             saveStatus.value = "Saved to ${t.day} ${t.storeNameSnapshot}."
-                                            runCatching { tempFile.delete() }
+                                            runCatching { tempFile?.delete() }
                                             pendingTempFile.value = null
                                             pendingPreviewUri.value = null
                                             pendingCapturedAt.value = null
                                             pendingLocation.value = null
+                                            pendingMimeType.value = null
+                                            pendingIsTempLocalFileProviderUri.value = null
                                         }.onFailure {
                                             saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
                                         }

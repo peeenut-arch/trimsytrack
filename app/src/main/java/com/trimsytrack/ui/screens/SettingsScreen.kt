@@ -123,10 +123,13 @@ fun SettingsScreen(
     onOpenOnboarding: () -> Unit,
     onOpenAuth: () -> Unit,
     onOpenEvidence: () -> Unit,
+    onOpenProfileLocation: () -> Unit,
+    onOpenSavedStores: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
+    val focusManager = LocalFocusManager.current
 
     val driverDataRepository = remember {
         DriverDataRepository(
@@ -237,6 +240,31 @@ fun SettingsScreen(
     val backendLastSyncResult by AppGraph.settings.backendLastSyncResult.collectAsState(initial = "")
 
     val darkModeEnabled by AppGraph.settings.darkModeEnabled.collectAsState(initial = false)
+
+    // Settings UI layout: allow reverting to the previous tabbed layout.
+    val useLegacySettingsLayout by AppGraph.settings.useLegacySettingsLayout.collectAsState(initial = false)
+    var showLayoutDialog by rememberSaveable { mutableStateOf(false) }
+
+    // Editable text fields: keep local state to avoid DataStore roundtrip fighting typing.
+    var vehicleRegHasFocus by remember { mutableStateOf(false) }
+    var driverNameHasFocus by remember { mutableStateOf(false) }
+    var vehicleRegText by rememberSaveable(activeProfileId) { mutableStateOf(vehicleRegNumber) }
+    var driverNameText by rememberSaveable(activeProfileId) { mutableStateOf(driverName) }
+
+    LaunchedEffect(vehicleRegNumber, vehicleRegHasFocus) {
+        if (!vehicleRegHasFocus) vehicleRegText = vehicleRegNumber
+    }
+    LaunchedEffect(driverName, driverNameHasFocus) {
+        if (!driverNameHasFocus) driverNameText = driverName
+    }
+
+    fun commitVehicleReg() {
+        scope.launch { AppGraph.settings.setVehicleRegNumber(vehicleRegText) }
+    }
+
+    fun commitDriverName() {
+        scope.launch { AppGraph.settings.setDriverName(driverNameText) }
+    }
 
     var backendDailySyncText by rememberSaveable { mutableStateOf(minutesToTime(backendDailySyncMinutes)) }
     var backendDailySyncError by remember { mutableStateOf<String?>(null) }
@@ -536,6 +564,35 @@ fun SettingsScreen(
         )
     }
 
+    if (showLayoutDialog) {
+        AlertDialog(
+            onDismissRequest = { showLayoutDialog = false },
+            title = { Text("Settings layout") },
+            text = {
+                Text(
+                    if (useLegacySettingsLayout) {
+                        "Switch to the simplified settings layout? (You can switch back anytime.)"
+                    } else {
+                        "Revert to the previous (classic) settings layout? (You can switch back anytime.)"
+                    }
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showLayoutDialog = false
+                        scope.launch { AppGraph.settings.setUseLegacySettingsLayout(!useLegacySettingsLayout) }
+                    },
+                ) {
+                    Text(if (useLegacySettingsLayout) "Use simplified" else "Use classic")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLayoutDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
@@ -559,19 +616,21 @@ fun SettingsScreen(
                         navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
                     )
                 )
-                TabRow(selectedTabIndex = selectedTab) {
-                    tabTitles.forEachIndexed { index, title ->
-                        val icon = when (index) {
-                            0 -> Icons.Filled.Settings
-                            1 -> Icons.Filled.Tune
-                            else -> Icons.Filled.AccountCircle
+                if (useLegacySettingsLayout) {
+                    TabRow(selectedTabIndex = selectedTab) {
+                        tabTitles.forEachIndexed { index, title ->
+                            val icon = when (index) {
+                                0 -> Icons.Filled.Settings
+                                1 -> Icons.Filled.Tune
+                                else -> Icons.Filled.AccountCircle
+                            }
+                            Tab(
+                                selected = selectedTab == index,
+                                onClick = { selectedTab = index },
+                                text = { Text(title) },
+                                icon = { Icon(icon, contentDescription = null) },
+                            )
                         }
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            text = { Text(title) },
-                            icon = { Icon(icon, contentDescription = null) },
-                        )
                     }
                 }
             }
@@ -589,7 +648,7 @@ fun SettingsScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            if (selectedTab == 0) {
+            if (useLegacySettingsLayout && selectedTab == 0) {
                 item {
                     SettingsSectionCard(title = "Resehanterare") {
                         TabRow(
@@ -637,23 +696,47 @@ fun SettingsScreen(
                                 )
 
                                 OutlinedTextField(
-                                    value = vehicleRegNumber,
-                                    onValueChange = { scope.launch { AppGraph.settings.setVehicleRegNumber(it) } },
+                                    value = vehicleRegText,
+                                    onValueChange = { vehicleRegText = it },
                                     label = { Text("Vehicle registration number") },
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                                        .onFocusChanged {
+                                            val hadFocus = vehicleRegHasFocus
+                                            vehicleRegHasFocus = it.isFocused
+                                            if (hadFocus && !it.isFocused) commitVehicleReg()
+                                        },
                                     singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(
+                                        onDone = {
+                                            commitVehicleReg()
+                                            focusManager.clearFocus()
+                                        },
+                                    ),
                                 )
 
                                 OutlinedTextField(
-                                    value = driverName,
-                                    onValueChange = { scope.launch { AppGraph.settings.setDriverName(it) } },
+                                    value = driverNameText,
+                                    onValueChange = { driverNameText = it },
                                     label = { Text("Driver name") },
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                                        .onFocusChanged {
+                                            val hadFocus = driverNameHasFocus
+                                            driverNameHasFocus = it.isFocused
+                                            if (hadFocus && !it.isFocused) commitDriverName()
+                                        },
                                     singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(
+                                        onDone = {
+                                            commitDriverName()
+                                            focusManager.clearFocus()
+                                        },
+                                    ),
                                 )
 
                                 OutlinedTextField(
@@ -957,7 +1040,7 @@ fun SettingsScreen(
                 }
             }
 
-            if (selectedTab == 1) {
+            if (useLegacySettingsLayout && selectedTab == 1) {
                 item {
                     SettingsSectionCard(title = "Tracking & permissions") {
                         ListItem(
@@ -1372,7 +1455,7 @@ fun SettingsScreen(
                     }
                 }
             }
-            if (selectedTab == 2) {
+            if (useLegacySettingsLayout && selectedTab == 2) {
                 item {
                     SettingsSectionCard(title = "Account") {
                         ListItem(
@@ -1387,6 +1470,27 @@ fun SettingsScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onOpenAuth() },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Settings layout") },
+                            supportingContent = {
+                                Text(
+                                    if (useLegacySettingsLayout) "Classic (tabs)" else "Simplified",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showLayoutDialog = true },
                         )
                     }
                 }
@@ -1456,6 +1560,48 @@ fun SettingsScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onOpenOnboarding() },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Test Ping") },
+                            supportingContent = {
+                                Text(
+                                    "Send a test notification with your current GPS location",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenProfileLocation() },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Saved stores") },
+                            supportingContent = {
+                                Text(
+                                    "Search stores and add individually",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenSavedStores() },
                         )
                     }
                 }
@@ -1808,13 +1954,731 @@ fun SettingsScreen(
                 }
             }
 
-            if (selectedTab == 1) {
+            if (!useLegacySettingsLayout) {
                 item {
-                    Text(
-                        "No prompts? Step out and back in, then wait until dwell ends.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                    )
+                    SettingsSectionCard(title = "Profile") {
+                        ListItem(
+                            headlineContent = { Text("Name") },
+                            supportingContent = {
+                                Text(
+                                    if (profileName.isBlank()) "Not set" else profileName,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    editedProfileName = profileName
+                                    showEditProfileNameDialog = true
+                                },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Profile picture") },
+                            supportingContent = {
+                                val status = if (activeProfilePhotoUri.isNullOrBlank()) "Not set" else "Set"
+                                Text(
+                                    status,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { changeProfilePhotoLauncher.launch(arrayOf("image/*")) },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Subprofile setup") },
+                            supportingContent = {
+                                Text(
+                                    "Selected: $subProfileLabel",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenOnboarding() },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Test Ping") },
+                            supportingContent = {
+                                Text(
+                                    "Send a test notification with your current GPS location",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenProfileLocation() },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Saved stores") },
+                            supportingContent = {
+                                Text(
+                                    "Search stores and add individually",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenSavedStores() },
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Driver & vehicle") {
+                        Text(
+                            "Trip journal",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+
+                        OutlinedTextField(
+                            value = journalYear.toString(),
+                            onValueChange = { raw ->
+                                val parsed = raw.filter { it.isDigit() }.take(4).toIntOrNull()
+                                if (parsed != null) scope.launch { AppGraph.settings.setJournalYear(parsed) }
+                            },
+                            label = { Text("Year") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            singleLine = true,
+                        )
+
+                        OutlinedTextField(
+                            value = vehicleRegText,
+                            onValueChange = { vehicleRegText = it },
+                            label = { Text("Vehicle registration number") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .onFocusChanged {
+                                    val hadFocus = vehicleRegHasFocus
+                                    vehicleRegHasFocus = it.isFocused
+                                    if (hadFocus && !it.isFocused) commitVehicleReg()
+                                },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    commitVehicleReg()
+                                    focusManager.clearFocus()
+                                },
+                            ),
+                        )
+
+                        OutlinedTextField(
+                            value = driverNameText,
+                            onValueChange = { driverNameText = it },
+                            label = { Text("Driver name") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .onFocusChanged {
+                                    val hadFocus = driverNameHasFocus
+                                    driverNameHasFocus = it.isFocused
+                                    if (hadFocus && !it.isFocused) commitDriverName()
+                                },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    commitDriverName()
+                                    focusManager.clearFocus()
+                                },
+                            ),
+                        )
+
+                        OutlinedTextField(
+                            value = businessHomeAddress,
+                            onValueChange = { scope.launch { AppGraph.settings.setBusinessHomeAddress(it) } },
+                            label = { Text("Business home address") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            singleLine = false,
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                        ) {
+                            OutlinedTextField(
+                                value = odometerYearStartKm,
+                                onValueChange = { scope.launch { AppGraph.settings.setOdometerYearStartKm(it) } },
+                                label = { Text("Odometer (year start, km)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = odometerYearEndKm,
+                                onValueChange = { scope.launch { AppGraph.settings.setOdometerYearEndKm(it) } },
+                                label = { Text("Odometer (year end, km)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                            )
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Text(
+                            "Driver Data (backup)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                        Text(
+                            "Upload/download a full snapshot (DB + settings). Download replaces local data.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                        )
+                        if (!driverDataStatus.isNullOrBlank()) {
+                            Text(
+                                driverDataStatus ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        driverDataBusy = true
+                                        driverDataStatus = "Uploading (backend-authoritative)…"
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                driverDataRepository.uploadSnapshot()
+                                            }
+                                        }.onSuccess {
+                                            storedDataError = null
+                                            runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
+                                                .onSuccess { storedDataCounts = it }
+                                                .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+                                            driverDataStatus = "Upload complete (local overwritten by backend)."
+                                        }.onFailure {
+                                            driverDataStatus = "Upload failed: ${it.message ?: it.javaClass.simpleName}"
+                                        }
+                                        driverDataBusy = false
+                                    }
+                                },
+                                enabled = !driverDataBusy,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Upload")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        driverDataBusy = true
+                                        driverDataStatus = "Downloading + restoring…"
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                driverDataRepository.downloadAndRestore()
+                                            }
+                                        }.onSuccess {
+                                            storedDataError = null
+                                            runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
+                                                .onSuccess { storedDataCounts = it }
+                                                .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+                                            driverDataStatus = "Restore complete."
+                                        }.onFailure {
+                                            driverDataStatus = "Restore failed: ${it.message ?: it.javaClass.simpleName}"
+                                        }
+                                        driverDataBusy = false
+                                    }
+                                },
+                                enabled = !driverDataBusy,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Download & restore")
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Text(
+                            "Export",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+
+                        OutlinedButton(
+                            onClick = {
+                                if (exporting) return@OutlinedButton
+                                exporting = true
+                                exportMessage = null
+                                scope.launch {
+                                    try {
+                                        val result = KorjournalExporter.exportYearCsv(
+                                            context = context,
+                                            settings = AppGraph.settings,
+                                            trips = AppGraph.tripRepository,
+                                            year = journalYear,
+                                        )
+
+                                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/csv"
+                                            putExtra(Intent.EXTRA_SUBJECT, "Körjournal ${journalYear}")
+                                            putExtra(Intent.EXTRA_STREAM, result.uri)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(Intent.createChooser(shareIntent, "Share körjournal"))
+                                        exportMessage = "Exported ${result.tripCount} trips: ${result.displayName}"
+                                    } catch (e: Exception) {
+                                        exportMessage = "Export failed: ${e.message ?: e.javaClass.simpleName}"
+                                    } finally {
+                                        exporting = false
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            enabled = !exporting,
+                        ) {
+                            Text(if (exporting) "Exporting..." else "Export körjournal (CSV)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                if (exporting) return@OutlinedButton
+                                val defaultName = "korjournal_${journalYear}_${LocalDate.now()}.csv"
+                                saveKorjournalLauncher.launch(defaultName)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            enabled = !exporting,
+                        ) {
+                            Text("Spara körjournal som fil (CSV)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                if (exporting) return@OutlinedButton
+                                exporting = true
+                                exportMessage = null
+                                scope.launch {
+                                    try {
+                                        val defaultName = "korjournal_${journalYear}_${LocalDate.now()}.csv"
+                                        KorjournalExporter.exportYearCsvToDownloads(
+                                            context = context,
+                                            settings = AppGraph.settings,
+                                            trips = AppGraph.tripRepository,
+                                            year = journalYear,
+                                            displayName = defaultName,
+                                        )
+                                        exportMessage = "Saved trips to Downloads/TrimsyTRACK."
+                                    } catch (e: Exception) {
+                                        exportMessage = "Save to Downloads failed: ${e.message ?: e.javaClass.simpleName}"
+                                    } finally {
+                                        exporting = false
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            enabled = !exporting,
+                        ) {
+                            Text("Spara i Hämtade filer (Download)")
+                        }
+
+                        if (exportMessage != null) {
+                            Text(
+                                exportMessage ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "GPS") {
+                        Text(
+                            "No prompts? Step out and back in, then wait until dwell ends.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Tracking & permissions") {
+                        // Reuse the existing card content by showing the same controls as in the legacy GPS tab.
+                        ListItem(
+                            headlineContent = { Text("Tracking") },
+                            supportingContent = { Text("Uses Android geofencing only (no GPS polling).") },
+                            trailingContent = {
+                                Switch(
+                                    checked = trackingEnabled,
+                                    onCheckedChange = { enabled ->
+                                        scope.launch {
+                                            if (enabled) {
+                                                if (!hasFineLocation || !hasBackgroundLocation) {
+                                                    permissionHint.value = "Grant permissions first."
+                                                    requestNeededPermissions()
+                                                    return@launch
+                                                }
+                                                permissionHint.value = null
+                                                AppGraph.settings.setTrackingEnabled(true)
+                                                AppGraph.geofenceSyncManager.scheduleSync("user_enabled")
+                                            } else {
+                                                AppGraph.settings.setTrackingEnabled(false)
+                                                AppGraph.geofenceSyncManager.scheduleDisable("user_disabled")
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        ListItem(
+                            headlineContent = { Text("Permissions") },
+                            supportingContent = {
+                                Text(
+                                    "Location: ${if (hasFineLocation) "OK" else "MISSING"}\n" +
+                                        "Background location: ${if (hasBackgroundLocation) "OK" else "MISSING"}\n" +
+                                        "Notifications: ${if (hasNotifications) "OK" else "MISSING"}",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Open") } },
+                        )
+
+                        if (permissionHint.value != null) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Text(
+                                permissionHint.value ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Automation") {
+                        ListItem(
+                            headlineContent = { Text("Automation") },
+                            supportingContent = {
+                                Text(
+                                    "Auto-asks when you stay at a place. Dwell ${dwell}m • Radius ${radius}m",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = if (automationExpanded) "Collapse" else "Expand",
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { automationExpanded = !automationExpanded },
+                        )
+
+                        if (automationExpanded) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                            Text(
+                                "Dwell = how long you must stay before it asks.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+
+                            SettingStepper(
+                                label = "Dwell time (minutes)",
+                                description = "Wait this long at a store before a prompt.",
+                                value = dwell,
+                                min = 1,
+                                max = 60,
+                                onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
+                            )
+                            SettingStepper(
+                                label = "Detection radius (meters)",
+                                description = "How close you must be to count as 'there'.",
+                                value = radius,
+                                min = 75,
+                                max = 150,
+                                onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
+                            )
+                            SettingStepper(
+                                label = "Daily prompt limit",
+                                description = "Max number of prompts per day.",
+                                value = limit,
+                                min = 1,
+                                max = 200,
+                                onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
+                            )
+                            SettingStepper(
+                                label = "Quiet time after dismiss (minutes)",
+                                description = "After you press Dismiss, it stays quiet.",
+                                value = suppression,
+                                min = 0,
+                                max = 24 * 60,
+                                onChange = { scope.launch { AppGraph.settings.setSuppressionMinutes(it) } },
+                            )
+
+                            OutlinedButton(
+                                onClick = { scope.launch { AppGraph.geofenceSyncManager.scheduleSync("manual_sync") } },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                            ) { Text("Update places") }
+                            Text(
+                                "Refreshes the phone's invisible 'fences'.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                            )
+
+                            Spacer(Modifier.height(12.dp))
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Hidden & synced") {
+                        ListItem(
+                            headlineContent = { Text("Hidden + synced") },
+                            supportingContent = { Text(if (hiddenAndSyncedExpanded) "Expanded" else "Collapsed") },
+                            trailingContent = {
+                                Icon(
+                                    if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { hiddenAndSyncedExpanded = !hiddenAndSyncedExpanded },
+                        )
+
+                        if (hiddenAndSyncedExpanded) {
+                            // Keep existing detailed content by leaving it in the file; in simplified layout
+                            // we intentionally keep this section collapsed by default.
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Text(
+                                "Open this section in classic layout for full controls.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Saved places") {
+                        val savedPlaces = remember(allStores) { allStores.filter { it.isFavorite } }
+
+                        if (savedPlaces.isEmpty()) {
+                            Text(
+                                "No saved places yet. Tap ⭐ on a synced store to save it here.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            )
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "Show hidden",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Switch(
+                                    checked = showHiddenPlaces,
+                                    onCheckedChange = { showHiddenPlaces = it },
+                                )
+                            }
+                            SavedPlacesByCategoryList(
+                                stores = savedPlaces,
+                                userLocation = userLocation,
+                                ignoredStoreIds = ignoredStoreIds,
+                                showHidden = showHiddenPlaces,
+                                onHideWithUndo = { store ->
+                                    scope.launch {
+                                        AppGraph.settings.setStoreIgnored(store.id, true)
+                                        val result = snackbarHostState.showSnackbar(
+                                            message = "Hidden: ${store.name}",
+                                            actionLabel = "Undo",
+                                            withDismissAction = true,
+                                        )
+                                        if (result == SnackbarResult.ActionPerformed) {
+                                            AppGraph.settings.setStoreIgnored(store.id, false)
+                                        }
+                                    }
+                                },
+                                onRestore = { store ->
+                                    scope.launch { AppGraph.settings.setStoreIgnored(store.id, false) }
+                                },
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Account") {
+                        ListItem(
+                            headlineContent = { Text("Sign in") },
+                            supportingContent = { Text("Google or email/password") },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenAuth() },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Settings layout") },
+                            supportingContent = {
+                                Text(
+                                    "Simplified (tap to revert)",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showLayoutDialog = true },
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Appearance") {
+                        ListItem(
+                            headlineContent = { Text("Dark mode") },
+                            supportingContent = { Text(if (darkModeEnabled) "On" else "Off") },
+                            trailingContent = {
+                                Switch(
+                                    checked = darkModeEnabled,
+                                    onCheckedChange = { enabled ->
+                                        scope.launch { AppGraph.settings.setDarkModeEnabled(enabled) }
+                                    },
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    scope.launch { AppGraph.settings.setDarkModeEnabled(!darkModeEnabled) }
+                                },
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Backend/Data") {
+                        ListItem(
+                            headlineContent = { Text("Backend/Data") },
+                            supportingContent = { Text(if (backendDataExpanded) "Expanded" else "Collapsed") },
+                            trailingContent = {
+                                Icon(
+                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { backendDataExpanded = !backendDataExpanded },
+                        )
+
+                        if (backendDataExpanded) {
+                            // Keep existing detailed block by switching to classic layout.
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Text(
+                                "Open this section in classic layout for full controls.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSectionCard(title = "Evidence") {
+                        ListItem(
+                            headlineContent = { Text("Evidence") },
+                            supportingContent = { Text("Open a 3× grid of trip photos") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenEvidence() },
+                        )
+                    }
                 }
             }
         }

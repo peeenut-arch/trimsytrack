@@ -19,7 +19,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import java.util.UUID
@@ -67,7 +66,7 @@ class DriverDataRepository(
 
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
-            .client(OkHttpClient.Builder().build())
+            .client(AppGraph.backendHttpClient)
             .addConverterFactory(ScalarsConverterFactory.create())
             .build()
         val api = retrofit.create(DriverDataApi::class.java)
@@ -96,7 +95,7 @@ class DriverDataRepository(
 
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
-            .client(OkHttpClient.Builder().build())
+            .client(AppGraph.backendHttpClient)
             .addConverterFactory(ScalarsConverterFactory.create())
             .build()
         val api = retrofit.create(DriverDataApi::class.java)
@@ -135,7 +134,7 @@ class DriverDataRepository(
 
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
-            .client(OkHttpClient.Builder().build())
+            .client(AppGraph.backendHttpClient)
             .addConverterFactory(ScalarsConverterFactory.create())
             .build()
         val api = retrofit.create(DriverDataApi::class.java)

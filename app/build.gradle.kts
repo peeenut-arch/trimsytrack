@@ -50,6 +50,11 @@ android {
             ).trim()
 
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+
+        // Multi-app isolation: a stable app_id (compiled into the APK).
+        // Backend uses this to prevent cross-app data leakage.
+        val fixedAppId = (providers.gradleProperty("APP_ID").orNull ?: "trimsytrack").trim()
+        buildConfigField("String", "APP_ID", "\"$fixedAppId\"")
     }
 
     buildTypes {
@@ -72,6 +77,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -108,6 +114,8 @@ dependencies {
 
     implementation(libs.play.services.location)
     implementation(libs.play.services.auth)
+    implementation(libs.play.services.maps)
+    implementation(libs.play.services.mlkit.document.scanner)
     implementation(libs.google.places)
 
     implementation(libs.androidx.camera.camera2)

@@ -16,6 +16,7 @@ import com.trimsytrack.data.Migrations
 import com.trimsytrack.data.sync.BackendSyncManager
 import com.trimsytrack.data.sync.BackendSyncRepository
 import com.trimsytrack.notifications.Notifications
+import com.trimsytrack.network.BackendRequestInterceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -58,6 +59,9 @@ object AppGraph {
     lateinit var backendSyncManager: BackendSyncManager
         private set
 
+    lateinit var backendHttpClient: OkHttpClient
+        private set
+
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
@@ -66,6 +70,8 @@ object AppGraph {
             appContext = context.applicationContext
 
             settings = SettingsStore(appContext)
+
+            backendHttpClient = buildBackendHttpClient()
 
             db = Room.databaseBuilder(appContext, AppDatabase::class.java, "trimsytrack.db")
                 .addMigrations(
@@ -90,6 +96,17 @@ object AppGraph {
 
             initialized = true
         }
+    }
+
+    private fun buildBackendHttpClient(): OkHttpClient {
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.BASIC
+        }
+
+        return OkHttpClient.Builder()
+            .addInterceptor(BackendRequestInterceptor(settings))
+            .addInterceptor(logging)
+            .build()
     }
 
     private fun buildRoutesService(): RoutesDistanceService {

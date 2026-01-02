@@ -1,7 +1,9 @@
 package com.trimsytrack.ui.screens
 
 import android.net.Uri
+import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -16,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -24,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -40,6 +44,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.trimsytrack.AppGraph
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.ui.media.moveTempFileProviderUriToTripFiles
@@ -77,6 +84,40 @@ fun TripMediaReviewScreen(
     val status = remember { mutableStateOf<String?>(null) }
     val saving = remember { mutableStateOf(false) }
 
+    val showCaptureChooser = remember { mutableStateOf(false) }
+
+    val activity = context as? Activity
+    val scannerOptions = remember {
+        GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(6)
+            .setResultFormats(
+                GmsDocumentScannerOptions.RESULT_FORMAT_PDF,
+                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
+            )
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+    }
+    val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
+            ?: return@rememberLauncherForActivityResult
+
+        val uri = scanResult.pdf?.uri ?: scanResult.pages?.firstOrNull()?.imageUri
+            ?: return@rememberLauncherForActivityResult
+
+        status.value = null
+        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        val added = PendingMedia(
+            uri = uri,
+            mimeType = mime,
+            isTempLocalFileProviderUri = false,
+        )
+        items.value = items.value + added
+        selectedIndex.intValue = items.value.size - 1
+    }
+
     val uploadLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
         onResult = { uris ->
@@ -97,17 +138,23 @@ fun TripMediaReviewScreen(
 
     val cameraUriState = savedStateHandle.getStateFlow<String?>("cameraCaptureUri", null).collectAsState()
     val cameraAtState = savedStateHandle.getStateFlow<Long?>("cameraCaptureAt", null).collectAsState()
+    val cameraMimeState = savedStateHandle.getStateFlow<String?>("cameraCaptureMimeType", null).collectAsState()
+    val cameraIsTempState = savedStateHandle.getStateFlow<Boolean?>("cameraCaptureIsTemp", null).collectAsState()
 
     LaunchedEffect(cameraUriState.value) {
         val uriString = cameraUriState.value ?: return@LaunchedEffect
         val capturedAt = cameraAtState.value
+        val mimeType = cameraMimeState.value ?: "image/jpeg"
+        val isTempLocal = cameraIsTempState.value ?: true
         savedStateHandle.remove<String>("cameraCaptureUri")
         savedStateHandle.remove<Long>("cameraCaptureAt")
+        savedStateHandle.remove<String>("cameraCaptureMimeType")
+        savedStateHandle.remove<Boolean>("cameraCaptureIsTemp")
 
         val added = PendingMedia(
             uri = Uri.parse(uriString),
-            mimeType = "image/jpeg",
-            isTempLocalFileProviderUri = true,
+            mimeType = mimeType,
+            isTempLocalFileProviderUri = isTempLocal,
             capturedAtEpochMillis = capturedAt,
         )
         items.value = items.value + added
@@ -191,12 +238,12 @@ fun TripMediaReviewScreen(
                 OutlinedButton(
                     onClick = {
                         status.value = null
-                        onTakePhoto()
+                        showCaptureChooser.value = true
                     },
                     modifier = Modifier.weight(1f),
                     enabled = !saving.value,
                 ) {
-                    Text("Take photo")
+                    Text("Camera")
                 }
 
                 Spacer(Modifier.weight(0.08f))
@@ -211,6 +258,45 @@ fun TripMediaReviewScreen(
                 ) {
                     Text("Upload")
                 }
+            }
+
+            if (showCaptureChooser.value) {
+                AlertDialog(
+                    onDismissRequest = { showCaptureChooser.value = false },
+                    title = { Text("Add media") },
+                    text = { Text("Choose how to add media") },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showCaptureChooser.value = false
+                                onTakePhoto()
+                            },
+                        ) {
+                            Text("Take photo")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                showCaptureChooser.value = false
+                                val a = activity
+                                if (a == null) {
+                                    status.value = "Scanner not available in this context."
+                                    return@TextButton
+                                }
+                                scanner.getStartScanIntent(a)
+                                    .addOnSuccessListener { intentSender ->
+                                        scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                                    }
+                                    .addOnFailureListener { e ->
+                                        status.value = e.message ?: "Failed to start scanner"
+                                    }
+                            },
+                        ) {
+                            Text("Scan document")
+                        }
+                    },
+                )
             }
 
             Button(

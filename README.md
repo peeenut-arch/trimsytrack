@@ -12,6 +12,11 @@ Core behavior:
   - `MAPS_API_KEY=YOUR_KEY`
 - APIs used (serverless, direct HTTPS): Google Maps **Routes API** (distance) and optionally **Geocoding API** (manual address → lat/lng cached once).
 
+## Multi-app + shared backend
+- This app uses a fixed `app_id` of `trimsytrack` (compiled into the APK as `BuildConfig.APP_ID`).
+- The other app should use `trimsyapp`.
+- Override for builds: `./gradlew assembleDebug -PAPP_ID=trimsytrack`
+
 ## Play Store / privacy principles
 - No foreground service.
 - No GPS polling.

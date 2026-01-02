@@ -7,9 +7,10 @@ import retrofit2.http.PUT
 import retrofit2.http.Path
 
 /**
- * Minimal, auth-less API contract.
+ * Backend-authoritative API.
  *
- * Backend is expected to persist and return the JSON blob verbatim.
+ * Auth: Firebase ID token is sent via Authorization header by the shared OkHttp client.
+ * Scope: X-App-Id and X-Profile-Id are always included for multi-app and per-profile isolation.
  */
 interface DriverDataApi {
     @GET("api/v1/driverdata/{driverId}")

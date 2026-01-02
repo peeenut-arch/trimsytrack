@@ -59,6 +59,9 @@ data class ProfileScopedSnapshot(
     // Selected onboarding preset ("subprofile"), e.g. IndustryProfile.ELECTRICIAN.id
     val subProfileId: String = "",
 
+    // Profile tools
+    val lastPingAtMillis: Long = 0,
+
     val trackingEnabled: Boolean = false,
     val regionCode: String = "demo",
 
@@ -108,6 +111,15 @@ data class ProfileScopedSnapshot(
 )
 
 class SettingsStore(private val context: Context) {
+    companion object {
+        const val RECEIPT_ID_PREFIX = "djtest"
+
+        fun formatReceiptId(sequence: Long): String {
+            val safeSeq = if (sequence < 0) 0 else sequence
+            return "$RECEIPT_ID_PREFIX-${safeSeq.toString().padStart(6, '0')}"
+        }
+    }
+
     private object Keys {
         // Onboarding / profile
         val profileId = stringPreferencesKey("profileId")
@@ -116,6 +128,9 @@ class SettingsStore(private val context: Context) {
 
         // Onboarding preset ("subprofile")
         val subProfileId = stringPreferencesKey("subProfileId")
+
+        // Profile tools
+        val lastPingAtMillis = longPreferencesKey("lastPingAtMillis")
 
         // Profiles list (multi-profile)
         val profilesJson = stringPreferencesKey("profilesJson")
@@ -183,6 +198,9 @@ class SettingsStore(private val context: Context) {
         // UI theme
         val darkModeEnabled = booleanPreferencesKey("darkModeEnabled")
 
+        // UI: Settings screen layout (classic = previous tabbed layout)
+        val useLegacySettingsLayout = booleanPreferencesKey("useLegacySettingsLayout")
+
         // Backend sync
         val backendBaseUrl = stringPreferencesKey("backendBaseUrl")
         val backendDriverId = stringPreferencesKey("backendDriverId")
@@ -202,6 +220,23 @@ class SettingsStore(private val context: Context) {
     val profileName: Flow<String> = context.dataStore.data.map { it[Keys.profileName].orEmpty() }
     val onboardingCompleted: Flow<Boolean> = context.dataStore.data.map { it[Keys.onboardingCompleted] ?: false }
     val subProfileId: Flow<String> = context.dataStore.data.map { it[Keys.subProfileId].orEmpty() }
+    val lastPingAtMillis: Flow<Long> = context.dataStore.data.map { it[Keys.lastPingAtMillis] ?: 0L }
+
+    suspend fun nextReceiptSequence(profileId: String): Long {
+        val normalizedProfileId = profileId.ifBlank { "default" }
+        val key = longPreferencesKey("receiptSeq_$normalizedProfileId")
+        var allocated = 0L
+        context.dataStore.edit { prefs ->
+            val current = prefs[key] ?: 0L
+            allocated = current + 1L
+            prefs[key] = allocated
+        }
+        return allocated
+    }
+
+    val useLegacySettingsLayout: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.useLegacySettingsLayout] ?: false
+    }
 
     val profiles: Flow<List<ProfileMeta>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.profilesJson].orEmpty()
@@ -283,6 +318,8 @@ class SettingsStore(private val context: Context) {
 
             subProfileId = prefs[Keys.subProfileId].orEmpty(),
 
+            lastPingAtMillis = prefs[Keys.lastPingAtMillis] ?: 0L,
+
             trackingEnabled = prefs[Keys.trackingEnabled] ?: false,
             regionCode = prefs[Keys.regionCode] ?: "demo",
 
@@ -331,6 +368,7 @@ class SettingsStore(private val context: Context) {
         prefs[Keys.profileName] = snapshot.profileName
         prefs[Keys.onboardingCompleted] = snapshot.onboardingCompleted
         prefs[Keys.subProfileId] = snapshot.subProfileId
+        prefs[Keys.lastPingAtMillis] = snapshot.lastPingAtMillis
 
         prefs[Keys.trackingEnabled] = snapshot.trackingEnabled
         prefs[Keys.regionCode] = snapshot.regionCode
@@ -634,6 +672,10 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[Keys.subProfileId] = v }
     }
 
+    suspend fun setLastPingAtMillis(value: Long) {
+        context.dataStore.edit { it[Keys.lastPingAtMillis] = value }
+    }
+
     suspend fun setProfileOnboardingCompleted(profileId: String, completed: Boolean) {
         val id = profileId.trim()
         if (id.isBlank()) return
@@ -687,6 +729,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setDarkModeEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.darkModeEnabled] = enabled }
+    }
+
+    suspend fun setUseLegacySettingsLayout(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.useLegacySettingsLayout] = enabled }
     }
 
     suspend fun setBackendBaseUrl(value: String) {

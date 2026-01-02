@@ -1,6 +1,7 @@
 package com.trimsytrack.ui
 
 import android.content.Intent
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +32,9 @@ import com.trimsytrack.ui.screens.TripConfirmScreen
 import com.trimsytrack.ui.screens.TripDetailScreen
 import com.trimsytrack.ui.screens.TripMediaReviewScreen
 import com.trimsytrack.ui.screens.ProfileSelectScreen
+import com.trimsytrack.ui.screens.ProfileLocationScreen
+import com.trimsytrack.ui.screens.SavedStoresScreen
+import com.trimsytrack.ui.screens.TestPingActionsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -50,6 +54,9 @@ object Routes {
     const val Confirm = "confirm"
     const val Trip = "trip"
     const val MediaReview = "mediaReview"
+    const val ProfileLocation = "profileLocation"
+    const val SavedStores = "savedStores"
+    const val TestPing = "testPing"
 }
 
 @Composable
@@ -70,8 +77,31 @@ fun AppNavHost(intent: Intent) {
         intent.getLongExtra("tripId", -1L).takeIf { it > 0 }
     }
 
-    val pendingInitialRoute = remember(initialPromptId, initialTripId) {
+    val openTestPing = remember(intent) {
+        intent.getBooleanExtra("openTestPing", false)
+    }
+    val testPingAddress = remember(intent) {
+        intent.getStringExtra("testPingAddress").orEmpty()
+    }
+    val testPingLat = remember(intent) {
+        intent.getDoubleExtra("testPingLat", Double.NaN)
+    }
+    val testPingLng = remember(intent) {
+        intent.getDoubleExtra("testPingLng", Double.NaN)
+    }
+
+    val testPingRoute = remember(openTestPing, testPingAddress, testPingLat, testPingLng) {
+        if (!openTestPing) return@remember null
+
+        val latText = if (testPingLat.isFinite()) testPingLat.toString() else ""
+        val lngText = if (testPingLng.isFinite()) testPingLng.toString() else ""
+        val addressEncoded = Uri.encode(testPingAddress)
+        "${Routes.TestPing}?address=$addressEncoded&lat=${Uri.encode(latText)}&lng=${Uri.encode(lngText)}"
+    }
+
+    val pendingInitialRoute = remember(testPingRoute, initialPromptId, initialTripId) {
         when {
+            testPingRoute != null -> testPingRoute
             initialPromptId != null -> "${Routes.Confirm}/$initialPromptId"
             initialTripId != null -> "${Routes.Trip}/$initialTripId"
             else -> null
@@ -118,6 +148,16 @@ fun AppNavHost(intent: Intent) {
                 popUpTo(Routes.Auth) { inclusive = false }
                 launchSingleTop = true
             }
+        }
+    }
+
+    // If the app is already running and a notification intent arrives, navigate once we're ready.
+    LaunchedEffect(pendingInitialRoute, currentUser, activeProfileId) {
+        val route = pendingInitialRoute ?: return@LaunchedEffect
+        if (currentUser == null) return@LaunchedEffect
+        if (activeProfileId.isBlank()) return@LaunchedEffect
+        navController.navigate(route) {
+            launchSingleTop = true
         }
     }
 
@@ -212,7 +252,43 @@ fun AppNavHost(intent: Intent) {
                 onOpenOnboarding = { navController.navigate(Routes.Onboarding) },
                 onOpenAuth = { navController.navigate(Routes.Auth) },
                 onOpenEvidence = { navController.navigate(Routes.Evidence) },
+                onOpenProfileLocation = { navController.navigate(Routes.ProfileLocation) },
+                onOpenSavedStores = { navController.navigate(Routes.SavedStores) },
             )
+        }
+
+        composable(Routes.ProfileLocation) {
+            ProfileLocationScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(
+            route = "${Routes.TestPing}?address={address}&lat={lat}&lng={lng}",
+            arguments = listOf(
+                navArgument("address") { type = NavType.StringType; defaultValue = "" },
+                navArgument("lat") { type = NavType.StringType; defaultValue = "" },
+                navArgument("lng") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) { entry ->
+            val address = entry.arguments?.getString("address").orEmpty()
+            val lat = entry.arguments?.getString("lat").orEmpty()
+            val lng = entry.arguments?.getString("lng").orEmpty()
+
+            TestPingActionsScreen(
+                address = address,
+                lat = lat,
+                lng = lng,
+                onOpenTrip = { tripId, addReceipt ->
+                    navController.navigate("${Routes.Trip}/$tripId?addMedia=${if (addReceipt) 1 else 0}") {
+                        popUpTo(Routes.TestPing) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(Routes.SavedStores) {
+            SavedStoresScreen(onBack = { navController.popBackStack() })
         }
 
         composable(
@@ -230,10 +306,12 @@ fun AppNavHost(intent: Intent) {
             CameraScreen(
                 tripId = tripId.takeIf { id -> id > 0L },
                 returnCaptureToCaller = returnCapture,
-                onCaptureConfirmed = { uri, capturedAt ->
+                onCaptureConfirmed = { uri, mimeType, isTempLocalFileProviderUri, capturedAt ->
                     val prev = navController.previousBackStackEntry
                     prev?.savedStateHandle?.set("cameraCaptureUri", uri)
                     prev?.savedStateHandle?.set("cameraCaptureAt", capturedAt)
+                    prev?.savedStateHandle?.set("cameraCaptureMimeType", mimeType)
+                    prev?.savedStateHandle?.set("cameraCaptureIsTemp", isTempLocalFileProviderUri)
                     navController.popBackStack()
                 },
                 onBack = { navController.popBackStack() },

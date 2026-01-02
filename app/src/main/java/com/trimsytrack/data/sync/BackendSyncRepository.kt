@@ -14,7 +14,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
@@ -41,6 +40,21 @@ class BackendSyncRepository(
             )
         )
 
+        val hasReceipt = runCatching {
+            AppGraph.db.attachmentDao().countByTrip(profileId, localTripId) > 0
+        }.getOrDefault(false)
+
+        val receiptFlag = if (hasReceipt) "Y" else "N"
+        val notesWithReceipt = buildString {
+            val base = trip.notes.trim()
+            if (base.isNotBlank()) {
+                append(base)
+                append("\n")
+            }
+            append("Receipt: ")
+            append(receiptFlag)
+        }
+
         val intent = TripCreateIntent(
             clientRef = clientRef,
             driverId = driverId,
@@ -51,7 +65,7 @@ class BackendSyncRepository(
             storeNameSnapshot = trip.storeNameSnapshot,
             storeLatSnapshot = trip.storeLatSnapshot,
             storeLngSnapshot = trip.storeLngSnapshot,
-            notes = trip.notes,
+            notes = notesWithReceipt,
             distanceMeters = trip.distanceMeters,
             durationMinutes = trip.durationMinutes,
             createdAtClient = trip.createdAt.toString(),
@@ -80,7 +94,7 @@ class BackendSyncRepository(
 
             val retrofit = Retrofit.Builder()
                 .baseUrl(baseUrl)
-                .client(OkHttpClient.Builder().build())
+                .client(AppGraph.backendHttpClient)
                 .addConverterFactory(ScalarsConverterFactory.create())
                 .build()
             val api = retrofit.create(BackendSyncApi::class.java)
