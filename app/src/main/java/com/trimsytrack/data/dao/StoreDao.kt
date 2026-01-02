@@ -13,42 +13,45 @@ interface StoreDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(stores: List<StoreEntity>)
 
-    @Query("SELECT * FROM stores WHERE regionCode = :regionCode")
-    suspend fun getByRegion(regionCode: String): List<StoreEntity>
+    @Query("SELECT * FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
+    suspend fun getByRegion(profileId: String, regionCode: String): List<StoreEntity>
 
-    @Query("SELECT * FROM stores WHERE isActive = 1")
-    suspend fun getActive(): List<StoreEntity>
+    @Query("SELECT * FROM stores WHERE profileId = :profileId AND isActive = 1")
+    suspend fun getActive(profileId: String): List<StoreEntity>
 
-    @Query("UPDATE stores SET isActive = 0")
-    suspend fun deactivateAll()
+    @Query("UPDATE stores SET isActive = 0 WHERE profileId = :profileId")
+    suspend fun deactivateAll(profileId: String)
 
-    @Query("UPDATE stores SET isActive = 1 WHERE id IN (:storeIds)")
-    suspend fun activateByIds(storeIds: List<String>)
+    @Query("UPDATE stores SET isActive = 1 WHERE profileId = :profileId AND id IN (:storeIds)")
+    suspend fun activateByIds(profileId: String, storeIds: List<String>)
 
-    @Query("SELECT * FROM stores WHERE id = :id")
-    suspend fun getById(id: String): StoreEntity?
+    @Query("SELECT * FROM stores WHERE profileId = :profileId AND id = :id")
+    suspend fun getById(profileId: String, id: String): StoreEntity?
 
-    @Query("SELECT COUNT(*) FROM stores WHERE regionCode = :regionCode")
-    suspend fun countByRegion(regionCode: String): Int
+    @Query("SELECT COUNT(*) FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
+    suspend fun countByRegion(profileId: String, regionCode: String): Int
 
-    @Query("DELETE FROM stores WHERE regionCode = :regionCode")
-    suspend fun deleteByRegion(regionCode: String)
+    @Query("DELETE FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
+    suspend fun deleteByRegion(profileId: String, regionCode: String)
 
-    @Query("DELETE FROM stores WHERE id IN (:storeIds)")
-    suspend fun deleteByIds(storeIds: List<String>)
+    @Query("DELETE FROM stores WHERE profileId = :profileId AND id IN (:storeIds)")
+    suspend fun deleteByIds(profileId: String, storeIds: List<String>)
 
-    @Query("SELECT * FROM stores WHERE regionCode = :regionCode ORDER BY name")
-    fun observeRegion(regionCode: String): Flow<List<StoreEntity>>
+    @Query("SELECT * FROM stores WHERE profileId = :profileId AND regionCode = :regionCode ORDER BY name")
+    fun observeRegion(profileId: String, regionCode: String): Flow<List<StoreEntity>>
 
-    @Query("SELECT * FROM stores ORDER BY city, name")
-    fun observeAll(): Flow<List<StoreEntity>>
+    @Query("SELECT * FROM stores WHERE profileId = :profileId ORDER BY city, name")
+    fun observeAll(profileId: String): Flow<List<StoreEntity>>
 
-    @Query("SELECT * FROM stores")
-    suspend fun listAll(): List<StoreEntity>
+    @Query("SELECT * FROM stores WHERE profileId = :profileId")
+    suspend fun listAll(profileId: String): List<StoreEntity>
 
-    @Query("SELECT COUNT(*) FROM stores")
-    suspend fun countAll(): Int
+    @Query("SELECT COUNT(*) FROM stores WHERE profileId = :profileId")
+    suspend fun countAll(profileId: String): Int
 
-    @Query("UPDATE stores SET isFavorite = :isFavorite WHERE id = :storeId")
-    suspend fun setFavorite(storeId: String, isFavorite: Boolean)
+    @Query("UPDATE stores SET isFavorite = :isFavorite WHERE profileId = :profileId AND id = :storeId")
+    suspend fun setFavorite(profileId: String, storeId: String, isFavorite: Boolean)
+
+    @Query("UPDATE stores SET profileId = :profileId WHERE profileId = ''")
+    suspend fun claimUnscoped(profileId: String)
 }

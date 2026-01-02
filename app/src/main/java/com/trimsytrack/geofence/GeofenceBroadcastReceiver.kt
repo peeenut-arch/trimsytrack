@@ -82,6 +82,7 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
         }
 
         val store = AppGraph.storeRepository.getStore(storeId) ?: return
+        val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
         val day = LocalDate.now()
         val now = Instant.now()
 
@@ -90,7 +91,7 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
         val suppressionMinutes = AppGraph.settings.suppressionMinutes.first().coerceAtLeast(0)
         val dailyLimit = AppGraph.settings.dailyPromptLimit.first().coerceAtLeast(1)
 
-        val latest = AppGraph.db.promptDao().getLatestForStoreDay(storeId, day)
+        val latest = AppGraph.db.promptDao().getLatestForStoreDay(profileId, storeId, day)
         if (perStorePerDay && latest != null && latest.status != PromptStatus.DELETED) {
             Log.i(TAG, "DWELL suppressed: perStorePerDay storeId=$storeId status=${latest.status}")
             return
@@ -104,7 +105,7 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
             }
         }
 
-        val countToday = AppGraph.db.promptDao().countByDay(day)
+        val countToday = AppGraph.db.promptDao().countByDay(profileId, day)
         if (countToday >= dailyLimit) {
             Log.i(TAG, "DWELL suppressed: dailyLimit countToday=$countToday limit=$dailyLimit")
             return
@@ -114,6 +115,7 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
 
         val promptId = AppGraph.promptRepository.insert(
             PromptEventEntity(
+                profileId = profileId,
                 storeId = store.id,
                 storeNameSnapshot = store.name,
                 storeLatSnapshot = store.lat,
@@ -138,8 +140,9 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
     }
 
     private suspend fun handleExit(storeId: String) {
+        val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
         val day = LocalDate.now()
-        val latest = AppGraph.db.promptDao().getLatestForStoreDay(storeId, day) ?: return
+        val latest = AppGraph.db.promptDao().getLatestForStoreDay(profileId, storeId, day) ?: return
         if (latest.status != PromptStatus.TRIGGERED) return
 
         val now = Instant.now()

@@ -10,6 +10,7 @@ import java.time.Instant
     indices = [
         Index(
             value = [
+                "profileId",
                 "startLatE5",
                 "startLngE5",
                 "destLatE5",
@@ -22,6 +23,8 @@ import java.time.Instant
 )
 data class DistanceCacheEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+
+    val profileId: String,
 
     // Optional stable IDs (preferred lookup key when present)
     val startLocationId: String?,

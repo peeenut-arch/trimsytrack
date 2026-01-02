@@ -40,7 +40,8 @@ class GeofenceSyncWorker(
             "GeofenceSyncWorker: max=$max dwellMin=$dwell radiusM=$radius respS=$responsiveness"
         )
 
-        val all = AppGraph.db.storeDao().getByRegion(region).sortedBy { it.id }
+        val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+        val all = AppGraph.db.storeDao().getByRegion(profileId, region).sortedBy { it.id }
         if (all.isEmpty()) {
             Log.w(TAG, "GeofenceSyncWorker: no stores found for region=$region")
             return Result.success()

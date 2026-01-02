@@ -33,11 +33,13 @@ class DriverDataRepository(
     suspend fun exportSnapshot(): DriverData = withContext(Dispatchers.IO) {
         val driverId = settings.backendDriverId.first().ifBlank { settings.profileId.first().ifBlank { "default" } }
 
-        val stores = AppGraph.db.storeDao().listAll().map { it.toDto() }
-        val trips = AppGraph.db.tripDao().listAll().map { it.toDto() }
-        val prompts = AppGraph.db.promptDao().listAll().map { it.toDto() }
-        val runs = AppGraph.db.runDao().listAll().map { it.toDto() }
-        val attachments = AppGraph.db.attachmentDao().listAll().map { it.toDto() }
+        val profileId = settings.profileId.first().ifBlank { "default" }
+
+        val stores = AppGraph.db.storeDao().listAll(profileId).map { it.toDto() }
+        val trips = AppGraph.db.tripDao().listAll(profileId).map { it.toDto() }
+        val prompts = AppGraph.db.promptDao().listAll(profileId).map { it.toDto() }
+        val runs = AppGraph.db.runDao().listAll(profileId).map { it.toDto() }
+        val attachments = AppGraph.db.attachmentDao().listAll(profileId).map { it.toDto() }
 
         val regions = readRegionFilesBestEffort(context)
 
@@ -85,6 +87,45 @@ class DriverDataRepository(
     }
 
     /**
+     * Best-effort "cloud clear": overwrite the backend snapshot with an empty dataset.
+     *
+     * This keeps account/auth untouched; it only clears server-side DriverData stored under `driverId`.
+     */
+    suspend fun clearRemoteSnapshot(driverId: String) {
+        val baseUrl = normalizeBaseUrl(settings.backendBaseUrl.first())
+
+        val retrofit = Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(OkHttpClient.Builder().build())
+            .addConverterFactory(ScalarsConverterFactory.create())
+            .build()
+        val api = retrofit.create(DriverDataApi::class.java)
+
+        val payload = json.encodeToString(
+            DriverData.serializer(),
+            DriverData(
+                driverId = driverId,
+                settings = DriverSettings(
+                    profileId = driverId,
+                    profileName = "",
+                    onboardingCompleted = false,
+                    backendBaseUrl = baseUrl,
+                    backendDriverId = driverId,
+                ),
+                regions = emptyMap(),
+                stores = emptyList(),
+                trips = emptyList(),
+                promptEvents = emptyList(),
+                runs = emptyList(),
+                distanceCache = emptyList(),
+                attachments = emptyList(),
+            )
+        )
+
+        api.upload(driverId, UUID.randomUUID().toString(), payload)
+    }
+
+    /**
      * Downloads DriverData and replaces local app DB + key settings.
      * WARNING: destructive.
      */
@@ -109,17 +150,19 @@ class DriverDataRepository(
 
     private suspend fun restoreFromSnapshot(data: DriverData) {
         withContext(Dispatchers.IO) {
+            val profileId = settings.profileId.first().ifBlank { "default" }
+
             // 1) Restore region files first (so store sync systems can work).
             writeRegionFilesBestEffort(context, data.regions)
 
             // 2) Reset DB and insert all entities.
             AppGraph.db.clearAllTables()
 
-            AppGraph.db.storeDao().upsertAll(data.stores.map { it.toEntity() })
-            AppGraph.db.tripDao().insertAll(data.trips.map { it.toEntity() })
-            AppGraph.db.promptDao().insertAll(data.promptEvents.map { it.toEntity() })
-            AppGraph.db.runDao().insertAll(data.runs.map { it.toEntity() })
-            AppGraph.db.attachmentDao().insertAll(data.attachments.map { it.toEntity() })
+            AppGraph.db.storeDao().upsertAll(data.stores.map { it.toEntity(profileId) })
+            AppGraph.db.tripDao().insertAll(data.trips.map { it.toEntity(profileId) })
+            AppGraph.db.promptDao().insertAll(data.promptEvents.map { it.toEntity(profileId) })
+            AppGraph.db.runDao().insertAll(data.runs.map { it.toEntity(profileId) })
+            AppGraph.db.attachmentDao().insertAll(data.attachments.map { it.toEntity(profileId) })
         }
 
         // 3) Restore settings.
@@ -224,7 +267,8 @@ private fun StoreEntity.toDto() = StoreDto(
     isFavorite = isFavorite,
 )
 
-private fun StoreDto.toEntity() = StoreEntity(
+private fun StoreDto.toEntity(profileId: String) = StoreEntity(
+    profileId = profileId,
     id = id,
     name = name,
     lat = lat,
@@ -255,7 +299,8 @@ private fun TripEntity.toDto() = TripDto(
     mileageRateMicros = mileageRateMicros,
 )
 
-private fun TripDto.toEntity() = TripEntity(
+private fun TripDto.toEntity(profileId: String) = TripEntity(
+    profileId = profileId,
     id = id,
     createdAt = Instant.parse(createdAt),
     day = LocalDate.parse(day),
@@ -288,7 +333,8 @@ private fun PromptEventEntity.toDto() = PromptEventDto(
     linkedTripId = linkedTripId,
 )
 
-private fun PromptEventDto.toEntity() = PromptEventEntity(
+private fun PromptEventDto.toEntity(profileId: String) = PromptEventEntity(
+    profileId = profileId,
     id = id,
     storeId = storeId,
     storeNameSnapshot = storeNameSnapshot,
@@ -310,7 +356,8 @@ private fun RunEntity.toDto() = RunDto(
     label = label,
 )
 
-private fun RunDto.toEntity() = RunEntity(
+private fun RunDto.toEntity(profileId: String) = RunEntity(
+    profileId = profileId,
     id = id,
     day = LocalDate.parse(day),
     createdAt = Instant.parse(createdAt),
@@ -333,7 +380,8 @@ private fun DistanceCacheEntity.toDto() = DistanceCacheDto(
     createdAt = createdAt.toString(),
 )
 
-private fun DistanceCacheDto.toEntity() = DistanceCacheEntity(
+private fun DistanceCacheDto.toEntity(profileId: String) = DistanceCacheEntity(
+    profileId = profileId,
     id = id,
     startLocationId = startLocationId,
     endLocationId = endLocationId,
@@ -358,7 +406,8 @@ private fun AttachmentEntity.toDto() = AttachmentDto(
     addedAt = addedAt.toString(),
 )
 
-private fun AttachmentDto.toEntity() = AttachmentEntity(
+private fun AttachmentDto.toEntity(profileId: String) = AttachmentEntity(
+    profileId = profileId,
     id = id,
     tripId = tripId,
     uri = uri,

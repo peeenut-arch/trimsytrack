@@ -21,6 +21,9 @@ import java.time.Instant
 data class SyncOutboxEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
 
+    /** Active profile that owns this outbox item. */
+    val profileId: String,
+
     val createdAt: Instant = Instant.now(),
 
     /** e.g. TRIP_CREATE, RUN_CREATE */

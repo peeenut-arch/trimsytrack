@@ -16,6 +16,9 @@ import java.time.LocalDate
 data class TripEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
 
+    /** Active profile that owns this trip. */
+    val profileId: String,
+
     // Backend-authoritative sync fields
     val clientRef: String? = null,
     val backendId: String? = null,

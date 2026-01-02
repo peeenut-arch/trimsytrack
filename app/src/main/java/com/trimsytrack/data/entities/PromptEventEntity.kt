@@ -9,12 +9,14 @@ import java.time.LocalDate
 @Entity(
     tableName = "prompt_events",
     indices = [
+        Index(value = ["profileId"], unique = false),
         Index(value = ["storeId", "day"], unique = false),
         Index(value = ["day"], unique = false),
     ]
 )
 data class PromptEventEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val profileId: String,
     val storeId: String,
     val storeNameSnapshot: String,
     val storeLatSnapshot: Double,

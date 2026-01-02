@@ -226,7 +226,7 @@ fun OnboardingScreen(
                         item {
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                "Välj branch och standardinställningar. Nästa steg är att godkänna GPS.",
+                                "Välj subprofil och standardinställningar. Nästa steg är att godkänna GPS.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.78f),
                             )
@@ -234,7 +234,7 @@ fun OnboardingScreen(
 
                         item {
                             CollapsibleHeader(
-                                title = "Branch",
+                                title = "Subprofil",
                                 expanded = expandProfile,
                                 onToggle = { expandProfile = !expandProfile },
                             )
@@ -381,8 +381,15 @@ fun OnboardingScreen(
                                     }
 
                                     scope.launch {
-                                        // Persist branch + defaults before GPS step (so the flow survives process death).
-                                        AppGraph.settings.setProfile(profile.id, profile.displayName)
+                                        // Apply preset + defaults to the active profile before GPS step
+                                        // (so the flow survives process death).
+                                        val activeId = AppGraph.settings.profileId.first().trim()
+                                        if (activeId.isBlank()) {
+                                            val createdId = AppGraph.settings.createProfile(name = profile.displayName)
+                                            AppGraph.settings.activateProfile(createdId)
+                                        }
+
+                                        AppGraph.settings.setSubProfileId(profile.id)
                                         AppGraph.settings.setPreferredCategories(chosenCategories)
                                         if (vehicleRegNumber.isNotBlank()) {
                                             AppGraph.settings.setVehicleRegNumber(vehicleRegNumber.trim())
@@ -989,6 +996,7 @@ fun OnboardingScreen(
                                             }
 
                                             AppGraph.settings.setOnboardingCompleted(true)
+                                            AppGraph.settings.setProfileOnboardingCompleted(selectedProfileId, true)
                                             syncStatus = "Klart!"
                                             onDone()
                                         } catch (e: CancellationException) {

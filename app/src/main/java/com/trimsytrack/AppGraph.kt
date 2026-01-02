@@ -71,15 +71,16 @@ object AppGraph {
                 .addMigrations(
                     Migrations.MIGRATION_3_4,
                     Migrations.MIGRATION_4_5,
+                    Migrations.MIGRATION_5_6,
                 )
                 .fallbackToDestructiveMigration()
                 .build()
 
             regionRepository = RegionRepository(appContext)
-            storeRepository = StoreRepository(db.storeDao(), regionRepository)
-            promptRepository = PromptRepository(db.promptDao())
-            tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao())
-            distanceRepository = DistanceRepository(db.distanceCacheDao(), buildRoutesService())
+            storeRepository = StoreRepository(db.storeDao(), regionRepository, settings)
+            promptRepository = PromptRepository(db.promptDao(), settings)
+            tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao(), settings)
+            distanceRepository = DistanceRepository(db.distanceCacheDao(), buildRoutesService(), settings)
 
             backendSyncRepository = BackendSyncRepository(appContext, settings)
             backendSyncManager = BackendSyncManager(appContext)

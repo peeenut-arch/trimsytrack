@@ -6,10 +6,12 @@ import com.trimsytrack.distance.RoutesDistanceService
 import java.time.Instant
 import kotlin.math.roundToInt
 import kotlin.math.ceil
+import kotlinx.coroutines.flow.first
 
 class DistanceRepository(
     private val dao: DistanceCacheDao,
     private val routes: RoutesDistanceService,
+    private val settings: SettingsStore,
 ) {
     data class RouteMetrics(
         val distanceMeters: Int,
@@ -26,9 +28,10 @@ class DistanceRepository(
         startLocationId: String? = null,
         endLocationId: String? = null,
     ): RouteMetrics {
+        val profileId = settings.profileId.first().ifBlank { "default" }
         // 1) Prefer stable location IDs when present.
         if (!startLocationId.isNullOrBlank() && !endLocationId.isNullOrBlank()) {
-            val cachedById = dao.findByLocationIds(startLocationId, endLocationId, "DRIVE")
+            val cachedById = dao.findByLocationIds(profileId, startLocationId, endLocationId, "DRIVE")
             if (cachedById != null) {
                 return RouteMetrics(
                     distanceMeters = cachedById.distanceMeters,
@@ -41,7 +44,7 @@ class DistanceRepository(
 
         // 2) Fallback to coordinate quantization for cases without stable IDs.
         val key = QuantizedLatLngPair(startLat, startLng, destLat, destLng)
-        val cached = dao.find(key.startLatE5, key.startLngE5, key.destLatE5, key.destLngE5, "DRIVE")
+        val cached = dao.find(profileId, key.startLatE5, key.startLngE5, key.destLatE5, key.destLngE5, "DRIVE")
         if (cached != null) {
             return RouteMetrics(
                 distanceMeters = cached.distanceMeters,
@@ -57,6 +60,7 @@ class DistanceRepository(
 
         dao.upsert(
             DistanceCacheEntity(
+                profileId = profileId,
                 startLocationId = startLocationId,
                 endLocationId = endLocationId,
                 startLatE5 = key.startLatE5,

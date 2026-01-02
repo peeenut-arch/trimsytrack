@@ -26,7 +26,8 @@ class BackendSyncRepository(
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun enqueueTripCreate(localTripId: Long) {
-        val trip = AppGraph.db.tripDao().getById(localTripId)
+        val profileId = settings.profileId.first().ifBlank { "default" }
+        val trip = AppGraph.db.tripDao().getById(profileId, localTripId)
             ?: return
 
         val driverId = settings.backendDriverId.first().ifBlank { settings.profileId.first().ifBlank { "default" } }
@@ -60,6 +61,7 @@ class BackendSyncRepository(
         val payloadJson = json.encodeToString(TripCreateIntent.serializer(), intent)
 
         val outbox = SyncOutboxEntity(
+            profileId = profileId,
             type = SyncOutboxEntity.TYPE_TRIP_CREATE,
             idempotencyKey = UUID.randomUUID().toString(),
             payloadJson = payloadJson,
@@ -73,6 +75,7 @@ class BackendSyncRepository(
 
     suspend fun processOutboxOnce(maxItems: Int = 50): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
+            val profileId = settings.profileId.first().ifBlank { "default" }
             val baseUrl = normalizeBaseUrl(settings.backendBaseUrl.first())
 
             val retrofit = Retrofit.Builder()
@@ -82,7 +85,7 @@ class BackendSyncRepository(
                 .build()
             val api = retrofit.create(BackendSyncApi::class.java)
 
-            val items = AppGraph.db.syncOutboxDao().listPending(limit = maxItems)
+            val items = AppGraph.db.syncOutboxDao().listPending(profileId, limit = maxItems)
             var processed = 0
 
             for (item in items) {
@@ -99,7 +102,7 @@ class BackendSyncRepository(
                         SyncOutboxEntity.TYPE_TRIP_CREATE -> {
                             val canonicalRaw = api.createTrip(item.idempotencyKey, item.payloadJson)
                             val canonical = json.decodeFromString(TripCanonical.serializer(), canonicalRaw)
-                            applyCanonicalTrip(item, canonical)
+                            applyCanonicalTrip(profileId, item, canonical)
                         }
                         else -> {
                             // Unknown type: mark rejected.
@@ -110,7 +113,7 @@ class BackendSyncRepository(
                     }
 
                     // Mark done if not already marked.
-                    val done = AppGraph.db.syncOutboxDao().getById(item.id)
+                    val done = AppGraph.db.syncOutboxDao().getById(profileId, item.id)
                     if (done != null && done.status == SyncOutboxEntity.STATUS_IN_FLIGHT) {
                         AppGraph.db.syncOutboxDao().update(done.copy(status = SyncOutboxEntity.STATUS_DONE))
                     }
@@ -124,7 +127,7 @@ class BackendSyncRepository(
                     )
 
                     if (status == SyncOutboxEntity.STATUS_REJECTED) {
-                        markTripRejectedIfLinked(item, msg)
+                        markTripRejectedIfLinked(profileId, item, msg)
                     }
                 } catch (e: Exception) {
                     AppGraph.db.syncOutboxDao().update(
@@ -137,9 +140,9 @@ class BackendSyncRepository(
         }
     }
 
-    private suspend fun applyCanonicalTrip(item: SyncOutboxEntity, canonical: TripCanonical) {
+    private suspend fun applyCanonicalTrip(profileId: String, item: SyncOutboxEntity, canonical: TripCanonical) {
         val localId = item.relatedTripLocalId ?: return
-        val trip = AppGraph.db.tripDao().getById(localId) ?: return
+        val trip = AppGraph.db.tripDao().getById(profileId, localId) ?: return
 
         val updated = trip.copy(
             backendId = canonical.backendId,
@@ -162,9 +165,9 @@ class BackendSyncRepository(
         AppGraph.db.tripDao().update(updated)
     }
 
-    private suspend fun markTripRejectedIfLinked(item: SyncOutboxEntity, reason: String) {
+    private suspend fun markTripRejectedIfLinked(profileId: String, item: SyncOutboxEntity, reason: String) {
         val localId = item.relatedTripLocalId ?: return
-        val trip = AppGraph.db.tripDao().getById(localId) ?: return
+        val trip = AppGraph.db.tripDao().getById(profileId, localId) ?: return
         AppGraph.db.tripDao().update(trip.copy(syncStatus = SyncStatus.REJECTED))
     }
 

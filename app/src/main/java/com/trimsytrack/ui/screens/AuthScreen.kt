@@ -3,24 +3,28 @@ package com.trimsytrack.ui.screens
 import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -31,6 +35,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -39,14 +45,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.trimsytrack.auth.FirebaseEmailService
+import com.trimsytrack.auth.GoogleAuthCollision
 import com.trimsytrack.auth.GoogleSignInService
 import kotlinx.coroutines.launch
 
@@ -65,15 +75,16 @@ fun AuthScreen(
 
     val currentUser = rememberFirebaseUser()
 
-    var choice by remember { mutableStateOf(AuthChoice.ROOT) }
-    var mailDialog by remember { mutableStateOf<MailDialog?>(null) }
-
-    var mailEmail by remember { mutableStateOf("") }
-    var mailPassword by remember { mutableStateOf("") }
-
-    var showDeleteAccount by remember { mutableStateOf(false) }
+    var step by remember { mutableStateOf<AuthStep>(AuthStep.Email) }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordError by remember { mutableStateOf<String?>(null) }
 
     var busy by remember { mutableStateOf(false) }
+    var busyLabel by remember { mutableStateOf<String?>(null) }
+
+    var pendingGoogleCollision by remember { mutableStateOf<GoogleAuthCollision?>(null) }
+    var showLinkDialog by remember { mutableStateOf(false) }
 
     val googleLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -82,13 +93,20 @@ fun AuthScreen(
 
             scope.launch {
                 busy = true
+                busyLabel = "Loggar in…"
                 try {
                     googleService.handleSignInResult(context, result.data)
-                    snackbarHostState.showSnackbar("Signed in with Google")
+                    snackbarHostState.showSnackbar("Klart!")
                 } catch (t: Throwable) {
-                    snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                    if (t is GoogleAuthCollision) {
+                        pendingGoogleCollision = t
+                        showLinkDialog = true
+                    } else {
+                        snackbarHostState.showSnackbar("Något gick fel")
+                    }
                 } finally {
                     busy = false
+                    busyLabel = null
                 }
             }
         }
@@ -100,7 +118,7 @@ fun AuthScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
-                title = { Text("Account") },
+                title = { Text("") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
@@ -125,285 +143,310 @@ fun AuthScreen(
         fun startGoogle() {
             scope.launch {
                 busy = true
+                busyLabel = "Loggar in…"
                 try {
                     val intent = googleService.signInIntent(context)
                     googleLauncher.launch(intent)
                 } catch (t: Throwable) {
-                    snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                    snackbarHostState.showSnackbar("Något gick fel")
                     busy = false
+                    busyLabel = null
                 }
             }
         }
 
-        Column(
+        Box(
             modifier = Modifier
                 .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .fillMaxSize()
+                .padding(20.dp),
+            contentAlignment = Alignment.Center,
         ) {
-            ListItem(
-                leadingContent = {
-                    Icon(Icons.Filled.AccountCircle, contentDescription = null)
-                },
-                headlineContent = {
-                    Text(if (currentUser != null) "Signed in" else "Not signed in")
-                },
-                supportingContent = {
-                    Text(currentUser?.email ?: "")
-                },
-                trailingContent = {
-                    if (currentUser != null) {
-                        Column {
-                            IconButton(
-                                onClick = { showDeleteAccount = true },
-                                enabled = !busy,
-                            ) {
-                                Icon(Icons.Filled.DeleteForever, contentDescription = "Delete account")
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (currentUser != null) {
+                    Text(
+                        currentUser.displayName?.takeIf { it.isNotBlank() } ?: "Inloggad",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        currentUser.email.orEmpty(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                busy = true
+                                busyLabel = "Loggar ut…"
+                                try {
+                                    emailService.signOut()
+                                    googleService.signOut()
+                                    snackbarHostState.showSnackbar("Klart!")
+                                } catch (_: Throwable) {
+                                    snackbarHostState.showSnackbar("Något gick fel")
+                                } finally {
+                                    busy = false
+                                    busyLabel = null
+                                }
                             }
-                            IconButton(
-                                onClick = {
-                                    scope.launch {
-                                        busy = true
-                                        try {
-                                            emailService.signOut()
-                                            googleService.signOut()
-                                            snackbarHostState.showSnackbar("Signed out")
-                                        } catch (t: Throwable) {
-                                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                                        } finally {
-                                            busy = false
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (busy && busyLabel != null) busyLabel!! else "Logga ut")
+                    }
+                    return@Box
+                }
+
+                // Google primary CTA
+                Button(
+                    onClick = { startGoogle() },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color.Black,
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .background(Color.White, CircleShape)
+                                .border(1.dp, Color.Black.copy(alpha = 0.12f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("G", fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.size(10.dp))
+                        Text("Fortsätt med Google")
+                    }
+                }
+
+                Text(
+                    "eller",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                )
+
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Enpost") },
+                    singleLine = true,
+                    enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                if (step is AuthStep.Password) {
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = {
+                            password = it
+                            passwordError = null
+                        },
+                        label = { Text("Lösenord") },
+                        singleLine = true,
+                        enabled = !busy,
+                        isError = passwordError != null,
+                        supportingText = {
+                            if (passwordError != null) Text(passwordError.orEmpty())
+                        },
+                        visualTransformation = if (password.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                val e = emailTrimmed(email)
+                                if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                    snackbarHostState.showSnackbar("Något gick fel")
+                                    return@launch
+                                }
+                                busy = true
+                                busyLabel = "Skickar…"
+                                try {
+                                    // Do not leak whether the email exists.
+                                    runCatching { emailService.sendPasswordReset(e) }
+                                    snackbarHostState.showSnackbar("Klart!")
+                                } finally {
+                                    busy = false
+                                    busyLabel = null
+                                }
+                            }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Glömt lösenord")
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        scope.launch {
+                            val e = emailTrimmed(email)
+                            if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                snackbarHostState.showSnackbar("Något gick fel")
+                                return@launch
+                            }
+
+                            if (step is AuthStep.Email) {
+                                busy = true
+                                busyLabel = "Loggar in…"
+                                try {
+                                    val methods = emailService.fetchSignInMethods(e)
+                                    when {
+                                        methods.contains("password") -> {
+                                            step = AuthStep.Password(existingAccount = true)
+                                            password = ""
+                                            passwordError = null
+                                        }
+                                        methods.isEmpty() -> {
+                                            step = AuthStep.Password(existingAccount = false)
+                                            password = ""
+                                            passwordError = null
+                                        }
+                                        else -> {
+                                            // e.g. Google-only: continue with Google automatically.
+                                            startGoogle()
                                         }
                                     }
-                                },
-                                enabled = !busy,
-                            ) {
-                                Icon(Icons.Filled.Logout, contentDescription = "Sign out")
+                                } catch (_: Throwable) {
+                                    snackbarHostState.showSnackbar("Något gick fel")
+                                } finally {
+                                    busy = false
+                                    busyLabel = null
+                                }
+                                return@launch
+                            }
+
+                            val passwordStep = step as AuthStep.Password
+                            if (password.length < 8) {
+                                passwordError = "Minst 8 tecken"
+                                return@launch
+                            }
+
+                            busy = true
+                            busyLabel = "Loggar in…"
+                            try {
+                                if (passwordStep.existingAccount) {
+                                    emailService.signInWithEmailPassword(e, password)
+                                } else {
+                                    emailService.createUserWithEmailPassword(e, password)
+                                }
+                                snackbarHostState.showSnackbar("Klart!")
+                            } catch (t: Throwable) {
+                                // Avoid leaking details.
+                                snackbarHostState.showSnackbar("Fel enpost eller lösenord")
+                            } finally {
+                                busy = false
+                                busyLabel = null
                             }
                         }
-                    }
-                }
-            )
-
-            when (choice) {
-                AuthChoice.ROOT -> {
-                    Button(
-                        onClick = { choice = AuthChoice.LOGIN },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Login")
-                    }
-
-                    Button(
-                        onClick = { choice = AuthChoice.CREATE },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Create")
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (busy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.size(10.dp))
+                        }
+                        Text(if (busyLabel != null) busyLabel!! else "Fortsätt")
                     }
                 }
 
-                AuthChoice.LOGIN -> {
-                    Button(
-                        onClick = { startGoogle() },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Login using Google")
-                    }
-
-                    OutlinedButton(
-                        onClick = { mailDialog = MailDialog.LOGIN },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Login using Mail")
-                    }
-
-                    TextButton(
-                        onClick = { choice = AuthChoice.ROOT },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Back")
-                    }
-                }
-
-                AuthChoice.CREATE -> {
-                    Button(
-                        onClick = { startGoogle() },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Create using Google")
-                    }
-
-                    OutlinedButton(
-                        onClick = { mailDialog = MailDialog.CREATE },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Create using Mail")
-                    }
-
-                    TextButton(
-                        onClick = { choice = AuthChoice.ROOT },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Back")
-                    }
-                }
+                Text(
+                    "Genom att fortsätta godkänner du villkoren.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(top = 2.dp),
+                )
             }
         }
 
-        val dialog = mailDialog
-        if (dialog != null) {
-            val title = if (dialog == MailDialog.LOGIN) "Login using Mail" else "Create using Mail"
+        if (showLinkDialog) {
+            val collision = pendingGoogleCollision
             AlertDialog(
-                onDismissRequest = { if (!busy) mailDialog = null },
-                title = { Text(title) },
+                onDismissRequest = { if (!busy) showLinkDialog = false },
+                title = { Text("Fortsätt") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedTextField(
-                            value = mailEmail,
-                            onValueChange = { mailEmail = it },
-                            label = { Text("Email") },
-                            singleLine = true,
-                            enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                            modifier = Modifier.fillMaxWidth(),
+                        Text(
+                            "Ange lösenord för ${collision?.email.orEmpty()} för att länka Google.",
+                            style = MaterialTheme.typography.bodyMedium,
                         )
                         OutlinedTextField(
-                            value = mailPassword,
-                            onValueChange = { mailPassword = it },
-                            label = { Text("Password") },
+                            value = password,
+                            onValueChange = {
+                                password = it
+                                passwordError = null
+                            },
+                            label = { Text("Lösenord") },
                             singleLine = true,
                             enabled = !busy,
-                            visualTransformation = if (mailPassword.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
+                            isError = passwordError != null,
+                            supportingText = {
+                                if (passwordError != null) Text(passwordError.orEmpty())
+                            },
+                            visualTransformation = if (password.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                             modifier = Modifier.fillMaxWidth(),
                         )
-
-                        if (dialog == MailDialog.LOGIN) {
-                            TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        busy = true
-                                        try {
-                                            val e = emailTrimmed(mailEmail)
-                                            if (e.isBlank() || !isProbablyValidEmail(e)) {
-                                                snackbarHostState.showSnackbar("Enter a valid email")
-                                                return@launch
-                                            }
-                                            emailService.sendPasswordReset(e)
-                                            snackbarHostState.showSnackbar("Recovery email sent")
-                                        } catch (t: Throwable) {
-                                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                                        } finally {
-                                            busy = false
-                                        }
-                                    }
-                                },
-                                enabled = !busy,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text("Recover password")
-                            }
-                        }
                     }
                 },
                 confirmButton = {
                     Button(
                         onClick = {
+                            val c = collision ?: return@Button
                             scope.launch {
+                                if (password.length < 8) {
+                                    passwordError = "Minst 8 tecken"
+                                    return@launch
+                                }
                                 busy = true
+                                busyLabel = "Loggar in…"
                                 try {
-                                    val e = emailTrimmed(mailEmail)
-                                    if (e.isBlank() || !isProbablyValidEmail(e)) {
-                                        snackbarHostState.showSnackbar("Enter a valid email")
-                                        return@launch
-                                    }
-                                    if (mailPassword.length < 6) {
-                                        snackbarHostState.showSnackbar("Password must be at least 6 characters")
-                                        return@launch
-                                    }
-
-                                    if (dialog == MailDialog.LOGIN) {
-                                        emailService.signInWithEmailPassword(e, mailPassword)
-                                        snackbarHostState.showSnackbar("Logged in")
-                                    } else {
-                                        emailService.createUserWithEmailPassword(e, mailPassword)
-                                        snackbarHostState.showSnackbar("Account created")
-                                    }
-
-                                    mailDialog = null
-                                } catch (t: Throwable) {
-                                    snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                                    emailService.signInWithEmailPassword(c.email, password)
+                                    emailService.linkCurrentUserWithCredential(c.pendingCredential)
+                                    snackbarHostState.showSnackbar("Klart!")
+                                    showLinkDialog = false
+                                    pendingGoogleCollision = null
+                                    password = ""
+                                    passwordError = null
+                                } catch (_: Throwable) {
+                                    snackbarHostState.showSnackbar("Fel enpost eller lösenord")
                                 } finally {
                                     busy = false
+                                    busyLabel = null
                                 }
                             }
                         },
                         enabled = !busy,
                     ) {
-                        Text(if (dialog == MailDialog.LOGIN) "Login" else "Create")
+                        Text(if (busyLabel != null) busyLabel!! else "Fortsätt")
                     }
                 },
                 dismissButton = {
                     TextButton(
-                        onClick = { if (!busy) mailDialog = null },
+                        onClick = { if (!busy) showLinkDialog = false },
                         enabled = !busy,
                     ) {
-                        Text("Cancel")
-                    }
-                },
-            )
-        }
-
-        if (showDeleteAccount) {
-            AlertDialog(
-                onDismissRequest = { if (!busy) showDeleteAccount = false },
-                title = { Text("Delete account") },
-                text = {
-                    Text(
-                        "This permanently deletes your Firebase account (including ${currentUser?.email.orEmpty()}). " +
-                            "You can create a new account again afterwards.",
-                    )
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                busy = true
-                                try {
-                                    emailService.deleteCurrentUser()
-                                    emailService.signOut()
-                                    googleService.signOut()
-                                    snackbarHostState.showSnackbar("Account deleted")
-                                    showDeleteAccount = false
-                                } catch (t: Throwable) {
-                                    // Common Firebase error: requires-recent-login
-                                    snackbarHostState.showSnackbar(
-                                        t.message
-                                            ?: "Delete failed (try signing in again, then delete)."
-                                    )
-                                } finally {
-                                    busy = false
-                                }
-                            }
-                        },
-                        enabled = !busy,
-                    ) {
-                        Text("Delete")
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = { if (!busy) showDeleteAccount = false },
-                        enabled = !busy,
-                    ) {
-                        Text("Cancel")
+                        Text("Avbryt")
                     }
                 },
             )
@@ -411,15 +454,9 @@ fun AuthScreen(
     }
 }
 
-private enum class AuthChoice {
-    ROOT,
-    LOGIN,
-    CREATE,
-}
-
-private enum class MailDialog {
-    LOGIN,
-    CREATE,
+private sealed interface AuthStep {
+    data object Email : AuthStep
+    data class Password(val existingAccount: Boolean) : AuthStep
 }
 
 @Composable

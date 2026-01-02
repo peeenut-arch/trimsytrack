@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
+import kotlinx.coroutines.flow.first
 import java.time.ZoneId
 import kotlin.math.*
 
@@ -164,8 +165,10 @@ class TripConfirmViewModel(
                 val now = Instant.now()
                 val createdAt = promptTriggeredAt ?: now
                 val day = promptDay ?: LocalDate.now()
+                val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
                 val tripId = AppGraph.tripRepository.createTrip(
                     TripEntity(
+                        profileId = profileId,
                         createdAt = createdAt,
                         day = day,
                         storeId = store,

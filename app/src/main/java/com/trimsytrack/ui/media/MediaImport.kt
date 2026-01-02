@@ -11,6 +11,7 @@ import java.time.Instant
 
 internal fun importDocumentToTripFiles(
     context: android.content.Context,
+    profileId: String,
     tripId: Long,
     tripDay: java.time.LocalDate?,
     tripStoreNameSnapshot: String?,
@@ -58,6 +59,7 @@ internal fun importDocumentToTripFiles(
     )
 
     return AttachmentEntity(
+        profileId = profileId,
         tripId = tripId,
         uri = contentUri.toString(),
         mimeType = mimeType,
@@ -68,6 +70,7 @@ internal fun importDocumentToTripFiles(
 
 internal fun moveTempFileProviderUriToTripFiles(
     context: android.content.Context,
+    profileId: String,
     tripId: Long,
     tripDay: java.time.LocalDate?,
     tripStoreNameSnapshot: String?,
@@ -107,6 +110,7 @@ internal fun moveTempFileProviderUriToTripFiles(
     runCatching { tempFile.delete() }
 
     return AttachmentEntity(
+        profileId = profileId,
         tripId = tripId,
         uri = destUri.toString(),
         mimeType = mimeType,

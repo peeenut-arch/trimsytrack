@@ -42,6 +42,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
+import kotlinx.coroutines.flow.first
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -197,6 +198,7 @@ fun TripDetailScreen(
 
 private fun importReceiptToAppFiles(
     context: android.content.Context,
+    profileId: String,
     tripId: Long,
     tripDay: java.time.LocalDate?,
     tripStoreNameSnapshot: String?,
@@ -244,6 +246,7 @@ private fun importReceiptToAppFiles(
     )
 
     return AttachmentEntity(
+        profileId = profileId,
         tripId = tripId,
         uri = contentUri.toString(),
         mimeType = mimeType,

@@ -17,6 +17,7 @@ import java.time.LocalDate
 import java.time.DayOfWeek
 import com.trimsytrack.data.driverdata.DriverSettings
 import com.trimsytrack.data.sync.BackendSyncMode
+import java.util.UUID
 
 private val Context.dataStore by preferencesDataStore(name = "settings")
 
@@ -33,12 +34,94 @@ data class HiddenTripPlace(
     val city: String = "",
 )
 
+@Serializable
+data class ProfileMeta(
+    /**
+     * Profile identifier.
+     */
+    val id: String,
+    /** Display name shown in the UI. */
+    val name: String,
+    /** Optional profile avatar (persisted content uri string). */
+    val photoUri: String? = null,
+    /** Epoch millis when the profile was created. Used for ordering. */
+    val createdAtMillis: Long,
+    /** Whether onboarding has been completed for this profile. */
+    val onboardingCompleted: Boolean = false,
+)
+
+@Serializable
+data class ProfileScopedSnapshot(
+    val profileId: String = "",
+    val profileName: String = "",
+    val onboardingCompleted: Boolean = false,
+
+    // Selected onboarding preset ("subprofile"), e.g. IndustryProfile.ELECTRICIAN.id
+    val subProfileId: String = "",
+
+    val trackingEnabled: Boolean = false,
+    val regionCode: String = "demo",
+
+    val activeStartMinutes: Int = 7 * 60,
+    val activeEndMinutes: Int = 18 * 60,
+    val activeDays: List<String> = listOf(
+        DayOfWeek.MONDAY.name,
+        DayOfWeek.TUESDAY.name,
+        DayOfWeek.WEDNESDAY.name,
+        DayOfWeek.THURSDAY.name,
+        DayOfWeek.FRIDAY.name,
+    ),
+
+    val dwellMinutes: Int = 5,
+    val radiusMeters: Int = 120,
+    val responsivenessSeconds: Int = 15,
+
+    val dailyPromptLimit: Int = 20,
+    val perStorePerDay: Boolean = true,
+    val suppressionMinutes: Int = 240,
+
+    val maxActiveGeofences: Int = 95,
+    val suggestLinkingWindowMinutes: Int = 180,
+
+    // Körjournal / export profile
+    val vehicleRegNumber: String = "",
+    val driverName: String = "",
+    val businessHomeAddress: String = "",
+    val businessHomeLat: Double? = null,
+    val businessHomeLng: Double? = null,
+    val journalYear: Int = LocalDate.now().year,
+    val odometerYearStartKm: String = "",
+    val odometerYearEndKm: String = "",
+
+    // Per-store customizations
+    val storeImages: Map<String, String> = emptyMap(),
+    val storeBusinessHours: Map<String, BusinessHours> = emptyMap(),
+
+    // UI / preferences
+    val homeTileIconImages: Map<String, String> = emptyMap(),
+    val preferredCategories: List<String> = emptyList(),
+    val storeSyncRadiusKm: Int = 25,
+    val ignoredStoreIds: List<String> = emptyList(),
+    val hiddenTripPlaces: List<HiddenTripPlace> = emptyList(),
+    val expandedStoreCities: List<String> = emptyList(),
+    val manualTripStoreSortMode: String = "NAME",
+)
+
 class SettingsStore(private val context: Context) {
     private object Keys {
         // Onboarding / profile
         val profileId = stringPreferencesKey("profileId")
         val profileName = stringPreferencesKey("profileName")
         val onboardingCompleted = booleanPreferencesKey("onboardingCompleted")
+
+        // Onboarding preset ("subprofile")
+        val subProfileId = stringPreferencesKey("subProfileId")
+
+        // Profiles list (multi-profile)
+        val profilesJson = stringPreferencesKey("profilesJson")
+
+        // Profile-scoped settings snapshots (profileId -> ProfileScopedSnapshot)
+        val profileSnapshotsJson = stringPreferencesKey("profileSnapshotsJson")
 
         // Prompt gating
         val activeStartMinutes = intPreferencesKey("activeStartMinutes")
@@ -118,6 +201,175 @@ class SettingsStore(private val context: Context) {
     val profileId: Flow<String> = context.dataStore.data.map { it[Keys.profileId].orEmpty() }
     val profileName: Flow<String> = context.dataStore.data.map { it[Keys.profileName].orEmpty() }
     val onboardingCompleted: Flow<Boolean> = context.dataStore.data.map { it[Keys.onboardingCompleted] ?: false }
+    val subProfileId: Flow<String> = context.dataStore.data.map { it[Keys.subProfileId].orEmpty() }
+
+    val profiles: Flow<List<ProfileMeta>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.profilesJson].orEmpty()
+        if (raw.isBlank()) emptyList() else runCatching { json.decodeFromString<List<ProfileMeta>>(raw) }
+            .getOrDefault(emptyList())
+            .distinctBy { it.id }
+            .sortedBy { it.createdAtMillis }
+    }
+
+    private fun decodeProfiles(raw: String): List<ProfileMeta> {
+        if (raw.isBlank()) return emptyList()
+        return runCatching { json.decodeFromString<List<ProfileMeta>>(raw) }
+            .getOrDefault(emptyList())
+            .distinctBy { it.id }
+            .sortedBy { it.createdAtMillis }
+    }
+
+    private fun decodeSnapshots(raw: String): Map<String, ProfileScopedSnapshot> {
+        if (raw.isBlank()) return emptyMap()
+        return runCatching { json.decodeFromString<Map<String, ProfileScopedSnapshot>>(raw) }
+            .getOrDefault(emptyMap())
+    }
+
+    private fun buildSnapshotFromPrefs(prefs: androidx.datastore.preferences.core.Preferences): ProfileScopedSnapshot {
+        val activeDays = runCatching {
+            val raw = prefs[Keys.activeDaysCsv].orEmpty().trim()
+            if (raw.isBlank()) {
+                listOf(
+                    DayOfWeek.MONDAY.name,
+                    DayOfWeek.TUESDAY.name,
+                    DayOfWeek.WEDNESDAY.name,
+                    DayOfWeek.THURSDAY.name,
+                    DayOfWeek.FRIDAY.name,
+                )
+            } else {
+                raw.split(',').mapNotNull { it.trim().takeIf { t -> t.isNotBlank() } }
+            }
+        }.getOrDefault(emptyList())
+
+        val storeImages = runCatching {
+            val raw = prefs[Keys.storeImagesJson].orEmpty()
+            if (raw.isBlank()) emptyMap() else json.decodeFromString<Map<String, String>>(raw)
+        }.getOrDefault(emptyMap())
+
+        val storeBusinessHours = runCatching {
+            val raw = prefs[Keys.storeBusinessHoursJson].orEmpty()
+            if (raw.isBlank()) emptyMap() else json.decodeFromString<Map<String, BusinessHours>>(raw)
+        }.getOrDefault(emptyMap())
+
+        val homeTileIconImages = runCatching {
+            val raw = prefs[Keys.homeTileIconImagesJson].orEmpty()
+            if (raw.isBlank()) emptyMap() else json.decodeFromString<Map<String, String>>(raw)
+        }.getOrDefault(emptyMap())
+
+        val preferredCategories = runCatching {
+            val raw = prefs[Keys.preferredCategoriesJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
+        }.getOrDefault(emptyList())
+
+        val ignoredStoreIds = runCatching {
+            val raw = prefs[Keys.ignoredStoreIdsJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
+        }.getOrDefault(emptyList())
+
+        val hiddenTripPlaces = runCatching {
+            val raw = prefs[Keys.hiddenTripPlacesJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<HiddenTripPlace>>(raw)
+        }.getOrDefault(emptyList())
+
+        val expandedStoreCities = runCatching {
+            val raw = prefs[Keys.expandedStoreCitiesJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
+        }.getOrDefault(emptyList())
+
+        return ProfileScopedSnapshot(
+            profileId = prefs[Keys.profileId].orEmpty(),
+            profileName = prefs[Keys.profileName].orEmpty(),
+            onboardingCompleted = prefs[Keys.onboardingCompleted] ?: false,
+
+            subProfileId = prefs[Keys.subProfileId].orEmpty(),
+
+            trackingEnabled = prefs[Keys.trackingEnabled] ?: false,
+            regionCode = prefs[Keys.regionCode] ?: "demo",
+
+            activeStartMinutes = prefs[Keys.activeStartMinutes] ?: (7 * 60),
+            activeEndMinutes = prefs[Keys.activeEndMinutes] ?: (18 * 60),
+            activeDays = activeDays,
+
+            dwellMinutes = prefs[Keys.dwellMinutes] ?: 5,
+            radiusMeters = prefs[Keys.radiusMeters] ?: 120,
+            responsivenessSeconds = prefs[Keys.responsivenessSeconds] ?: 15,
+
+            dailyPromptLimit = prefs[Keys.dailyPromptLimit] ?: 20,
+            perStorePerDay = prefs[Keys.perStorePerDay] ?: true,
+            suppressionMinutes = prefs[Keys.suppressionMinutes] ?: 240,
+
+            maxActiveGeofences = prefs[Keys.maxActiveGeofences] ?: 95,
+            suggestLinkingWindowMinutes = prefs[Keys.suggestLinkingWindowMinutes] ?: 180,
+
+            vehicleRegNumber = prefs[Keys.vehicleRegNumber] ?: "",
+            driverName = prefs[Keys.driverName] ?: "",
+            businessHomeAddress = prefs[Keys.businessHomeAddress] ?: "",
+            businessHomeLat = prefs[Keys.businessHomeLat]?.toDoubleOrNull(),
+            businessHomeLng = prefs[Keys.businessHomeLng]?.toDoubleOrNull(),
+            journalYear = prefs[Keys.journalYear] ?: LocalDate.now().year,
+            odometerYearStartKm = prefs[Keys.odometerYearStartKm] ?: "",
+            odometerYearEndKm = prefs[Keys.odometerYearEndKm] ?: "",
+
+            storeImages = storeImages,
+            storeBusinessHours = storeBusinessHours,
+
+            homeTileIconImages = homeTileIconImages,
+            preferredCategories = preferredCategories,
+            storeSyncRadiusKm = prefs[Keys.storeSyncRadiusKm] ?: 25,
+            ignoredStoreIds = ignoredStoreIds,
+            hiddenTripPlaces = hiddenTripPlaces,
+            expandedStoreCities = expandedStoreCities,
+            manualTripStoreSortMode = prefs[Keys.manualTripStoreSortMode] ?: "NAME",
+        )
+    }
+
+    private fun applySnapshotToPrefs(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        snapshot: ProfileScopedSnapshot,
+    ) {
+        prefs[Keys.profileId] = snapshot.profileId
+        prefs[Keys.profileName] = snapshot.profileName
+        prefs[Keys.onboardingCompleted] = snapshot.onboardingCompleted
+        prefs[Keys.subProfileId] = snapshot.subProfileId
+
+        prefs[Keys.trackingEnabled] = snapshot.trackingEnabled
+        prefs[Keys.regionCode] = snapshot.regionCode
+
+        prefs[Keys.activeStartMinutes] = snapshot.activeStartMinutes
+        prefs[Keys.activeEndMinutes] = snapshot.activeEndMinutes
+        prefs[Keys.activeDaysCsv] = snapshot.activeDays.joinToString(",")
+
+        prefs[Keys.dwellMinutes] = snapshot.dwellMinutes
+        prefs[Keys.radiusMeters] = snapshot.radiusMeters
+        prefs[Keys.responsivenessSeconds] = snapshot.responsivenessSeconds
+
+        prefs[Keys.dailyPromptLimit] = snapshot.dailyPromptLimit
+        prefs[Keys.perStorePerDay] = snapshot.perStorePerDay
+        prefs[Keys.suppressionMinutes] = snapshot.suppressionMinutes
+
+        prefs[Keys.maxActiveGeofences] = snapshot.maxActiveGeofences
+        prefs[Keys.suggestLinkingWindowMinutes] = snapshot.suggestLinkingWindowMinutes
+
+        prefs[Keys.vehicleRegNumber] = snapshot.vehicleRegNumber
+        prefs[Keys.driverName] = snapshot.driverName
+        prefs[Keys.businessHomeAddress] = snapshot.businessHomeAddress
+        prefs[Keys.businessHomeLat] = snapshot.businessHomeLat?.toString().orEmpty()
+        prefs[Keys.businessHomeLng] = snapshot.businessHomeLng?.toString().orEmpty()
+        prefs[Keys.journalYear] = snapshot.journalYear
+        prefs[Keys.odometerYearStartKm] = snapshot.odometerYearStartKm
+        prefs[Keys.odometerYearEndKm] = snapshot.odometerYearEndKm
+
+        prefs[Keys.storeImagesJson] = json.encodeToString(snapshot.storeImages)
+        prefs[Keys.storeBusinessHoursJson] = json.encodeToString(snapshot.storeBusinessHours)
+
+        prefs[Keys.homeTileIconImagesJson] = json.encodeToString(snapshot.homeTileIconImages)
+        prefs[Keys.preferredCategoriesJson] = json.encodeToString(snapshot.preferredCategories)
+        prefs[Keys.storeSyncRadiusKm] = snapshot.storeSyncRadiusKm
+        prefs[Keys.ignoredStoreIdsJson] = json.encodeToString(snapshot.ignoredStoreIds)
+        prefs[Keys.hiddenTripPlacesJson] = json.encodeToString(snapshot.hiddenTripPlaces)
+        prefs[Keys.expandedStoreCitiesJson] = json.encodeToString(snapshot.expandedStoreCities)
+        prefs[Keys.manualTripStoreSortMode] = snapshot.manualTripStoreSortMode
+    }
 
     val activeStartMinutes: Flow<Int> = context.dataStore.data.map { it[Keys.activeStartMinutes] ?: (7 * 60) }
     val activeEndMinutes: Flow<Int> = context.dataStore.data.map { it[Keys.activeEndMinutes] ?: (18 * 60) }
@@ -217,6 +469,198 @@ class SettingsStore(private val context: Context) {
 
     val backendDriverId: Flow<String> = context.dataStore.data.map {
         it[Keys.backendDriverId].orEmpty()
+    }
+
+    /**
+     * Ensures we have a profile list entry for the current active profile.
+     *
+     * This is a soft migration from the old single-profile setup.
+     */
+    suspend fun ensureActiveProfileListed(nowMillis: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { prefs ->
+            val activeId = prefs[Keys.profileId].orEmpty().trim()
+            val activeName = prefs[Keys.profileName].orEmpty().ifBlank { activeId }
+            if (activeId.isBlank()) return@edit
+
+            val existing = prefs[Keys.profilesJson].orEmpty()
+            val list = if (existing.isBlank()) {
+                emptyList()
+            } else {
+                runCatching { json.decodeFromString<List<ProfileMeta>>(existing) }.getOrDefault(emptyList())
+            }
+
+            if (list.any { it.id == activeId }) return@edit
+
+            val migrated = list + ProfileMeta(
+                id = activeId,
+                name = activeName,
+                createdAtMillis = nowMillis,
+                onboardingCompleted = prefs[Keys.onboardingCompleted] ?: false,
+            )
+
+            prefs[Keys.profilesJson] = json.encodeToString(migrated)
+        }
+    }
+
+    suspend fun createProfile(
+        id: String,
+        name: String,
+        photoUri: String? = null,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        val safeId = id.trim()
+        val safeName = name.trim().ifBlank { safeId }
+        if (safeId.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val existing = prefs[Keys.profilesJson].orEmpty()
+            val list = if (existing.isBlank()) {
+                emptyList()
+            } else {
+                runCatching { json.decodeFromString<List<ProfileMeta>>(existing) }.getOrDefault(emptyList())
+            }
+
+            if (list.any { it.id == safeId }) {
+                // Update name if needed.
+                val updated = list.map {
+                    if (it.id == safeId) it.copy(name = safeName, photoUri = photoUri ?: it.photoUri) else it
+                }
+                prefs[Keys.profilesJson] = json.encodeToString(updated)
+                return@edit
+            }
+
+            val created = list + ProfileMeta(id = safeId, name = safeName, photoUri = photoUri, createdAtMillis = nowMillis)
+            prefs[Keys.profilesJson] = json.encodeToString(created)
+        }
+    }
+
+    suspend fun createProfile(
+        name: String,
+        photoUri: String? = null,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): String {
+        val id = UUID.randomUUID().toString()
+        createProfile(id = id, name = name, photoUri = photoUri, nowMillis = nowMillis)
+        return id
+    }
+
+    suspend fun activateProfile(profileId: String) {
+        val id = profileId.trim()
+        if (id.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val currentId = prefs[Keys.profileId].orEmpty().trim()
+
+            // If selecting the already-active profile, do not overwrite live settings.
+            if (currentId == id) {
+                val profilesList = decodeProfiles(prefs[Keys.profilesJson].orEmpty())
+                val meta = profilesList.firstOrNull { it.id == id }
+                if (meta != null) {
+                    prefs[Keys.profileName] = meta.name
+                    prefs[Keys.onboardingCompleted] = meta.onboardingCompleted
+                }
+                return@edit
+            }
+
+            // 1) Save current active profile snapshot.
+            val snapshots = decodeSnapshots(prefs[Keys.profileSnapshotsJson].orEmpty()).toMutableMap()
+            if (currentId.isNotBlank() && currentId != id) {
+                snapshots[currentId] = buildSnapshotFromPrefs(prefs)
+            }
+
+            // 2) Load target snapshot (or create defaults).
+            val profilesList = decodeProfiles(prefs[Keys.profilesJson].orEmpty())
+            val meta = profilesList.firstOrNull { it.id == id }
+            val fallback = ProfileScopedSnapshot(
+                profileId = id,
+                profileName = meta?.name ?: id,
+                onboardingCompleted = meta?.onboardingCompleted ?: false,
+            )
+            val target = snapshots[id]?.copy(
+                profileId = id,
+                profileName = meta?.name ?: snapshots[id]?.profileName ?: id,
+                onboardingCompleted = meta?.onboardingCompleted ?: snapshots[id]?.onboardingCompleted ?: false,
+            ) ?: fallback
+
+            // 3) Apply target snapshot into the live per-profile keys.
+            applySnapshotToPrefs(prefs, target)
+
+            // 4) Persist updated snapshots.
+            prefs[Keys.profileSnapshotsJson] = json.encodeToString(snapshots)
+        }
+    }
+
+    suspend fun updateProfileName(profileId: String, name: String) {
+        val id = profileId.trim()
+        val safeName = name.trim()
+        if (id.isBlank() || safeName.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val existing = prefs[Keys.profilesJson].orEmpty()
+            val list = if (existing.isBlank()) {
+                emptyList()
+            } else {
+                runCatching { json.decodeFromString<List<ProfileMeta>>(existing) }.getOrDefault(emptyList())
+            }
+
+            val updated = list.map { if (it.id == id) it.copy(name = safeName) else it }
+            prefs[Keys.profilesJson] = json.encodeToString(updated)
+
+            if (prefs[Keys.profileId].orEmpty() == id) {
+                prefs[Keys.profileName] = safeName
+            }
+        }
+    }
+
+    suspend fun updateProfilePhoto(profileId: String, photoUri: String?) {
+        val id = profileId.trim()
+        if (id.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val existing = prefs[Keys.profilesJson].orEmpty()
+            val list = if (existing.isBlank()) {
+                emptyList()
+            } else {
+                runCatching { json.decodeFromString<List<ProfileMeta>>(existing) }.getOrDefault(emptyList())
+            }
+
+            val updated = list.map { if (it.id == id) it.copy(photoUri = photoUri) else it }
+            prefs[Keys.profilesJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun setSubProfileId(value: String) {
+        val v = value.trim()
+        context.dataStore.edit { it[Keys.subProfileId] = v }
+    }
+
+    suspend fun setProfileOnboardingCompleted(profileId: String, completed: Boolean) {
+        val id = profileId.trim()
+        if (id.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val existing = prefs[Keys.profilesJson].orEmpty()
+            val list = if (existing.isBlank()) {
+                emptyList()
+            } else {
+                runCatching { json.decodeFromString<List<ProfileMeta>>(existing) }.getOrDefault(emptyList())
+            }
+
+            val updated = list.map { if (it.id == id) it.copy(onboardingCompleted = completed) else it }
+            prefs[Keys.profilesJson] = json.encodeToString(updated)
+
+            if (prefs[Keys.profileId].orEmpty() == id) {
+                prefs[Keys.onboardingCompleted] = completed
+            }
+
+            // Keep snapshot in sync if it exists.
+            val snapshots = decodeSnapshots(prefs[Keys.profileSnapshotsJson].orEmpty()).toMutableMap()
+            val snap = snapshots[id]
+            if (snap != null) {
+                snapshots[id] = snap.copy(onboardingCompleted = completed)
+                prefs[Keys.profileSnapshotsJson] = json.encodeToString(snapshots)
+            }
+        }
     }
 
     val backendSyncMode: Flow<BackendSyncMode> = context.dataStore.data.map { prefs ->

@@ -2,15 +2,21 @@ package com.trimsytrack.ui
 
 import android.content.Intent
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
 import com.trimsytrack.AppGraph
 import com.trimsytrack.ui.screens.AuthScreen
 import com.trimsytrack.ui.screens.HomeScreen
@@ -24,6 +30,11 @@ import com.trimsytrack.ui.screens.EvidenceGalleryScreen
 import com.trimsytrack.ui.screens.TripConfirmScreen
 import com.trimsytrack.ui.screens.TripDetailScreen
 import com.trimsytrack.ui.screens.TripMediaReviewScreen
+import com.trimsytrack.ui.screens.ProfileSelectScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 object Routes {
     const val Onboarding = "onboarding"
@@ -35,6 +46,7 @@ object Routes {
     const val Camera = "camera"
     const val Evidence = "evidence"
     const val Auth = "auth"
+    const val Profiles = "profiles"
     const val Confirm = "confirm"
     const val Trip = "trip"
     const val MediaReview = "mediaReview"
@@ -43,10 +55,13 @@ object Routes {
 @Composable
 fun AppNavHost(intent: Intent) {
     val navController = rememberNavController()
+    val scope = rememberCoroutineScope()
 
     val onboardingCompleted by AppGraph.settings.onboardingCompleted.collectAsState(initial = false)
-    val startDestination = if (!onboardingCompleted) Routes.Onboarding else Routes.Home
+    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
+    val currentUser = rememberFirebaseUser()
 
+    // Deep links from notifications / intents.
     val initialPromptId = remember(intent) {
         intent.getLongExtra("promptId", -1L).takeIf { it > 0 }
     }
@@ -55,17 +70,98 @@ fun AppNavHost(intent: Intent) {
         intent.getLongExtra("tripId", -1L).takeIf { it > 0 }
     }
 
-    LaunchedEffect(initialPromptId, initialTripId) {
+    val pendingInitialRoute = remember(initialPromptId, initialTripId) {
         when {
-            initialPromptId != null -> navController.navigate("${Routes.Confirm}/$initialPromptId")
-            initialTripId != null -> navController.navigate("${Routes.Trip}/$initialTripId")
+            initialPromptId != null -> "${Routes.Confirm}/$initialPromptId"
+            initialTripId != null -> "${Routes.Trip}/$initialTripId"
+            else -> null
+        }
+    }
+
+    // Spec: app always launches to Login Screen (Auth).
+    val startDestination = remember { Routes.Auth }
+
+    LaunchedEffect(currentUser) {
+        // Soft-migrate legacy single-profile into the list.
+        AppGraph.settings.ensureActiveProfileListed()
+
+        val currentRoute = navController.currentBackStackEntry?.destination?.route
+
+        // If signed out: ensure we're on Auth.
+        if (currentUser == null) {
+            if (currentRoute != Routes.Auth) {
+                navController.navigate(Routes.Auth) {
+                    popUpTo(Routes.Auth) { inclusive = true }
+                    launchSingleTop = true
+                }
+            }
+            return@LaunchedEffect
+        }
+
+        // Signed in: move from Auth -> Profile selection.
+        if (currentRoute == Routes.Auth) {
+            navController.navigate(Routes.Profiles) {
+                popUpTo(Routes.Auth) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    LaunchedEffect(currentUser, activeProfileId) {
+        // Definition-of-done: app cannot enter main UI without an active profile.
+        if (currentUser == null) return@LaunchedEffect
+
+        val currentRoute = navController.currentBackStackEntry?.destination?.route
+        val allowedWithoutProfile = setOf(Routes.Auth, Routes.Profiles)
+        if (activeProfileId.isBlank() && currentRoute !in allowedWithoutProfile) {
+            navController.navigate(Routes.Profiles) {
+                popUpTo(Routes.Auth) { inclusive = false }
+                launchSingleTop = true
+            }
         }
     }
 
     NavHost(navController = navController, startDestination = startDestination) {
+        composable(Routes.Profiles) {
+            ProfileSelectScreen(
+                onSelectProfile = { selectedId ->
+                    scope.launch {
+                        AppGraph.settings.activateProfile(selectedId)
+
+                        // First-run migration for users upgrading from single-profile builds.
+                        withContext(Dispatchers.IO) {
+                            AppGraph.db.storeDao().claimUnscoped(selectedId)
+                            AppGraph.db.tripDao().claimUnscoped(selectedId)
+                            AppGraph.db.promptDao().claimUnscoped(selectedId)
+                            AppGraph.db.runDao().claimUnscoped(selectedId)
+                            AppGraph.db.attachmentDao().claimUnscoped(selectedId)
+                            AppGraph.db.distanceCacheDao().claimUnscoped(selectedId)
+                            AppGraph.db.syncOutboxDao().claimUnscoped(selectedId)
+                        }
+
+                        val onboarded = AppGraph.settings.onboardingCompleted.first()
+                        val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
+                        navController.navigate(target) {
+                            popUpTo(Routes.Profiles) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                },
+            )
+        }
         composable(Routes.Onboarding) {
             OnboardingScreen(
                 onDone = {
+                    // Ensure the active profile is listed and has onboarding marked complete.
+                    // (OnboardingScreen already sets onboardingCompleted in SettingsStore.)
+                    // Keep profiles metadata in sync.
+                    scope.launch {
+                        val id = activeProfileId
+                        if (id.isNotBlank()) {
+                            AppGraph.settings.ensureActiveProfileListed()
+                            AppGraph.settings.setProfileOnboardingCompleted(id, true)
+                        }
+                    }
                     navController.navigate(Routes.Home) {
                         popUpTo(Routes.Onboarding) { inclusive = true }
                         launchSingleTop = true
@@ -83,6 +179,7 @@ fun AppNavHost(intent: Intent) {
                 onJournal = { navController.navigate(Routes.Journal) },
                 onCamera = { navController.navigate(Routes.Camera) },
                 onOpenSettings = { navController.navigate(Routes.Settings) },
+                onOpenAccount = { navController.navigate(Routes.Auth) },
             )
         }
         composable(
@@ -208,4 +305,20 @@ fun AppNavHost(intent: Intent) {
             )
         }
     }
+}
+
+@Composable
+private fun rememberFirebaseUser(): FirebaseUser? {
+    val auth = remember { FirebaseAuth.getInstance() }
+    var user by remember { mutableStateOf(auth.currentUser) }
+
+    DisposableEffect(auth) {
+        val listener = FirebaseAuth.AuthStateListener { a ->
+            user = a.currentUser
+        }
+        auth.addAuthStateListener(listener)
+        onDispose { auth.removeAuthStateListener(listener) }
+    }
+
+    return user
 }

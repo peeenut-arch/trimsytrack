@@ -232,6 +232,7 @@ fun TripMediaReviewScreen(
                                     val saved = if (item.isTempLocalFileProviderUri) {
                                         moveTempFileProviderUriToTripFiles(
                                             context = context,
+                                            profileId = t.profileId,
                                             tripId = tripId,
                                             tripDay = t.day,
                                             tripStoreNameSnapshot = t.storeNameSnapshot,
@@ -243,6 +244,7 @@ fun TripMediaReviewScreen(
                                     } else {
                                         importDocumentToTripFiles(
                                             context = context,
+                                            profileId = t.profileId,
                                             tripId = tripId,
                                             tripDay = t.day,
                                             tripStoreNameSnapshot = t.storeNameSnapshot,

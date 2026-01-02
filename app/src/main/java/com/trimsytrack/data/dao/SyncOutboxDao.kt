@@ -15,12 +15,15 @@ interface SyncOutboxDao {
     @Update
     suspend fun update(entity: SyncOutboxEntity)
 
-    @Query("SELECT * FROM sync_outbox WHERE status IN ('PENDING','FAILED_RETRY') ORDER BY createdAt ASC LIMIT :limit")
-    suspend fun listPending(limit: Int = 50): List<SyncOutboxEntity>
+    @Query("SELECT * FROM sync_outbox WHERE profileId = :profileId AND status IN ('PENDING','FAILED_RETRY') ORDER BY createdAt ASC LIMIT :limit")
+    suspend fun listPending(profileId: String, limit: Int = 50): List<SyncOutboxEntity>
 
-    @Query("SELECT * FROM sync_outbox WHERE id = :id")
-    suspend fun getById(id: Long): SyncOutboxEntity?
+    @Query("SELECT * FROM sync_outbox WHERE profileId = :profileId AND id = :id")
+    suspend fun getById(profileId: String, id: Long): SyncOutboxEntity?
 
-    @Query("DELETE FROM sync_outbox WHERE status = 'DONE'")
-    suspend fun deleteDone(): Int
+    @Query("DELETE FROM sync_outbox WHERE profileId = :profileId AND status = 'DONE'")
+    suspend fun deleteDone(profileId: String): Int
+
+    @Query("UPDATE sync_outbox SET profileId = :profileId WHERE profileId = ''")
+    suspend fun claimUnscoped(profileId: String)
 }

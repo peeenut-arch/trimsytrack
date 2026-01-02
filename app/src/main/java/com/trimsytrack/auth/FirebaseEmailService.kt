@@ -1,5 +1,6 @@
 package com.trimsytrack.auth
 
+import com.google.firebase.auth.AuthCredential
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.ktx.Firebase
@@ -34,6 +35,16 @@ class FirebaseEmailService(
 
     suspend fun createUserWithEmailPassword(email: String, password: String) {
         auth.createUserWithEmailAndPassword(email.trim(), password).awaitUnit()
+    }
+
+    suspend fun fetchSignInMethods(email: String): List<String> {
+        val result = auth.fetchSignInMethodsForEmail(email.trim()).awaitResult()
+        return result.signInMethods ?: emptyList()
+    }
+
+    suspend fun linkCurrentUserWithCredential(credential: AuthCredential) {
+        val user = auth.currentUser ?: throw IllegalStateException("No signed-in user")
+        user.linkWithCredential(credential).awaitUnit()
     }
 
     suspend fun deleteCurrentUser() {

@@ -503,6 +503,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -537,6 +538,8 @@ fun ManualTripScreen(
     onOpenTrip: (Long, Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+
+    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
 
     var addTripMenuStoreId by remember { mutableStateOf<String?>(null) }
 
@@ -615,9 +618,10 @@ fun ManualTripScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(activeProfileId) {
         storeVisitCounts = runCatching {
-            AppGraph.db.tripDao().getStoreVisitCounts().associate { it.storeId to it.count }
+            AppGraph.db.tripDao().getStoreVisitCounts(activeProfileId.ifBlank { "default" })
+                .associate { it.storeId to it.count }
         }.getOrDefault(emptyMap())
     }
 
@@ -832,6 +836,7 @@ fun ManualTripScreen(
         } else {
             remotePlaces.map { p ->
                 StoreEntity(
+                    profileId = activeProfileId.ifBlank { "default" },
                     id = "gmap_${p.placeId}",
                     name = p.name,
                     lat = p.lat,
@@ -1788,8 +1793,10 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
     )
 
     val now = Instant.now()
+    val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
     return AppGraph.tripRepository.createTrip(
         TripEntity(
+            profileId = profileId,
             createdAt = now,
             day = LocalDate.now(),
             storeId = store.id,

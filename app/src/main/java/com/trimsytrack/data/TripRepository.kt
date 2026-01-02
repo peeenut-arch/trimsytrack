@@ -8,6 +8,9 @@ import com.trimsytrack.data.entities.RunEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
@@ -16,14 +19,30 @@ class TripRepository(
     private val tripDao: TripDao,
     private val attachmentDao: AttachmentDao,
     private val runDao: RunDao,
+    private val settings: SettingsStore,
 ) {
-    fun observeToday(day: LocalDate): Flow<List<TripEntity>> = tripDao.observeByDay(day)
+    fun observeToday(day: LocalDate): Flow<List<TripEntity>> {
+        return settings.profileId
+            .map { it.ifBlank { "default" } }
+            .flatMapLatest { pid -> tripDao.observeByDay(pid, day) }
+    }
 
-    fun observeRecent(limit: Int = 200): Flow<List<TripEntity>> = tripDao.observeRecent(limit)
+    fun observeRecent(limit: Int = 200): Flow<List<TripEntity>> {
+        return settings.profileId
+            .map { it.ifBlank { "default" } }
+            .flatMapLatest { pid -> tripDao.observeRecent(pid, limit) }
+    }
 
-    fun observeAllTrips(): Flow<List<TripEntity>> = tripDao.observeAll()
+    fun observeAllTrips(): Flow<List<TripEntity>> {
+        return settings.profileId
+            .map { it.ifBlank { "default" } }
+            .flatMapLatest { pid -> tripDao.observeAll(pid) }
+    }
 
-    suspend fun get(id: Long): TripEntity? = tripDao.getById(id)
+    suspend fun get(id: Long): TripEntity? {
+        val profileId = settings.profileId.first().ifBlank { "default" }
+        return tripDao.getById(profileId, id)
+    }
 
     suspend fun createTrip(entity: TripEntity): Long {
         val ensured = entity.copy(
@@ -35,22 +54,38 @@ class TripRepository(
 
     suspend fun updateTrip(entity: TripEntity) = tripDao.update(entity)
 
-    suspend fun deleteTrip(id: Long) = tripDao.deleteById(id)
+    suspend fun deleteTrip(id: Long) {
+        val profileId = settings.profileId.first().ifBlank { "default" }
+        tripDao.deleteById(profileId, id)
+    }
 
     suspend fun listTripsBetweenDays(startDay: LocalDate, endDay: LocalDate): List<TripEntity> =
-        tripDao.listBetweenDays(startDay, endDay)
+        tripDao.listBetweenDays(settings.profileId.first().ifBlank { "default" }, startDay, endDay)
 
-    fun observeAttachments(tripId: Long): Flow<List<AttachmentEntity>> = attachmentDao.observeByTrip(tripId)
+    fun observeAttachments(tripId: Long): Flow<List<AttachmentEntity>> {
+        return settings.profileId
+            .map { it.ifBlank { "default" } }
+            .flatMapLatest { pid -> attachmentDao.observeByTrip(pid, tripId) }
+    }
 
-    fun observeAllAttachments(): Flow<List<AttachmentEntity>> = attachmentDao.observeAll()
+    fun observeAllAttachments(): Flow<List<AttachmentEntity>> {
+        return settings.profileId
+            .map { it.ifBlank { "default" } }
+            .flatMapLatest { pid -> attachmentDao.observeAll(pid) }
+    }
 
     suspend fun addAttachment(entity: AttachmentEntity): Long = attachmentDao.insert(entity)
 
-    suspend fun deleteAttachment(id: Long) = attachmentDao.deleteById(id)
+    suspend fun deleteAttachment(id: Long) {
+        val profileId = settings.profileId.first().ifBlank { "default" }
+        attachmentDao.deleteById(profileId, id)
+    }
 
     suspend fun createRun(day: LocalDate, label: String): Long {
+        val profileId = settings.profileId.first().ifBlank { "default" }
         return runDao.insert(
             RunEntity(
+                profileId = profileId,
                 clientRef = UUID.randomUUID().toString(),
                 syncStatus = SyncStatus.PENDING,
                 day = day,
@@ -60,5 +95,8 @@ class TripRepository(
         )
     }
 
-    suspend fun latestTripForDay(day: LocalDate): TripEntity? = tripDao.getLatestForDay(day)
+    suspend fun latestTripForDay(day: LocalDate): TripEntity? {
+        val profileId = settings.profileId.first().ifBlank { "default" }
+        return tripDao.getLatestForDay(profileId, day)
+    }
 }

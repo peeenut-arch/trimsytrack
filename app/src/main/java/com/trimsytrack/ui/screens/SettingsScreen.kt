@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -85,6 +86,7 @@ import androidx.work.WorkManager
 import com.google.firebase.auth.FirebaseAuth
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.data.IndustryProfile
 import com.trimsytrack.data.RegionPayload
 import com.trimsytrack.data.StorePayload
 import com.trimsytrack.data.driverdata.DriverDataRepository
@@ -136,7 +138,10 @@ fun SettingsScreen(
     val showSyncDialog = rememberSaveable { mutableStateOf(false) }
 
 
+    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
     val profileName by AppGraph.settings.profileName.collectAsState(initial = "")
+    val profiles by AppGraph.settings.profiles.collectAsState(initial = emptyList())
+    val subProfileId by AppGraph.settings.subProfileId.collectAsState(initial = "")
     val trackingEnabled by AppGraph.settings.trackingEnabled.collectAsState(initial = false)
     val dwell by AppGraph.settings.dwellMinutes.collectAsState(initial = 5)
     val radius by AppGraph.settings.radiusMeters.collectAsState(initial = 120)
@@ -166,6 +171,69 @@ fun SettingsScreen(
     val backendSyncMode by AppGraph.settings.backendSyncMode.collectAsState(initial = BackendSyncMode.INSTANT)
     val backendDailySyncMinutes by AppGraph.settings.backendDailySyncMinutes.collectAsState(initial = 3 * 60)
     val backendLastSyncAtMillis by AppGraph.settings.backendLastSyncAtMillis.collectAsState(initial = null)
+
+    val activeProfilePhotoUri = remember(activeProfileId, profiles) {
+        profiles.firstOrNull { it.id == activeProfileId }?.photoUri
+    }
+
+    val subProfileLabel = remember(subProfileId) {
+        if (subProfileId.isBlank()) {
+            "Not set"
+        } else {
+            IndustryProfile.entries.firstOrNull { it.id == subProfileId }?.displayName ?: subProfileId
+        }
+    }
+
+    var showEditProfileNameDialog by rememberSaveable { mutableStateOf(false) }
+    var editedProfileName by rememberSaveable { mutableStateOf("") }
+
+    val changeProfilePhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri: Uri? ->
+            if (uri != null && activeProfileId.isNotBlank()) {
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                scope.launch { AppGraph.settings.updateProfilePhoto(activeProfileId, uri.toString()) }
+            }
+        },
+    )
+
+    if (showEditProfileNameDialog) {
+        AlertDialog(
+            onDismissRequest = { showEditProfileNameDialog = false },
+            title = { Text("Edit profile name") },
+            text = {
+                OutlinedTextField(
+                    value = editedProfileName,
+                    onValueChange = { editedProfileName = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = editedProfileName.trim().isNotBlank() && activeProfileId.isNotBlank(),
+                    onClick = {
+                        val newName = editedProfileName.trim()
+                        showEditProfileNameDialog = false
+                        scope.launch { AppGraph.settings.updateProfileName(activeProfileId, newName) }
+                    },
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditProfileNameDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
     val backendLastSyncResult by AppGraph.settings.backendLastSyncResult.collectAsState(initial = "")
 
     val darkModeEnabled by AppGraph.settings.darkModeEnabled.collectAsState(initial = false)
@@ -246,25 +314,31 @@ fun SettingsScreen(
     var showStartOverConfirm by remember { mutableStateOf(false) }
     var startOverBusy by remember { mutableStateOf(false) }
 
+    var clearDataEnabled by rememberSaveable { mutableStateOf(false) }
+    var showClearDataPinDialog by rememberSaveable { mutableStateOf(false) }
+    var showClearDataConfirmDialog by rememberSaveable { mutableStateOf(false) }
+    var clearDataBusy by rememberSaveable { mutableStateOf(false) }
+    var clearDataPin by rememberSaveable { mutableStateOf("") }
+
     var driverDataBusy by remember { mutableStateOf(false) }
     var driverDataStatus by remember { mutableStateOf<String?>(null) }
 
     var backendDataExpanded by rememberSaveable { mutableStateOf(false) }
 
-    suspend fun loadStoredDataCounts(): StoredDataCounts = withContext(Dispatchers.IO) {
+    suspend fun loadStoredDataCounts(profileId: String): StoredDataCounts = withContext(Dispatchers.IO) {
         StoredDataCounts(
-            trips = AppGraph.db.tripDao().countAll(),
-            stores = AppGraph.db.storeDao().countAll(),
-            promptEvents = AppGraph.db.promptDao().countAll(),
-            runs = AppGraph.db.runDao().countAll(),
-            distanceCache = AppGraph.db.distanceCacheDao().countAll(),
+            trips = AppGraph.db.tripDao().countAll(profileId),
+            stores = AppGraph.db.storeDao().countAll(profileId),
+            promptEvents = AppGraph.db.promptDao().countAll(profileId),
+            runs = AppGraph.db.runDao().countAll(profileId),
+            distanceCache = AppGraph.db.distanceCacheDao().countAll(profileId),
         )
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(activeProfileId) {
         storedDataError = null
         runCatching {
-            loadStoredDataCounts()
+            loadStoredDataCounts(activeProfileId.ifBlank { "default" })
         }.onSuccess { storedDataCounts = it }
             .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
     }
@@ -432,7 +506,7 @@ fun SettingsScreen(
                                 FirebaseAuth.getInstance().signOut()
 
                                 storedDataError = null
-                                runCatching { loadStoredDataCounts() }
+                                runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
                                     .onSuccess { storedDataCounts = it }
                                     .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
 
@@ -656,7 +730,7 @@ fun SettingsScreen(
                                                     }
                                                 }.onSuccess {
                                                     storedDataError = null
-                                                    runCatching { loadStoredDataCounts() }
+                                                    runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
                                                         .onSuccess { storedDataCounts = it }
                                                         .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
                                                     driverDataStatus = "Upload complete (local overwritten by backend)."
@@ -683,7 +757,7 @@ fun SettingsScreen(
                                                     }
                                                 }.onSuccess {
                                                     storedDataError = null
-                                                    runCatching { loadStoredDataCounts() }
+                                                    runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
                                                         .onSuccess { storedDataCounts = it }
                                                         .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
                                                     driverDataStatus = "Restore complete."
@@ -1090,7 +1164,10 @@ fun SettingsScreen(
                                             onClick = {
                                                 scope.launch {
                                                     val ids = hiddenSyncedIds.toList()
-                                                    AppGraph.db.storeDao().deleteByIds(ids)
+                                                    AppGraph.db.storeDao().deleteByIds(
+                                                        activeProfileId.ifBlank { "default" },
+                                                        ids,
+                                                    )
                                                     ids.forEach { id ->
                                                         AppGraph.settings.setStoreIgnored(id, false)
                                                         AppGraph.settings.clearStoreImage(id)
@@ -1131,12 +1208,19 @@ fun SettingsScreen(
                                         },
                                         onToggleFavorite = { store ->
                                             scope.launch {
-                                                AppGraph.db.storeDao().setFavorite(store.id, !store.isFavorite)
+                                                AppGraph.db.storeDao().setFavorite(
+                                                    activeProfileId.ifBlank { "default" },
+                                                    store.id,
+                                                    !store.isFavorite,
+                                                )
                                             }
                                         },
                                         onRemoveStore = { store ->
                                             scope.launch {
-                                                AppGraph.db.storeDao().deleteByIds(listOf(store.id))
+                                                AppGraph.db.storeDao().deleteByIds(
+                                                    activeProfileId.ifBlank { "default" },
+                                                    listOf(store.id),
+                                                )
                                                 AppGraph.settings.setStoreIgnored(store.id, false)
                                                 AppGraph.settings.clearStoreImage(store.id)
                                                 deleteStorePhotoBestEffort(context, store.id)
@@ -1310,10 +1394,56 @@ fun SettingsScreen(
                 item {
                     SettingsSectionCard(title = "Profile") {
                         ListItem(
-                            headlineContent = { Text("Profile") },
+                            headlineContent = { Text("Name") },
                             supportingContent = {
                                 Text(
                                     if (profileName.isBlank()) "Not set" else profileName,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    editedProfileName = profileName
+                                    showEditProfileNameDialog = true
+                                },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Profile picture") },
+                            supportingContent = {
+                                val status = if (activeProfilePhotoUri.isNullOrBlank()) "Not set" else "Set"
+                                Text(
+                                    status,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { changeProfilePhotoLauncher.launch(arrayOf("image/*")) },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Subprofile setup") },
+                            supportingContent = {
+                                Text(
+                                    "Selected: $subProfileLabel",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                                 )
                             },
@@ -1636,6 +1766,30 @@ fun SettingsScreen(
                             Text("Start over (new user)")
                         }
 
+                        Button(
+                            onClick = {
+                                if (!clearDataEnabled) {
+                                    clearDataEnabled = true
+                                } else {
+                                    showClearDataPinDialog = true
+                                }
+                            },
+                            enabled = !clearDataBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 0.dp),
+                        ) {
+                            if (clearDataBusy) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .padding(end = 10.dp),
+                                )
+                            }
+                            Text(if (!clearDataEnabled) "Enable Clear Data button" else "Clear Data")
+                        }
+
                             Spacer(Modifier.height(10.dp))
                         }
                     }
@@ -1668,6 +1822,150 @@ fun SettingsScreen(
 
     if (showSyncDialog.value) {
         SyncStoresDialog(onDismiss = { showSyncDialog.value = false })
+    }
+
+    if (showClearDataPinDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!clearDataBusy) {
+                    showClearDataPinDialog = false
+                    clearDataPin = ""
+                }
+            },
+            title = { Text("Clear Data") },
+            text = {
+                Column {
+                    Text("Enter PIN to continue.")
+                    Spacer(Modifier.height(8.dp))
+                    Text("PIN: 12345109876DELETE")
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = clearDataPin,
+                        onValueChange = { clearDataPin = it },
+                        label = { Text("PIN") },
+                        singleLine = true,
+                        enabled = !clearDataBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearDataPinDialog = false
+                        showClearDataConfirmDialog = true
+                    },
+                    enabled = !clearDataBusy && clearDataPin == "12345109876DELETE",
+                ) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showClearDataPinDialog = false
+                        clearDataPin = ""
+                    },
+                    enabled = !clearDataBusy,
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (showClearDataConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!clearDataBusy) {
+                    showClearDataConfirmDialog = false
+                    clearDataPin = ""
+                }
+            },
+            title = { Text("Confirm") },
+            text = { Text("This will clear all profiles data locally and also in the cloud.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            clearDataBusy = true
+                            try {
+                                val backendBaseUrl = AppGraph.settings.backendBaseUrl.first()
+                                val backendDriverId = AppGraph.settings.backendDriverId.first()
+                                val profiles = AppGraph.settings.profiles.first().map { it.id }
+                                val idsToClear = (profiles + listOf(backendDriverId))
+                                    .filter { it.isNotBlank() }
+                                    .distinct()
+
+                                // Cloud wipe (best-effort): overwrite snapshots with empty data.
+                                val cloudFailures = mutableListOf<String>()
+                                for (id in idsToClear) {
+                                    runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            driverDataRepository.clearRemoteSnapshot(id)
+                                        }
+                                    }.onFailure {
+                                        cloudFailures.add(id)
+                                    }
+                                }
+
+                                // Local wipe: cancel background work, clear DB + files + settings.
+                                withContext(Dispatchers.IO) {
+                                    val wm = WorkManager.getInstance(context)
+                                    wm.cancelUniqueWork("backend-sync")
+                                    wm.cancelUniqueWork("backend-sync-hourly")
+                                    wm.cancelUniqueWork("backend-sync-daily")
+                                    wm.cancelUniqueWork("geofence-sync")
+                                    wm.cancelUniqueWork("geofence-disable")
+
+                                    AppGraph.db.clearAllTables()
+                                    java.io.File(context.filesDir, "regions").deleteRecursively()
+                                    java.io.File(context.filesDir, "evidence").deleteRecursively()
+                                }
+
+                                AppGraph.settings.clearAll()
+
+                                // Preserve backend endpoint config (auth/session stays intact).
+                                AppGraph.settings.setBackendBaseUrl(backendBaseUrl)
+                                AppGraph.settings.setBackendDriverId(backendDriverId)
+
+                                clearDataEnabled = false
+                                showClearDataConfirmDialog = false
+                                clearDataPin = ""
+
+                                val msg = if (cloudFailures.isEmpty()) {
+                                    "Cleared local + cloud data."
+                                } else {
+                                    "Cleared local data. Cloud clear failed for: ${cloudFailures.joinToString()}"
+                                }
+                                snackbarHostState.showSnackbar(message = msg, withDismissAction = true)
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(
+                                    message = "Clear failed: ${t.message ?: t.javaClass.simpleName}",
+                                    withDismissAction = true,
+                                )
+                            } finally {
+                                clearDataBusy = false
+                            }
+                        }
+                    },
+                    enabled = !clearDataBusy,
+                ) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showClearDataConfirmDialog = false
+                        clearDataPin = ""
+                    },
+                    enabled = !clearDataBusy,
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

@@ -22,30 +22,33 @@ interface PromptDao {
     @Update
     suspend fun update(entity: PromptEventEntity)
 
-    @Query("SELECT * FROM prompt_events WHERE day = :day ORDER BY triggeredAt DESC")
-    fun observeByDay(day: LocalDate): Flow<List<PromptEventEntity>>
+    @Query("SELECT * FROM prompt_events WHERE profileId = :profileId AND day = :day ORDER BY triggeredAt DESC")
+    fun observeByDay(profileId: String, day: LocalDate): Flow<List<PromptEventEntity>>
 
-    @Query("SELECT * FROM prompt_events ORDER BY triggeredAt DESC LIMIT :limit")
-    fun observeRecent(limit: Int): Flow<List<PromptEventEntity>>
+    @Query("SELECT * FROM prompt_events WHERE profileId = :profileId ORDER BY triggeredAt DESC LIMIT :limit")
+    fun observeRecent(profileId: String, limit: Int): Flow<List<PromptEventEntity>>
 
-    @Query("SELECT * FROM prompt_events WHERE id = :id")
-    suspend fun getById(id: Long): PromptEventEntity?
+    @Query("SELECT * FROM prompt_events WHERE profileId = :profileId AND id = :id")
+    suspend fun getById(profileId: String, id: Long): PromptEventEntity?
 
-    @Query("SELECT * FROM prompt_events")
-    suspend fun listAll(): List<PromptEventEntity>
+    @Query("SELECT * FROM prompt_events WHERE profileId = :profileId")
+    suspend fun listAll(profileId: String): List<PromptEventEntity>
 
-    @Query("SELECT * FROM prompt_events WHERE storeId = :storeId AND day = :day AND status != :deletedStatus ORDER BY triggeredAt DESC LIMIT 1")
-    suspend fun getLatestForStoreDay(storeId: String, day: LocalDate, deletedStatus: PromptStatus = PromptStatus.DELETED): PromptEventEntity?
+    @Query("SELECT * FROM prompt_events WHERE profileId = :profileId AND storeId = :storeId AND day = :day AND status != :deletedStatus ORDER BY triggeredAt DESC LIMIT 1")
+    suspend fun getLatestForStoreDay(profileId: String, storeId: String, day: LocalDate, deletedStatus: PromptStatus = PromptStatus.DELETED): PromptEventEntity?
 
-    @Query("SELECT COUNT(*) FROM prompt_events WHERE day = :day AND status != :deletedStatus")
-    suspend fun countByDay(day: LocalDate, deletedStatus: PromptStatus = PromptStatus.DELETED): Int
+    @Query("SELECT COUNT(*) FROM prompt_events WHERE profileId = :profileId AND day = :day AND status != :deletedStatus")
+    suspend fun countByDay(profileId: String, day: LocalDate, deletedStatus: PromptStatus = PromptStatus.DELETED): Int
 
-    @Query("SELECT COUNT(*) FROM prompt_events WHERE status != :deletedStatus")
-    suspend fun countAll(deletedStatus: PromptStatus = PromptStatus.DELETED): Int
+    @Query("SELECT COUNT(*) FROM prompt_events WHERE profileId = :profileId AND status != :deletedStatus")
+    suspend fun countAll(profileId: String, deletedStatus: PromptStatus = PromptStatus.DELETED): Int
 
-    @Query("UPDATE prompt_events SET status = :status, lastUpdatedAt = :updatedAt WHERE id = :id")
-    suspend fun updateStatus(id: Long, status: PromptStatus, updatedAt: Instant)
+    @Query("UPDATE prompt_events SET status = :status, lastUpdatedAt = :updatedAt WHERE profileId = :profileId AND id = :id")
+    suspend fun updateStatus(profileId: String, id: Long, status: PromptStatus, updatedAt: Instant)
 
-    @Query("UPDATE prompt_events SET status = :status, linkedTripId = :linkedTripId, lastUpdatedAt = :updatedAt WHERE id = :id")
-    suspend fun updateStatusAndLinkTrip(id: Long, status: PromptStatus, linkedTripId: Long, updatedAt: Instant)
+    @Query("UPDATE prompt_events SET status = :status, linkedTripId = :linkedTripId, lastUpdatedAt = :updatedAt WHERE profileId = :profileId AND id = :id")
+    suspend fun updateStatusAndLinkTrip(profileId: String, id: Long, status: PromptStatus, linkedTripId: Long, updatedAt: Instant)
+
+    @Query("UPDATE prompt_events SET profileId = :profileId WHERE profileId = ''")
+    suspend fun claimUnscoped(profileId: String)
 }

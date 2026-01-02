@@ -5,7 +5,9 @@ import android.content.Intent
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.firebase.auth.AuthCredential
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthUserCollisionException
 import com.google.firebase.auth.GoogleAuthProvider
 
 /**
@@ -38,13 +40,24 @@ class GoogleSignInService(
         require(!idToken.isNullOrBlank()) { "Google sign-in returned no ID token (check Firebase + SHA-1 setup)." }
 
         val credential = GoogleAuthProvider.getCredential(idToken, null)
-        auth.signInWithCredential(credential).awaitResult()
+        try {
+            auth.signInWithCredential(credential).awaitResult()
+        } catch (e: FirebaseAuthUserCollisionException) {
+            val email = account.email?.trim().orEmpty()
+            if (email.isBlank()) throw e
+            throw GoogleAuthCollision(email = email, pendingCredential = credential)
+        }
     }
 
     fun signOut() {
         auth.signOut()
     }
 }
+
+class GoogleAuthCollision(
+    val email: String,
+    val pendingCredential: AuthCredential,
+) : Exception("Account exists with different sign-in provider")
 
 private fun resolveDefaultWebClientId(context: Context): String? {
     val id = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)

@@ -73,6 +73,7 @@ import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.TripEntity
 import java.io.File
 import java.time.Instant
+import kotlinx.coroutines.flow.first
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executor
@@ -345,6 +346,7 @@ fun CameraScreen(
                                                         val saved = saveCapturedPhotoToTrip(
                                                             context = context,
                                                             trip = trip,
+                                                            profileId = trip.profileId,
                                                             tempFile = tempFile,
                                                             capturedAt = capturedAt,
                                                             location = pendingLocation.value,
@@ -458,6 +460,7 @@ fun CameraScreen(
                                                 val saved = saveCapturedPhotoToTrip(
                                                     context = context,
                                                     trip = t,
+                                                    profileId = t.profileId,
                                                     tempFile = tempFile,
                                                     capturedAt = capturedAt,
                                                     location = pendingLocation.value,
@@ -533,6 +536,7 @@ private suspend fun <T> awaitFuture(future: ListenableFuture<T>): T {
 private fun saveCapturedPhotoToTrip(
     context: android.content.Context,
     trip: TripEntity,
+    profileId: String,
     tempFile: File,
     capturedAt: Instant,
     location: Location?,
@@ -609,6 +613,7 @@ private fun saveCapturedPhotoToTrip(
     )
 
     return AttachmentEntity(
+        profileId = profileId,
         tripId = trip.id,
         uri = contentUri.toString(),
         mimeType = "image/jpeg",
