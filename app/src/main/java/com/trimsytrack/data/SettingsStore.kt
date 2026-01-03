@@ -11,6 +11,8 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -125,6 +127,7 @@ data class ProfileScopedSnapshot(
 
     // Manual trip: distance filter + category configuration
     val manualTripSearchRadiusKm: Int = 10,
+    val manualTripCategoriesInitialized: Boolean = false,
     val manualTripCategoryConfigs: List<ManualTripCategoryConfig> = emptyList(),
     val manualTripEnabledCategoryLabels: List<String> = emptyList(),
 )
@@ -224,6 +227,7 @@ class SettingsStore(private val context: Context) {
             val manualTripShowOnlineResults = booleanPreferencesKey("manualTripShowOnlineResults")
 
             val manualTripSearchRadiusKm = intPreferencesKey("manualTripSearchRadiusKm")
+            val manualTripCategoriesInitialized = booleanPreferencesKey("manualTripCategoriesInitialized")
             val manualTripCategoryConfigsJson = stringPreferencesKey("manualTripCategoryConfigsJson")
             val manualTripEnabledCategoryLabels = stringSetPreferencesKey("manualTripEnabledCategoryLabels")
 
@@ -417,6 +421,7 @@ class SettingsStore(private val context: Context) {
             manualTripShowOnlineResults = prefs[Keys.manualTripShowOnlineResults] ?: true,
 
             manualTripSearchRadiusKm = prefs[Keys.manualTripSearchRadiusKm] ?: 10,
+            manualTripCategoriesInitialized = prefs[Keys.manualTripCategoriesInitialized] ?: false,
             manualTripCategoryConfigs = manualTripCategoryConfigs,
             manualTripEnabledCategoryLabels = manualTripEnabledCategoryLabels,
         )
@@ -476,12 +481,33 @@ class SettingsStore(private val context: Context) {
         prefs[Keys.manualTripShowOnlineResults] = snapshot.manualTripShowOnlineResults
 
         prefs[Keys.manualTripSearchRadiusKm] = snapshot.manualTripSearchRadiusKm
+        prefs[Keys.manualTripCategoriesInitialized] = snapshot.manualTripCategoriesInitialized
         prefs[Keys.manualTripCategoryConfigsJson] = json.encodeToString(snapshot.manualTripCategoryConfigs)
         prefs[Keys.manualTripEnabledCategoryLabels] = snapshot.manualTripEnabledCategoryLabels.toSet()
     }
 
+    private fun updateActiveProfileSnapshotFromPrefs(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+    ) {
+        val currentId = prefs[Keys.profileId].orEmpty().trim()
+        if (currentId.isBlank()) return
+
+        val snapshots = decodeSnapshots(prefs[Keys.profileSnapshotsJson].orEmpty()).toMutableMap()
+        snapshots[currentId] = buildSnapshotFromPrefs(prefs)
+        prefs[Keys.profileSnapshotsJson] = json.encodeToString(snapshots)
+    }
+
     val activeStartMinutes: Flow<Int> = context.dataStore.data.map { it[Keys.activeStartMinutes] ?: (7 * 60) }
     val activeEndMinutes: Flow<Int> = context.dataStore.data.map { it[Keys.activeEndMinutes] ?: (18 * 60) }
+
+    /**
+     * Emits `true` once DataStore has produced its first preferences snapshot.
+     * Useful to avoid Compose screens writing default values based on placeholder initial state.
+     */
+    val dataStoreLoaded: Flow<Boolean> = context.dataStore.data
+        .map { true }
+        .onStart { emit(false) }
+        .distinctUntilChanged()
     val activeDays: Flow<Set<DayOfWeek>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.activeDaysCsv].orEmpty().trim()
         if (raw.isBlank()) {
@@ -580,7 +606,11 @@ class SettingsStore(private val context: Context) {
     }
 
     val manualTripSearchRadiusKm: Flow<Int> = context.dataStore.data.map {
-        it[Keys.manualTripSearchRadiusKm] ?: 50
+        it[Keys.manualTripSearchRadiusKm] ?: 10
+    }
+
+    val manualTripCategoriesInitialized: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.manualTripCategoriesInitialized] ?: false
     }
 
     val manualTripCategoryConfigs: Flow<List<ManualTripCategoryConfig>> = context.dataStore.data.map { prefs ->
@@ -1026,23 +1056,39 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun setManualTripStoreSortMode(value: String) {
-        context.dataStore.edit { it[Keys.manualTripStoreSortMode] = value }
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripStoreSortMode] = value
+            updateActiveProfileSnapshotFromPrefs(prefs)
+        }
     }
-        suspend fun setManualTripShowStores(value: Boolean) {
-            context.dataStore.edit { it[Keys.manualTripShowStores] = value }
-        }
 
-        suspend fun setManualTripShowPostOffice(value: Boolean) {
-            context.dataStore.edit { it[Keys.manualTripShowPostOffice] = value }
+    suspend fun setManualTripShowStores(value: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripShowStores] = value
+            updateActiveProfileSnapshotFromPrefs(prefs)
         }
+    }
 
-        suspend fun setManualTripShowOnlineResults(value: Boolean) {
-            context.dataStore.edit { it[Keys.manualTripShowOnlineResults] = value }
+    suspend fun setManualTripShowPostOffice(value: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripShowPostOffice] = value
+            updateActiveProfileSnapshotFromPrefs(prefs)
         }
+    }
+
+    suspend fun setManualTripShowOnlineResults(value: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripShowOnlineResults] = value
+            updateActiveProfileSnapshotFromPrefs(prefs)
+        }
+    }
 
     suspend fun setManualTripSearchRadiusKm(value: Int) {
         val safe = value.coerceIn(1, 500)
-        context.dataStore.edit { it[Keys.manualTripSearchRadiusKm] = safe }
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripSearchRadiusKm] = safe
+            updateActiveProfileSnapshotFromPrefs(prefs)
+        }
     }
 
     suspend fun setManualTripCategoryConfigs(configs: List<ManualTripCategoryConfig>) {
@@ -1065,6 +1111,15 @@ class SettingsStore(private val context: Context) {
 
         context.dataStore.edit { prefs ->
             prefs[Keys.manualTripCategoryConfigsJson] = json.encodeToString(normalized)
+            prefs[Keys.manualTripCategoriesInitialized] = true
+            updateActiveProfileSnapshotFromPrefs(prefs)
+        }
+    }
+
+    suspend fun setManualTripCategoriesInitialized(value: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripCategoriesInitialized] = value
+            updateActiveProfileSnapshotFromPrefs(prefs)
         }
     }
 
@@ -1077,6 +1132,8 @@ class SettingsStore(private val context: Context) {
 
         context.dataStore.edit { prefs ->
             prefs[Keys.manualTripEnabledCategoryLabels] = normalized
+            prefs[Keys.manualTripCategoriesInitialized] = true
+            updateActiveProfileSnapshotFromPrefs(prefs)
         }
     }
 
@@ -1086,6 +1143,8 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[Keys.manualTripCategoryConfigsJson] = json.encodeToString(defaults)
             prefs[Keys.manualTripEnabledCategoryLabels] = defaults.map { it.label }.toSet()
+            prefs[Keys.manualTripCategoriesInitialized] = true
+            updateActiveProfileSnapshotFromPrefs(prefs)
         }
     }
 

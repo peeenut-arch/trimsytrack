@@ -412,7 +412,9 @@ import android.location.Geocoder
 import android.net.Uri
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
@@ -421,6 +423,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -450,6 +453,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
@@ -486,7 +490,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
@@ -542,7 +545,7 @@ private data class ManualTripPlaceSearchItem(
 )
 
 @Composable
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 fun ManualTripScreen(
     onBack: () -> Unit,
     onOpenTrip: (Long, Boolean) -> Unit,
@@ -557,22 +560,36 @@ fun ManualTripScreen(
     val manualTripHiddenStoreIds by AppGraph.settings.manualTripHiddenStoreIds.collectAsState(initial = emptySet())
     val manualTripShowOnlineResults by AppGraph.settings.manualTripShowOnlineResults.collectAsState(initial = true)
 
+    val dataStoreLoaded by AppGraph.settings.dataStoreLoaded.collectAsState(initial = false)
+
     val subProfileId by AppGraph.settings.subProfileId.collectAsState(initial = "")
     val searchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 10)
     val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
     val manualTripEnabledCategoryLabels by AppGraph.settings.manualTripEnabledCategoryLabels.collectAsState(initial = emptySet())
+    val manualTripCategoriesInitialized by AppGraph.settings.manualTripCategoriesInitialized.collectAsState(initial = false)
 
-    LaunchedEffect(subProfileId, manualTripCategoryConfigs, manualTripEnabledCategoryLabels) {
+    LaunchedEffect(dataStoreLoaded, subProfileId, manualTripCategoryConfigs, manualTripEnabledCategoryLabels, manualTripCategoriesInitialized) {
+        if (!dataStoreLoaded) return@LaunchedEffect
         if (manualTripCategoryConfigs.isEmpty()) {
-            AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId)
+            // Only seed defaults once. If the user later removes all types, keep it empty.
+            if (!manualTripCategoriesInitialized) {
+                AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId)
+            }
             return@LaunchedEffect
         }
 
-        // Backward-compatible: if configs exist but enabled set is empty, default to enabling all.
-        if (manualTripEnabledCategoryLabels.isEmpty()) {
-            AppGraph.settings.setManualTripEnabledCategoryLabels(
-                manualTripCategoryConfigs.map { it.label }.toSet(),
-            )
+        // Migration/first-run only: if enabled set was never stored, default to enabling all.
+        // Once initialized, an empty enabled set means the user intentionally deselected everything.
+        if (!manualTripCategoriesInitialized) {
+            AppGraph.settings.setManualTripCategoriesInitialized(true)
+
+            if (manualTripEnabledCategoryLabels.isEmpty()) {
+                AppGraph.settings.setManualTripEnabledCategoryLabels(
+                    manualTripCategoryConfigs.map { it.label }.toSet(),
+                )
+            }
+
+            return@LaunchedEffect
         }
     }
 
@@ -630,10 +647,12 @@ fun ManualTripScreen(
     var remoteSearchError by remember { mutableStateOf<String?>(null) }
     var remotePlaces by remember { mutableStateOf<List<ManualTripPlaceSearchItem>>(emptyList()) }
     var forceTypeRefreshTick by remember { mutableStateOf(0) }
+    var initialInterestFetchDone by remember { mutableStateOf(false) }
     var searchRadiusMenuExpanded by remember { mutableStateOf(false) }
 
     var locationsMenuExpanded by remember { mutableStateOf(false) }
     var showStorePicker by remember { mutableStateOf(false) }
+    var pendingRemoveCategory by remember { mutableStateOf<ManualTripCategoryConfig?>(null) }
 
     val placesJson = remember { Json { ignoreUnknownKeys = true } }
     val placesRetrofit = remember {
@@ -643,6 +662,17 @@ fun ManualTripScreen(
             .build()
     }
     val placesSearchApi = remember { placesRetrofit.create(RawPlacesSearchApi::class.java) }
+
+    // Default prompt: when this screen opens (and search bar is empty), immediately fetch "locations of interest".
+    LaunchedEffect(manualTripShowOnlineResults, enabledCategoryConfigs, cityQuery, initialInterestFetchDone) {
+        if (initialInterestFetchDone) return@LaunchedEffect
+        if (!manualTripShowOnlineResults) return@LaunchedEffect
+        if (cityQuery.trim().length >= 2) return@LaunchedEffect
+        if (enabledCategoryConfigs.isEmpty()) return@LaunchedEffect
+
+        initialInterestFetchDone = true
+        forceTypeRefreshTick++
+    }
 
 
     LaunchedEffect(Unit) {
@@ -824,7 +854,11 @@ fun ManualTripScreen(
         searchRadiusKm,
         cityQuery,
         forceTypeRefreshTick,
+        locationsMenuExpanded,
     ) {
+        // Don't refresh searches while the user is editing the Places list.
+        if (locationsMenuExpanded) return@LaunchedEffect
+
         val query = cityQuery.trim()
         if (query.length >= 2) return@LaunchedEffect
 
@@ -1124,13 +1158,14 @@ fun ManualTripScreen(
         ) {
             ExposedDropdownMenuBox(
                 expanded = searchRadiusMenuExpanded,
-                onExpandedChange = { searchRadiusMenuExpanded = it },
+                onExpandedChange = { if (!remoteSearchBusy) searchRadiusMenuExpanded = it },
                 modifier = Modifier.weight(1f),
             ) {
                 OutlinedTextField(
                     value = "${searchRadiusKm.coerceIn(5, 50)} km",
                     onValueChange = {},
                     readOnly = true,
+                    enabled = !remoteSearchBusy,
                     singleLine = true,
                     label = { Text("Distance") },
                     trailingIcon = {
@@ -1159,7 +1194,7 @@ fun ManualTripScreen(
 
             ExposedDropdownMenuBox(
                 expanded = locationsMenuExpanded,
-                onExpandedChange = { locationsMenuExpanded = it },
+                onExpandedChange = { if (!remoteSearchBusy) locationsMenuExpanded = it },
                 modifier = Modifier.weight(1f),
             ) {
                 val enabledCategoriesCount = enabledCategoryConfigs.size
@@ -1177,6 +1212,7 @@ fun ManualTripScreen(
                     value = placesLabel,
                     onValueChange = {},
                     readOnly = true,
+                    enabled = !remoteSearchBusy,
                     singleLine = true,
                     label = { Text("Places") },
                     trailingIcon = {
@@ -1210,37 +1246,54 @@ fun ManualTripScreen(
 
                     manualTripCategoryConfigs.forEach { cfg ->
                         val enabled = manualTripEnabledCategoryLabels.contains(cfg.label)
-                        DropdownMenuItem(
-                            text = { Text(cfg.label) },
-                            onClick = {
-                                val next = if (enabled) {
-                                    manualTripEnabledCategoryLabels - cfg.label
-                                } else {
-                                    manualTripEnabledCategoryLabels + cfg.label
-                                }
-                                scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
-                            },
-                            trailingIcon = {
-                                Checkbox(
-                                    checked = enabled,
-                                    onCheckedChange = null,
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        val next = if (enabled) {
+                                            manualTripEnabledCategoryLabels - cfg.label
+                                        } else {
+                                            manualTripEnabledCategoryLabels + cfg.label
+                                        }
+                                        scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
+                                    },
+                                    onLongClick = {
+                                        pendingRemoveCategory = cfg
+                                    },
                                 )
-                            },
-                        )
-                    }
-
-                    DropdownMenuItem(
-                        text = { Text("Show online results") },
-                        onClick = {
-                            scope.launch { AppGraph.settings.setManualTripShowOnlineResults(!manualTripShowOnlineResults) }
-                        },
-                        trailingIcon = {
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = cfg.label,
+                                modifier = Modifier.weight(1f),
+                            )
                             Checkbox(
-                                checked = manualTripShowOnlineResults,
+                                checked = enabled,
                                 onCheckedChange = null,
                             )
-                        },
-                    )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                scope.launch { AppGraph.settings.setManualTripShowOnlineResults(!manualTripShowOnlineResults) }
+                            }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Show online results",
+                            modifier = Modifier.weight(1f),
+                        )
+                        Checkbox(
+                            checked = manualTripShowOnlineResults,
+                            onCheckedChange = null,
+                        )
+                    }
                 }
             }
 
@@ -1386,6 +1439,41 @@ fun ManualTripScreen(
         )
     }
 
+    val categoryToRemove = pendingRemoveCategory
+    if (categoryToRemove != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRemoveCategory = null },
+            title = { Text("Remove '${categoryToRemove.label}'?") },
+            text = {
+                Text(
+                    "This will remove it from the Places list and stop it from being searched. " +
+                        "You can add it back in Settings → Manual trip (reset to defaults).",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val label = categoryToRemove.label
+                        val nextConfigs = manualTripCategoryConfigs.filterNot { it.label == label }
+                        val nextEnabled = manualTripEnabledCategoryLabels - label
+                        scope.launch {
+                            AppGraph.settings.setManualTripCategoryConfigs(nextConfigs)
+                            AppGraph.settings.setManualTripEnabledCategoryLabels(nextEnabled)
+                        }
+                        pendingRemoveCategory = null
+                    },
+                ) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemoveCategory = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     val titleCity = currentCity?.trim().orEmpty()
 
     val searchResultPolar = remember(filteredPolar) {
@@ -1434,6 +1522,7 @@ fun ManualTripScreen(
                 title = {
                     TextField(
                         value = cityQuery,
+                        enabled = !remoteSearchBusy,
                         onValueChange = {
                             userEditedCityQuery = true
                             cityQuery = it
@@ -1487,13 +1576,17 @@ fun ManualTripScreen(
             )
         },
     ) { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(padding),
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
             // City suggestions removed: search is now free-text Places search.
 
             if (error != null) {
@@ -1530,6 +1623,53 @@ fun ManualTripScreen(
                 if (!remoteSearchBusy && remoteSearchError.isNullOrBlank() && remotePlaces.isEmpty()) {
                     Text(
                         "No results for '${stableQuery}'.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+            } else {
+                // Browse mode (search bar empty): show helpful status so the screen doesn't feel dead.
+                when {
+                    !manualTripShowOnlineResults -> {
+                        Text(
+                            "Enable 'Show online results' in Places to browse locations of interest.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                        )
+                    }
+                    enabledCategoryConfigs.isEmpty() -> {
+                        Text(
+                            "No place types selected. Open Places to pick types.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                        )
+                    }
+                    remoteSearchBusy -> {
+                        Text(
+                            "Loading locations of interest…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                        )
+                    }
+                }
+
+                if (!remoteSearchError.isNullOrBlank()) {
+                    Text(
+                        remoteSearchError.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+
+                if (
+                    manualTripShowOnlineResults &&
+                    enabledCategoryConfigs.isNotEmpty() &&
+                    !remoteSearchBusy &&
+                    remoteSearchError.isNullOrBlank() &&
+                    remotePlaces.isEmpty()
+                ) {
+                    Text(
+                        "No locations of interest found. Tap refresh to try again.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
@@ -1716,6 +1856,36 @@ fun ManualTripScreen(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+
+            if (remoteSearchBusy) {
+                // Full-screen scrim: centers the indicator and blocks all clicks while searching.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background.copy(alpha = 0.75f))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                        ) { /* consume */ },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(110.dp),
+                            strokeWidth = 10.dp,
+                        )
+                        Text(
+                            "Searching…",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                        )
                     }
                 }
             }

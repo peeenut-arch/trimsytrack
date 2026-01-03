@@ -186,12 +186,16 @@ fun SettingsScreen(
     val backendDailySyncMinutes by AppGraph.settings.backendDailySyncMinutes.collectAsState(initial = 3 * 60)
     val backendLastSyncAtMillis by AppGraph.settings.backendLastSyncAtMillis.collectAsState(initial = null)
 
+    val dataStoreLoaded by AppGraph.settings.dataStoreLoaded.collectAsState(initial = false)
+
     val manualTripSearchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 50)
     val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
     val manualTripEnabledCategoryLabels by AppGraph.settings.manualTripEnabledCategoryLabels.collectAsState(initial = emptySet())
+    val manualTripCategoriesInitialized by AppGraph.settings.manualTripCategoriesInitialized.collectAsState(initial = false)
 
-    LaunchedEffect(subProfileId, manualTripCategoryConfigs) {
-        if (manualTripCategoryConfigs.isEmpty()) {
+    LaunchedEffect(dataStoreLoaded, subProfileId, manualTripCategoryConfigs, manualTripCategoriesInitialized) {
+        if (!dataStoreLoaded) return@LaunchedEffect
+        if (manualTripCategoryConfigs.isEmpty() && !manualTripCategoriesInitialized) {
             AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId)
         }
     }
