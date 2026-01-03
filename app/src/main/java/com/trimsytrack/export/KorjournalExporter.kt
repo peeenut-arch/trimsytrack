@@ -37,6 +37,7 @@ object KorjournalExporter {
             // Semicolon-separated (often plays nicer with Swedish Excel locales)
             appendLine(
                 listOf(
+                    "tripId",
                     "year",
                     "vehicleRegNumber",
                     "odometerYearStartKm",
@@ -57,8 +58,14 @@ object KorjournalExporter {
 
             for (t in tripList) {
                 val distanceKm = (t.distanceMeters / 1000.0)
+                val startAddress = if (t.startLabelSnapshot == "Business home" && businessHomeAddress.isNotBlank()) {
+                    businessHomeAddress
+                } else {
+                    t.startLabelSnapshot
+                }
                 appendLine(
                     listOf(
+                        t.id.toString(),
                         year.toString(),
                         vehicleRegNumber,
                         odometerYearStartKm,
@@ -68,7 +75,7 @@ object KorjournalExporter {
                         "", // tripOdometerStartKm (not captured yet)
                         "", // tripOdometerEndKm (not captured yet)
                         String.format("%.1f", distanceKm),
-                        t.startLabelSnapshot,
+                        startAddress,
                         t.storeNameSnapshot,
                         t.notes, // purpose (mapped to notes for now)
                         t.storeNameSnapshot,

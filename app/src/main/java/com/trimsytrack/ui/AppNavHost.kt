@@ -219,7 +219,7 @@ fun AppNavHost(intent: Intent) {
                 onJournal = { navController.navigate(Routes.Journal) },
                 onCamera = { navController.navigate(Routes.Camera) },
                 onOpenSettings = { navController.navigate(Routes.Settings) },
-                onOpenAccount = { navController.navigate(Routes.Auth) },
+                onOpenProfiles = { navController.navigate(Routes.Profiles) },
             )
         }
         composable(

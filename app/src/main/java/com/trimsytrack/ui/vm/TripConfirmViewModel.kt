@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.PromptStatus
 import com.trimsytrack.data.entities.TripEntity
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,7 @@ data class TripConfirmState(
     val startStoreId: String? = null,
 
     val canUseLastStore: Boolean = false,
+    val canUseCurrentLocation: Boolean = false,
     val canConfirm: Boolean = false,
 
     val isConfirming: Boolean = false,
@@ -50,6 +52,9 @@ class TripConfirmViewModel(
     private var storeId: String? = null
     private var promptTriggeredAt: Instant? = null
     private var promptDay: LocalDate? = null
+    private var hasBusinessHomeTripToday: Boolean = false
+    private var businessHomeLat: Double? = null
+    private var businessHomeLng: Double? = null
 
     init {
         viewModelScope.launch {
@@ -64,27 +69,71 @@ class TripConfirmViewModel(
             promptDay = prompt.triggeredAt.atZone(ZoneId.systemDefault()).toLocalDate()
 
             val day = promptDay ?: LocalDate.now()
+            businessHomeLat = AppGraph.settings.businessHomeLat.first()
+            businessHomeLng = AppGraph.settings.businessHomeLng.first()
+
+            hasBusinessHomeTripToday = runCatching {
+                val existing = AppGraph.tripRepository.listTripsBetweenDays(day, day)
+                val homeLat = businessHomeLat
+                val homeLng = businessHomeLng
+                if (homeLat == null || homeLng == null) {
+                    false
+                } else {
+                    existing.any { t ->
+                        t.startLabelSnapshot == "Business home" ||
+                            distanceKm(t.startLat, t.startLng, homeLat, homeLng) <= 0.2
+                    }
+                }
+            }.getOrDefault(false)
+
             val last = AppGraph.tripRepository.latestTripForDay(day)
-            val canUseLast = last != null && distanceKm(
-                last.storeLatSnapshot,
-                last.storeLngSnapshot,
-                prompt.storeLatSnapshot,
-                prompt.storeLngSnapshot
-            ) <= 10.0
+            val canUseLast =
+                hasBusinessHomeTripToday && last != null && distanceKm(
+                    last.storeLatSnapshot,
+                    last.storeLngSnapshot,
+                    prompt.storeLatSnapshot,
+                    prompt.storeLngSnapshot
+                ) <= 10.0
 
             _state.update { prev ->
-                // Default behavior: if we likely came from another store today, assume "store -> this store".
-                // This makes every confirmed journey populate the internal distance cache graph.
-                val autoStartLabel = if (canUseLast) "Last store: ${last!!.storeNameSnapshot}" else prev.startLabel
-                val autoStartLat = if (canUseLast) last!!.storeLatSnapshot else prev.startLat
-                val autoStartLng = if (canUseLast) last!!.storeLngSnapshot else prev.startLng
-                val autoStartStoreId = if (canUseLast) last!!.storeId else prev.startStoreId
+                val homeLat = businessHomeLat
+                val homeLng = businessHomeLng
+
+                // Required behavior:
+                // - First confirmed trip of the day must start at Business Home (when configured).
+                // - Only after a Business-Home-start trip exists for the day may we start from last store/current.
+                val autoStartFromHome = (homeLat != null && homeLng != null && !hasBusinessHomeTripToday)
+
+                val autoStartLabel = when {
+                    canUseLast -> "Last store: ${last!!.storeNameSnapshot}"
+                    autoStartFromHome -> "Business home"
+                    else -> prev.startLabel
+                }
+
+                val autoStartLat = when {
+                    canUseLast -> last!!.storeLatSnapshot
+                    autoStartFromHome -> homeLat
+                    else -> prev.startLat
+                }
+
+                val autoStartLng = when {
+                    canUseLast -> last!!.storeLngSnapshot
+                    autoStartFromHome -> homeLng
+                    else -> prev.startLng
+                }
+
+                val autoStartStoreId = when {
+                    canUseLast -> last!!.storeId
+                    autoStartFromHome -> BUSINESS_HOME_LOCATION_ID
+                    else -> prev.startStoreId
+                }
 
                 prev.copy(
                     storeName = prompt.storeNameSnapshot,
                     storeLat = prompt.storeLatSnapshot,
                     storeLng = prompt.storeLngSnapshot,
                     canUseLastStore = canUseLast,
+                    canUseCurrentLocation = (homeLat == null || homeLng == null || hasBusinessHomeTripToday),
                     startLabel = autoStartLabel,
                     startLat = autoStartLat,
                     startLng = autoStartLng,
@@ -113,6 +162,12 @@ class TripConfirmViewModel(
 
     @SuppressLint("MissingPermission")
     fun useCurrentLocationStart() {
+        val homeLat = businessHomeLat
+        val homeLng = businessHomeLng
+        if (homeLat != null && homeLng != null && !hasBusinessHomeTripToday) {
+            _state.update { it.copy(error = "First trip of the day must start at Business home") }
+            return
+        }
         fused.lastLocation
             .addOnSuccessListener { loc ->
                 if (loc == null) {

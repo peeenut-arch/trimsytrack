@@ -84,6 +84,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.IndustryProfile
@@ -131,6 +132,16 @@ fun SettingsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val focusManager = LocalFocusManager.current
 
+    val auth = remember { FirebaseAuth.getInstance() }
+    var signedInUser by remember { mutableStateOf<FirebaseUser?>(auth.currentUser) }
+    DisposableEffect(auth) {
+        val listener = FirebaseAuth.AuthStateListener { a ->
+            signedInUser = a.currentUser
+        }
+        auth.addAuthStateListener(listener)
+        onDispose { auth.removeAuthStateListener(listener) }
+    }
+
     val driverDataRepository = remember {
         DriverDataRepository(
             context = context.applicationContext,
@@ -174,6 +185,16 @@ fun SettingsScreen(
     val backendSyncMode by AppGraph.settings.backendSyncMode.collectAsState(initial = BackendSyncMode.INSTANT)
     val backendDailySyncMinutes by AppGraph.settings.backendDailySyncMinutes.collectAsState(initial = 3 * 60)
     val backendLastSyncAtMillis by AppGraph.settings.backendLastSyncAtMillis.collectAsState(initial = null)
+
+    val manualTripSearchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 50)
+    val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
+    val manualTripEnabledCategoryLabels by AppGraph.settings.manualTripEnabledCategoryLabels.collectAsState(initial = emptySet())
+
+    LaunchedEffect(subProfileId, manualTripCategoryConfigs) {
+        if (manualTripCategoryConfigs.isEmpty()) {
+            AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId)
+        }
+    }
 
     val activeProfilePhotoUri = remember(activeProfileId, profiles) {
         profiles.firstOrNull { it.id == activeProfileId }?.photoUri
@@ -1402,6 +1423,63 @@ fun SettingsScreen(
                 }
 
                 item {
+                    SettingsSectionCard(title = "Manual trip") {
+                        SettingStepper(
+                            label = "Default search distance (km)",
+                            description = "Used on the manual trip search screen.",
+                            value = manualTripSearchRadiusKm,
+                            min = 1,
+                            max = 500,
+                            onChange = { km -> scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) } },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Places bar categories") },
+                            supportingContent = {
+                                Text(
+                                    "Choose what shows up in the Places menu.",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                )
+                            },
+                        )
+
+                        manualTripCategoryConfigs.forEach { cfg ->
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            val enabled = manualTripEnabledCategoryLabels.contains(cfg.label)
+                            ListItem(
+                                headlineContent = { Text(cfg.label) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val next = if (enabled) {
+                                            manualTripEnabledCategoryLabels - cfg.label
+                                        } else {
+                                            manualTripEnabledCategoryLabels + cfg.label
+                                        }
+                                        scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
+                                    },
+                                trailingContent = {
+                                    Checkbox(checked = enabled, onCheckedChange = null)
+                                },
+                            )
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        OutlinedButton(
+                            onClick = { scope.launch { AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId) } },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Text("Reset categories to profile defaults")
+                        }
+                    }
+                }
+
+                item {
                     SettingsSectionCard(title = "Saved places") {
                         val savedPlaces = remember(allStores) { allStores.filter { it.isFavorite } }
 
@@ -1459,8 +1537,19 @@ fun SettingsScreen(
                 item {
                     SettingsSectionCard(title = "Account") {
                         ListItem(
-                            headlineContent = { Text("Sign in") },
-                            supportingContent = { Text("Google or email/password") },
+                            headlineContent = {
+                                Text(if (signedInUser == null) "Sign in" else "Signed in")
+                            },
+                            supportingContent = {
+                                val email = signedInUser?.email?.trim().orEmpty()
+                                Text(
+                                    if (signedInUser == null) {
+                                        "Google or email/password"
+                                    } else {
+                                        email.ifBlank { "Account details" }
+                                    },
+                                )
+                            },
                             trailingContent = {
                                 Icon(
                                     Icons.Filled.KeyboardArrowRight,
@@ -2359,6 +2448,63 @@ fun SettingsScreen(
                 }
 
                 item {
+                    SettingsSectionCard(title = "Manual trip") {
+                        SettingStepper(
+                            label = "Default search distance (km)",
+                            description = "Used on the manual trip search screen.",
+                            value = manualTripSearchRadiusKm,
+                            min = 1,
+                            max = 500,
+                            onChange = { km -> scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) } },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Places bar categories") },
+                            supportingContent = {
+                                Text(
+                                    "Choose what shows up in the Places menu.",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                )
+                            },
+                        )
+
+                        manualTripCategoryConfigs.forEach { cfg ->
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            val enabled = manualTripEnabledCategoryLabels.contains(cfg.label)
+                            ListItem(
+                                headlineContent = { Text(cfg.label) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val next = if (enabled) {
+                                            manualTripEnabledCategoryLabels - cfg.label
+                                        } else {
+                                            manualTripEnabledCategoryLabels + cfg.label
+                                        }
+                                        scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
+                                    },
+                                trailingContent = {
+                                    Checkbox(checked = enabled, onCheckedChange = null)
+                                },
+                            )
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        OutlinedButton(
+                            onClick = { scope.launch { AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId) } },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Text("Reset categories to profile defaults")
+                        }
+                    }
+                }
+
+                item {
                     SettingsSectionCard(title = "Tracking & permissions") {
                         // Reuse the existing card content by showing the same controls as in the legacy GPS tab.
                         ListItem(
@@ -2582,8 +2728,19 @@ fun SettingsScreen(
                 item {
                     SettingsSectionCard(title = "Account") {
                         ListItem(
-                            headlineContent = { Text("Sign in") },
-                            supportingContent = { Text("Google or email/password") },
+                            headlineContent = {
+                                Text(if (signedInUser == null) "Sign in" else "Signed in")
+                            },
+                            supportingContent = {
+                                val email = signedInUser?.email?.trim().orEmpty()
+                                Text(
+                                    if (signedInUser == null) {
+                                        "Google or email/password"
+                                    } else {
+                                        email.ifBlank { "Account details" }
+                                    },
+                                )
+                            },
                             trailingContent = {
                                 Icon(
                                     Icons.Filled.KeyboardArrowRight,

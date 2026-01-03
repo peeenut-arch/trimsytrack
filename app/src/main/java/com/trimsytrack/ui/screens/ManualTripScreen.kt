@@ -423,9 +423,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -447,6 +450,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -486,12 +491,14 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import coil.compose.AsyncImage
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BusinessHours
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.data.ManualTripCategoryConfig
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.distance.MapsKeyProvider
@@ -517,6 +524,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Checkbox
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.saveable.mapSaver
 
 private data class StorePolar(
     val store: StoreEntity,
@@ -544,11 +554,36 @@ fun ManualTripScreen(
     var addTripMenuStoreId by remember { mutableStateOf<String?>(null) }
 
     val manualTripStoreSortMode by AppGraph.settings.manualTripStoreSortMode.collectAsState(initial = "NAME")
+    val manualTripHiddenStoreIds by AppGraph.settings.manualTripHiddenStoreIds.collectAsState(initial = emptySet())
+    val manualTripShowOnlineResults by AppGraph.settings.manualTripShowOnlineResults.collectAsState(initial = true)
+
+    val subProfileId by AppGraph.settings.subProfileId.collectAsState(initial = "")
+    val searchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 10)
+    val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
+    val manualTripEnabledCategoryLabels by AppGraph.settings.manualTripEnabledCategoryLabels.collectAsState(initial = emptySet())
+
+    LaunchedEffect(subProfileId, manualTripCategoryConfigs, manualTripEnabledCategoryLabels) {
+        if (manualTripCategoryConfigs.isEmpty()) {
+            AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId)
+            return@LaunchedEffect
+        }
+
+        // Backward-compatible: if configs exist but enabled set is empty, default to enabling all.
+        if (manualTripEnabledCategoryLabels.isEmpty()) {
+            AppGraph.settings.setManualTripEnabledCategoryLabels(
+                manualTripCategoryConfigs.map { it.label }.toSet(),
+            )
+        }
+    }
+
+    val enabledCategoryConfigs = remember(manualTripCategoryConfigs, manualTripEnabledCategoryLabels) {
+        manualTripCategoryConfigs.filter { cfg -> manualTripEnabledCategoryLabels.contains(cfg.label) }
+    }
     val storeBusinessHours by AppGraph.settings.storeBusinessHours.collectAsState(initial = emptyMap())
     val businessHomeLat by AppGraph.settings.businessHomeLat.collectAsState(initial = null)
     val businessHomeLng by AppGraph.settings.businessHomeLng.collectAsState(initial = null)
 
-    var activeStores by remember { mutableStateOf<List<StoreEntity>>(emptyList()) }
+    val savedStores by AppGraph.storeRepository.observeAllStores().collectAsState(initial = emptyList())
     val storeImages by AppGraph.settings.storeImages.collectAsState(initial = emptyMap())
     val ignoredStoreIds by AppGraph.settings.ignoredStoreIds.collectAsState(initial = emptySet())
     var error by remember { mutableStateOf<String?>(null) }
@@ -560,21 +595,45 @@ fun ManualTripScreen(
     var hoursDraft by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     var currentCity by remember { mutableStateOf<String?>(null) }
-    var allCities by remember { mutableStateOf<List<String>>(emptyList()) }
+    val allCities = remember(savedStores) {
+        savedStores
+            .mapNotNull { it.city.takeIf { c -> c.isNotBlank() } }
+            .distinct()
+            .sorted()
+    }
+
+    var detectedCity by remember { mutableStateOf<String?>(null) }
 
     var cityQuery by remember { mutableStateOf("") }
     var userEditedCityQuery by remember { mutableStateOf(false) }
     var searchSubmitTick by remember { mutableStateOf(0) }
     var lastHandledSubmitTick by remember { mutableStateOf(0) }
 
-    var expandStores by rememberSaveable { mutableStateOf(false) }
-    var expandPostOmbud by rememberSaveable { mutableStateOf(false) }
+    val expandedByCategoryLabel = rememberSaveable(
+        saver = mapSaver(
+            save = { it.toMap() },
+            restore = { restored ->
+                mutableStateMapOf<String, Boolean>().apply {
+                    restored.forEach { (k, v) ->
+                        put(k, v as Boolean)
+                    }
+                }
+            },
+        ),
+    ) {
+        mutableStateMapOf<String, Boolean>()
+    }
 
     var homeToStoreDistanceMeters by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
 
     var remoteSearchBusy by remember { mutableStateOf(false) }
     var remoteSearchError by remember { mutableStateOf<String?>(null) }
     var remotePlaces by remember { mutableStateOf<List<ManualTripPlaceSearchItem>>(emptyList()) }
+    var forceTypeRefreshTick by remember { mutableStateOf(0) }
+    var searchRadiusMenuExpanded by remember { mutableStateOf(false) }
+
+    var locationsMenuExpanded by remember { mutableStateOf(false) }
+    var showStorePicker by remember { mutableStateOf(false) }
 
     val placesJson = remember { Json { ignoreUnknownKeys = true } }
     val placesRetrofit = remember {
@@ -587,34 +646,25 @@ fun ManualTripScreen(
 
 
     LaunchedEffect(Unit) {
-        try {
-            activeStores = AppGraph.storeRepository.getActiveStores()
-            allCities = activeStores
-                .mapNotNull { it.city.takeIf { c -> c.isNotBlank() } }
-                .distinct()
-                .sorted()
+        detectedCity = runCatching { detectCurrentCityBestEffort() }
+            .getOrNull()
+            ?.let { normalizeCityName(it) }
+            ?.takeIf { it.isNotBlank() }
+    }
 
-            val detected = runCatching { detectCurrentCityBestEffort() }.getOrNull()
-            val normalizedDetected = detected
-                ?.let { normalizeCityName(it) }
-                ?.takeIf { it.isNotBlank() }
+    LaunchedEffect(detectedCity, allCities, userEditedCityQuery) {
+        if (userEditedCityQuery) return@LaunchedEffect
 
-            currentCity = when {
-                !normalizedDetected.isNullOrBlank() -> normalizedDetected
-                allCities.isNotEmpty() -> allCities.first()
-                else -> null
-            }
-            if (!userEditedCityQuery && !currentCity.isNullOrBlank()) {
-                cityQuery = currentCity.orEmpty()
-            }
+        val nextCity = when {
+            !detectedCity.isNullOrBlank() -> detectedCity
+            allCities.isNotEmpty() -> allCities.first()
+            else -> null
+        }
 
-            if (normalizedDetected.isNullOrBlank() && allCities.isNotEmpty()) {
-                error = "Could not detect your city from location. Defaulted to first available city."
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("ManualTripScreen", "Startup error", e)
-            error = "Startup error: ${e.message ?: e.javaClass.simpleName}"
-            currentCity = null
+        currentCity = nextCity
+
+        if (detectedCity.isNullOrBlank() && allCities.isNotEmpty()) {
+            error = "Could not detect your city from location. Defaulted to first available city."
         }
     }
 
@@ -654,44 +704,16 @@ fun ManualTripScreen(
         }
     }
 
-    val bestCityMatch = remember(cityQuery, allCities) {
-        val q = normalizeCityName(cityQuery).trim()
-        if (q.isBlank()) {
-            null
-        } else {
-            val starts = allCities.firstOrNull { it.startsWith(q, ignoreCase = true) }
-            starts ?: allCities.firstOrNull { it.contains(q, ignoreCase = true) }
-        }
-    }
-
-    val citySuggestions = remember(cityQuery, allCities) {
-        val q = normalizeCityName(cityQuery).trim()
-        if (q.isBlank()) {
-            emptyList()
-        } else {
-            allCities
-                .asSequence()
-                .filter { it.contains(q, ignoreCase = true) }
-                .take(6)
-                .toList()
-        }
-    }
-
-    LaunchedEffect(bestCityMatch) {
-        if (bestCityMatch != null) {
-            currentCity = bestCityMatch
-        }
-    }
-
-    // If city isn't in synced list, search online for second-hand stores in that city.
-    LaunchedEffect(cityQuery, bestCityMatch, searchSubmitTick) {
+    // Google Maps-style search: free text (address/company). This is additive to the
+    // GPS-first nearby list, and results should be selectable regardless of categories.
+    LaunchedEffect(cityQuery, searchSubmitTick, businessHomeLat, businessHomeLng, userLocation, manualTripShowOnlineResults) {
         val submitImmediate = searchSubmitTick != lastHandledSubmitTick
-        val qCity = normalizeCityName(cityQuery).trim()
+        val query = cityQuery.trim()
 
-        if (bestCityMatch != null || qCity.length < 2) {
+        // When the search bar is empty, online results are handled by the type-based auto search below.
+        if (!manualTripShowOnlineResults || query.length < 2) {
             remoteSearchBusy = false
             remoteSearchError = null
-            remotePlaces = emptyList()
             return@LaunchedEffect
         }
 
@@ -701,8 +723,8 @@ fun ManualTripScreen(
             delay(350)
         }
 
-        val stableCity = normalizeCityName(cityQuery).trim()
-        if (bestCityMatch != null || stableCity.length < 2) return@LaunchedEffect
+        val stableQuery = cityQuery.trim()
+        if (!manualTripShowOnlineResults || stableQuery.length < 2) return@LaunchedEffect
 
         remoteSearchBusy = true
         remoteSearchError = null
@@ -714,65 +736,35 @@ fun ManualTripScreen(
                 return@LaunchedEffect
             }
 
-            val geocodeQuery = if (stableCity.contains(",")) stableCity else "$stableCity, Sweden"
+            val originLat = userLocation?.first ?: businessHomeLat
+            val originLng = userLocation?.second ?: businessHomeLng
+
+            val geocodeQuery = stableQuery
 
             val raw = withContext(Dispatchers.IO) {
-                val geocoder = Geocoder(AppGraph.appContext)
-                val resolved = runCatching {
-                    @Suppress("DEPRECATION")
-                    geocoder.getFromLocationName(geocodeQuery, 5)
-                }.getOrNull().orEmpty()
-
-                val best = resolved.firstOrNull { it.countryCode.equals("SE", ignoreCase = true) }
-                    ?: resolved.firstOrNull()
-
-                val cityLat = best?.latitude
-                val cityLng = best?.longitude
-
-                if (cityLat == null || cityLng == null) {
-                    throw IllegalArgumentException(
-                        "Could not find city '$stableCity'. Try e.g. 'Köping, Sweden'.",
-                    )
-                }
-
-                val metersPerDegree = 111_320.0
-                val radiusMeters = 20_000.0
-                val deltaLat = radiusMeters / metersPerDegree
-                val deltaLng = radiusMeters / (metersPerDegree * kotlin.math.cos(Math.toRadians(cityLat)))
-
-                val lowLat = (cityLat - deltaLat).coerceIn(-90.0, 90.0)
-                val highLat = (cityLat + deltaLat).coerceIn(-90.0, 90.0)
-                val lowLng = (cityLng - deltaLng).coerceIn(-180.0, 180.0)
-                val highLng = (cityLng + deltaLng).coerceIn(-180.0, 180.0)
-
                 val body = buildJsonObject {
-                    // Put the city name into the query too so Google understands intent,
-                    // and restrict results strictly to the city area (locationRestriction).
-                    put("textQuery", JsonPrimitive("second hand in $stableCity"))
-                    put(
-                        "locationRestriction",
-                        buildJsonObject {
-                            put(
-                                "rectangle",
-                                buildJsonObject {
-                                    put(
-                                        "low",
-                                        buildJsonObject {
-                                            put("latitude", JsonPrimitive(lowLat))
-                                            put("longitude", JsonPrimitive(lowLng))
-                                        }
-                                    )
-                                    put(
-                                        "high",
-                                        buildJsonObject {
-                                            put("latitude", JsonPrimitive(highLat))
-                                            put("longitude", JsonPrimitive(highLng))
-                                        }
-                                    )
-                                }
-                            )
-                        }
-                    )
+                    put("textQuery", JsonPrimitive(stableQuery))
+                    if (originLat != null && originLng != null) {
+                        put(
+                            "locationBias",
+                            buildJsonObject {
+                                put(
+                                    "circle",
+                                    buildJsonObject {
+                                        put(
+                                            "center",
+                                            buildJsonObject {
+                                                put("latitude", JsonPrimitive(originLat))
+                                                put("longitude", JsonPrimitive(originLng))
+                                            }
+                                        )
+                                        // Bias nearby, but don't exclude exact-address searches.
+                                        put("radius", JsonPrimitive(50_000))
+                                    }
+                                )
+                            }
+                        )
+                    }
                     put("regionCode", JsonPrimitive("SE"))
                 }
 
@@ -821,17 +813,129 @@ fun ManualTripScreen(
         }
     }
 
-    val usingSyncedStores = bestCityMatch != null
+    // Auto-search: when search bar is empty, fetch results for each enabled "type".
+    // This powers the "pre-synced types" UX without requiring manual typing.
+    LaunchedEffect(
+        manualTripShowOnlineResults,
+        enabledCategoryConfigs,
+        userLocation,
+        businessHomeLat,
+        businessHomeLng,
+        searchRadiusKm,
+        cityQuery,
+        forceTypeRefreshTick,
+    ) {
+        val query = cityQuery.trim()
+        if (query.length >= 2) return@LaunchedEffect
 
-    val localStoresForCity = remember(activeStores, currentCity) {
-        val city = currentCity?.trim().orEmpty()
-        if (city.isBlank()) activeStores
-        else activeStores.filter { it.city.equals(city, ignoreCase = true) }
+        if (!manualTripShowOnlineResults) {
+            remoteSearchBusy = false
+            remoteSearchError = null
+            remotePlaces = emptyList()
+            return@LaunchedEffect
+        }
+
+        val typeQueries = enabledCategoryConfigs
+            .map { it.label.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        if (typeQueries.isEmpty()) {
+            remoteSearchBusy = false
+            remoteSearchError = null
+            remotePlaces = emptyList()
+            return@LaunchedEffect
+        }
+
+        remoteSearchBusy = true
+        remoteSearchError = null
+        try {
+            val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
+            if (apiKey.isBlank()) {
+                remoteSearchError = "Missing MAPS/Places API key. Check local.properties and rebuild."
+                remotePlaces = emptyList()
+                return@LaunchedEffect
+            }
+
+            val originLat = userLocation?.first ?: businessHomeLat
+            val originLng = userLocation?.second ?: businessHomeLng
+            val biasRadiusMeters = (searchRadiusKm.coerceIn(1, 500) * 1000).coerceAtMost(50_000)
+
+            val aggregated = LinkedHashMap<String, ManualTripPlaceSearchItem>()
+
+            withContext(Dispatchers.IO) {
+                for (typeQuery in typeQueries) {
+                    val body = buildJsonObject {
+                        put("textQuery", JsonPrimitive(typeQuery))
+                        if (originLat != null && originLng != null) {
+                            put(
+                                "locationBias",
+                                buildJsonObject {
+                                    put(
+                                        "circle",
+                                        buildJsonObject {
+                                            put(
+                                                "center",
+                                                buildJsonObject {
+                                                    put("latitude", JsonPrimitive(originLat))
+                                                    put("longitude", JsonPrimitive(originLng))
+                                                }
+                                            )
+                                            put("radius", JsonPrimitive(biasRadiusMeters))
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                        put("regionCode", JsonPrimitive("SE"))
+                    }
+
+                    val raw = placesSearchApi.searchPlacesRaw(
+                        apiKey = apiKey,
+                        fieldMask = "places.id,places.displayName,places.location",
+                        body = body.toString(),
+                    )
+
+                    val root = placesJson.parseToJsonElement(raw).jsonObject
+                    val apiError = root["error"]?.jsonObject
+                    if (apiError != null) continue
+
+                    val places = root["places"]?.jsonArray ?: JsonArray(emptyList())
+                    val mapped = places.mapNotNull { el ->
+                        val obj = el.jsonObject
+                        val placeId = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                        val displayNameObj = obj["displayName"]?.jsonObject
+                        val name = displayNameObj?.get("text")?.jsonPrimitive?.content ?: return@mapNotNull null
+                        val locObj = obj["location"]?.jsonObject ?: return@mapNotNull null
+                        val lat = locObj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
+                        val lng = locObj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
+                        ManualTripPlaceSearchItem(placeId = placeId, name = name, lat = lat, lng = lng)
+                    }
+
+                    // Keep the set small per type to avoid spamming UI.
+                    mapped.take(12).forEach { item ->
+                        aggregated.putIfAbsent(item.placeId, item)
+                    }
+                }
+            }
+
+            remotePlaces = aggregated.values.toList()
+        } catch (e: Exception) {
+            remoteSearchError = e.message ?: e.javaClass.simpleName
+            remotePlaces = emptyList()
+        } finally {
+            remoteSearchBusy = false
+        }
     }
 
-    val remoteStoresForCity = remember(remotePlaces, cityQuery) {
-        val city = normalizeCityName(cityQuery).trim()
-        if (city.isBlank()) {
+    val localStoresForCity = remember(savedStores, currentCity, userLocation) {
+        // Presets are the source of truth: show all saved/synced stores by default.
+        // City is only used for display name cleanup (not filtering).
+        savedStores
+    }
+
+    val remoteStoresForCity = remember(remotePlaces, manualTripShowOnlineResults) {
+        if (!manualTripShowOnlineResults) {
             emptyList()
         } else {
             remotePlaces.map { p ->
@@ -843,7 +947,7 @@ fun ManualTripScreen(
                     lng = p.lng,
                     radiusMeters = 120,
                     regionCode = "manual_places",
-                    city = city,
+                    city = "",
                     isActive = false,
                     isFavorite = false,
                 )
@@ -851,13 +955,13 @@ fun ManualTripScreen(
         }
     }
 
-    val visibleStores = remember(usingSyncedStores, localStoresForCity, remoteStoresForCity) {
-        if (usingSyncedStores) localStoresForCity else remoteStoresForCity
+    val visibleStores = remember(localStoresForCity, remoteStoresForCity, manualTripShowOnlineResults) {
+        if (manualTripShowOnlineResults) localStoresForCity + remoteStoresForCity else localStoresForCity
     }
 
-    // Cache Google driving distances: Business home -> store. Only for synced stores.
-    LaunchedEffect(visibleStores, businessHomeLat, businessHomeLng, usingSyncedStores) {
-        if (!usingSyncedStores) {
+    // Cache Google driving distances: Business home -> store. Only used when we don't have current location.
+    LaunchedEffect(visibleStores, businessHomeLat, businessHomeLng, userLocation) {
+        if (userLocation != null) {
             homeToStoreDistanceMeters = emptyMap()
             return@LaunchedEffect
         }
@@ -869,8 +973,9 @@ fun ManualTripScreen(
         }
 
         val computed = withContext(Dispatchers.IO) {
-            val map = LinkedHashMap<String, Int>(visibleStores.size)
-            for (store in visibleStores) {
+            val localOnly = visibleStores.filterNot { it.regionCode == "manual_places" }
+            val map = LinkedHashMap<String, Int>(localOnly.size)
+            for (store in localOnly) {
                 val meters = runCatching {
                     AppGraph.distanceRepository.getOrComputeDrivingDistanceMeters(
                         startLat = homeLat,
@@ -901,9 +1006,9 @@ fun ManualTripScreen(
         userLocation,
         canComputeDistances,
     ) {
-        val originLat = businessHomeLat ?: userLocation?.first
-        val originLng = businessHomeLng ?: userLocation?.second
-        val isHomeOrigin = businessHomeLat != null && businessHomeLng != null
+        val originLat = userLocation?.first ?: businessHomeLat
+        val originLng = userLocation?.second ?: businessHomeLng
+        val isHomeOrigin = (userLocation == null && businessHomeLat != null && businessHomeLng != null)
 
         // If we don't have an origin (permission denied / no lastLocation / no business-home),
         // still show results instead of looking like search is broken.
@@ -949,38 +1054,366 @@ fun ManualTripScreen(
         }
     }
 
-    val sortedPolar = remember(storesPolar, manualTripStoreSortMode, storeVisitCounts, canComputeDistances) {
-        when (manualTripStoreSortMode) {
-            "NAME" -> storesPolar.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.store.name })
-            "VISITS" -> {
+    // UX: always sort by closest when we can compute distances.
+    val effectiveSortMode = if (canComputeDistances) "DISTANCE" else "NAME"
+
+    val sortedPolar = remember(storesPolar, effectiveSortMode, storeVisitCounts, canComputeDistances) {
+        when (effectiveSortMode) {
+            "NAME" -> {
                 storesPolar.sortedWith(
-                    compareByDescending<StorePolar> { storeVisitCounts[it.store.id] ?: 0 }
-                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.store.name }
+                    compareByDescending<StorePolar> { it.store.isFavorite }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.store.name },
                 )
             }
-            else -> storesPolar.sortedBy { it.distance } // DISTANCE (default)
+            "VISITS" -> {
+                storesPolar.sortedWith(
+                    compareByDescending<StorePolar> { it.store.isFavorite }
+                        .thenByDescending { storeVisitCounts[it.store.id] ?: 0 }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.store.name },
+                )
+            }
+            else -> {
+                // DISTANCE (default)
+                storesPolar.sortedWith(
+                    compareBy<StorePolar> { it.distance }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.store.name },
+                )
+            }
         }
     }
 
-    val titleCity = if (usingSyncedStores) {
-        currentCity?.trim().orEmpty().ifBlank { "Stores" }
-    } else {
-        normalizeCityName(cityQuery).trim().ifBlank { "Stores" }
+    val filteredPolar = remember(
+        sortedPolar,
+        canComputeDistances,
+        searchRadiusKm,
+        enabledCategoryConfigs,
+        manualTripHiddenStoreIds,
+        manualTripShowOnlineResults,
+    ) {
+        val radiusMeters = searchRadiusKm.coerceIn(1, 500) * 1000.0
+
+        sortedPolar
+            .asSequence()
+            .filter { polar ->
+                val store = polar.store
+
+                if (store.regionCode == "manual_places") {
+                    // Search bar results should be "add anything" (not constrained by type toggles).
+                    return@filter manualTripShowOnlineResults
+                }
+
+                if (manualTripHiddenStoreIds.contains(store.id)) return@filter false
+
+                matchesAnyCategory(name = store.name, categories = enabledCategoryConfigs)
+            }
+            .filter { polar ->
+                if (polar.store.regionCode == "manual_places") return@filter true
+                if (!canComputeDistances) return@filter true
+                val d = polar.distance
+                d.isFinite() && d <= radiusMeters
+            }
+            .toList()
     }
 
-    val postOmbudPolar = remember(sortedPolar) {
-        sortedPolar.filter { isPostOmbudName(it.store.name) }
-    }
-    val storePolar = remember(sortedPolar, postOmbudPolar) {
-        if (postOmbudPolar.isEmpty()) sortedPolar else sortedPolar.filterNot { isPostOmbudName(it.store.name) }
+    @Composable
+    fun FilterRow(modifier: Modifier = Modifier) {
+        Row(
+            modifier = modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ExposedDropdownMenuBox(
+                expanded = searchRadiusMenuExpanded,
+                onExpandedChange = { searchRadiusMenuExpanded = it },
+                modifier = Modifier.weight(1f),
+            ) {
+                OutlinedTextField(
+                    value = "${searchRadiusKm.coerceIn(5, 50)} km",
+                    onValueChange = {},
+                    readOnly = true,
+                    singleLine = true,
+                    label = { Text("Distance") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = searchRadiusMenuExpanded)
+                    },
+                    modifier = Modifier
+                        .menuAnchor()
+                        .fillMaxWidth(),
+                )
+
+                DropdownMenu(
+                    expanded = searchRadiusMenuExpanded,
+                    onDismissRequest = { searchRadiusMenuExpanded = false },
+                ) {
+                    (5..50 step 5).forEach { km ->
+                        DropdownMenuItem(
+                            text = { Text("$km km") },
+                            onClick = {
+                                scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) }
+                                searchRadiusMenuExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+
+            ExposedDropdownMenuBox(
+                expanded = locationsMenuExpanded,
+                onExpandedChange = { locationsMenuExpanded = it },
+                modifier = Modifier.weight(1f),
+            ) {
+                val enabledCategoriesCount = enabledCategoryConfigs.size
+                val totalCategoriesCount = manualTripCategoryConfigs.size
+
+                val anyHidden = manualTripHiddenStoreIds.isNotEmpty()
+
+                val placesLabel = when {
+                    totalCategoriesCount > 0 && enabledCategoriesCount == totalCategoriesCount && manualTripShowOnlineResults && !anyHidden -> "All"
+                    enabledCategoriesCount == 0 && !manualTripShowOnlineResults -> "None"
+                    else -> "Custom"
+                }
+
+                OutlinedTextField(
+                    value = placesLabel,
+                    onValueChange = {},
+                    readOnly = true,
+                    singleLine = true,
+                    label = { Text("Places") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = locationsMenuExpanded)
+                    },
+                    modifier = Modifier
+                        .menuAnchor()
+                        .fillMaxWidth(),
+                )
+
+                DropdownMenu(
+                    expanded = locationsMenuExpanded,
+                    onDismissRequest = { locationsMenuExpanded = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Hide / show stores…") },
+                        onClick = {
+                            locationsMenuExpanded = false
+                            showStorePicker = true
+                        },
+                    )
+
+                    if (anyHidden) {
+                        DropdownMenuItem(
+                            text = { Text("Show all preset stores") },
+                            onClick = {
+                                scope.launch { AppGraph.settings.setManualTripHiddenStoreIds(emptyList()) }
+                            },
+                        )
+                    }
+
+                    manualTripCategoryConfigs.forEach { cfg ->
+                        val enabled = manualTripEnabledCategoryLabels.contains(cfg.label)
+                        DropdownMenuItem(
+                            text = { Text(cfg.label) },
+                            onClick = {
+                                val next = if (enabled) {
+                                    manualTripEnabledCategoryLabels - cfg.label
+                                } else {
+                                    manualTripEnabledCategoryLabels + cfg.label
+                                }
+                                scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
+                            },
+                            trailingIcon = {
+                                Checkbox(
+                                    checked = enabled,
+                                    onCheckedChange = null,
+                                )
+                            },
+                        )
+                    }
+
+                    DropdownMenuItem(
+                        text = { Text("Show online results") },
+                        onClick = {
+                            scope.launch { AppGraph.settings.setManualTripShowOnlineResults(!manualTripShowOnlineResults) }
+                        },
+                        trailingIcon = {
+                            Checkbox(
+                                checked = manualTripShowOnlineResults,
+                                onCheckedChange = null,
+                            )
+                        },
+                    )
+                }
+            }
+
+            IconButton(
+                enabled = !remoteSearchBusy,
+                onClick = {
+                    // Force showing + fetching "locations of interest" (type-based search).
+                    if (cityQuery.trim().length >= 2) {
+                        userEditedCityQuery = true
+                        cityQuery = ""
+                    }
+                    scope.launch {
+                        if (!manualTripShowOnlineResults) {
+                            AppGraph.settings.setManualTripShowOnlineResults(true)
+                        }
+                    }
+                    forceTypeRefreshTick++
+                },
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Refresh,
+                    contentDescription = "Refresh locations of interest",
+                )
+            }
+        }
     }
 
-    val visibleStorePolar = remember(storePolar, ignoredStoreIds) {
-        storePolar.filterNot { ignoredStoreIds.contains(it.store.id) }
+    if (showStorePicker) {
+        val candidateStores = remember(savedStores, ignoredStoreIds) {
+            savedStores
+                .asSequence()
+                .filterNot { ignoredStoreIds.contains(it.id) }
+                .sortedWith(
+                    compareBy<StoreEntity> { it.city.trim().lowercase() }
+                        .thenBy { it.name.trim().lowercase() },
+                )
+                .toList()
+        }
+
+        val cities = remember(candidateStores) {
+            candidateStores
+                .map { it.city.trim().ifBlank { "Unknown" } }
+                .distinct()
+                .sortedWith(String.CASE_INSENSITIVE_ORDER)
+        }
+
+        val storesByCity = remember(candidateStores) {
+            candidateStores.groupBy { it.city.trim().ifBlank { "Unknown" } }
+        }
+
+        var expandedCities by remember { mutableStateOf<Set<String>>(setOf()) }
+        var draftHidden by remember(manualTripHiddenStoreIds) { mutableStateOf(manualTripHiddenStoreIds) }
+
+        AlertDialog(
+            onDismissRequest = { showStorePicker = false },
+            title = { Text("Choose preset stores") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(
+                            onClick = { draftHidden = emptySet() },
+                        ) { Text("Show all") }
+
+                        TextButton(
+                            onClick = { draftHidden = candidateStores.map { it.id }.toSet() },
+                        ) { Text("Hide all") }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+
+                    cities.forEach { city ->
+                        val group = storesByCity[city].orEmpty()
+                        val isExpanded = expandedCities.contains(city)
+                        val shownInCity = group.count { !draftHidden.contains(it.id) }
+
+                        ListItem(
+                            headlineContent = { Text(city) },
+                            supportingContent = { Text("$shownInCity / ${group.size} shown") },
+                            trailingContent = {
+                                Icon(
+                                    imageVector = Icons.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    modifier = Modifier.alpha(if (isExpanded) 0.6f else 1f),
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    expandedCities = if (isExpanded) expandedCities - city else expandedCities + city
+                                },
+                        )
+
+                        if (isExpanded) {
+                            group.forEach { store ->
+                                val checked = !draftHidden.contains(store.id)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            draftHidden = if (checked) draftHidden + store.id else draftHidden - store.id
+                                        }
+                                        .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Checkbox(checked = checked, onCheckedChange = null)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = store.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            AppGraph.settings.setManualTripHiddenStoreIds(draftHidden.toList())
+                            showStorePicker = false
+                        }
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStorePicker = false }) { Text("Cancel") }
+            },
+        )
     }
 
-    val visiblePostOmbudPolar = remember(postOmbudPolar, ignoredStoreIds) {
-        postOmbudPolar.filterNot { ignoredStoreIds.contains(it.store.id) }
+    val titleCity = currentCity?.trim().orEmpty()
+
+    val searchResultPolar = remember(filteredPolar) {
+        filteredPolar.filter { it.store.regionCode == "manual_places" }
+    }
+
+    val localOnlyPolar = remember(filteredPolar) {
+        filteredPolar.filterNot { it.store.regionCode == "manual_places" }
+    }
+
+    val visibleLocalPolar = remember(localOnlyPolar, ignoredStoreIds) {
+        localOnlyPolar.filterNot { ignoredStoreIds.contains(it.store.id) }
+    }
+
+    val localPolarByCategory = remember(visibleLocalPolar, enabledCategoryConfigs) {
+        val result = LinkedHashMap<String, List<StorePolar>>()
+        val assigned = HashSet<String>()
+
+        enabledCategoryConfigs.forEach { cfg ->
+            val matches = visibleLocalPolar.filter { polar ->
+                if (assigned.contains(polar.store.id)) return@filter false
+                matchesCategory(name = polar.store.name, category = cfg)
+            }
+            matches.forEach { assigned.add(it.store.id) }
+            result[cfg.label] = matches
+        }
+
+        result
     }
 
     var hideStoreDialog by remember { mutableStateOf<StoreEntity?>(null) }
@@ -1005,7 +1438,7 @@ fun ManualTripScreen(
                             userEditedCityQuery = true
                             cityQuery = it
                         },
-                        placeholder = { Text("Search city…") },
+                        placeholder = { Text("Search address or company…") },
                         singleLine = true,
                         leadingIcon = {
                             Icon(
@@ -1019,7 +1452,6 @@ fun ManualTripScreen(
                                     onClick = {
                                         userEditedCityQuery = true
                                         cityQuery = ""
-                                        currentCity = null
                                     },
                                 ) {
                                     Icon(
@@ -1062,38 +1494,7 @@ fun ManualTripScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (citySuggestions.isNotEmpty() && userEditedCityQuery && cityQuery.isNotBlank()) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        citySuggestions.forEachIndexed { index, suggestion ->
-                            ListItem(
-                                headlineContent = { Text(suggestion) },
-                                trailingContent = {
-                                    Icon(
-                                        imageVector = Icons.Filled.KeyboardArrowRight,
-                                        contentDescription = null,
-                                    )
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        userEditedCityQuery = true
-                                        cityQuery = suggestion
-                                        currentCity = suggestion
-                                    },
-                            )
-                            if (index != citySuggestions.lastIndex) {
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            }
-                        }
-                    }
-                }
-            }
+            // City suggestions removed: search is now free-text Places search.
 
             if (error != null) {
                 Text(
@@ -1104,11 +1505,16 @@ fun ManualTripScreen(
                 )
             }
 
-            if (!usingSyncedStores && cityQuery.isNotBlank()) {
-                val stableCity = normalizeCityName(cityQuery).trim()
+            // If the list is empty, show filters here so the user can widen the radius / adjust selection.
+            if (sortedPolar.isEmpty()) {
+                FilterRow()
+            }
+
+            val stableQuery = cityQuery.trim()
+            if (stableQuery.length >= 2) {
                 if (remoteSearchBusy) {
                     Text(
-                        "Searching online for second-hand stores in '${stableCity}'…",
+                        "Searching Google Maps for '${stableQuery}'…",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
@@ -1121,9 +1527,9 @@ fun ManualTripScreen(
                     )
                 }
 
-                if (!remoteSearchBusy && remoteSearchError.isNullOrBlank() && stableCity.length >= 2 && remotePlaces.isEmpty()) {
+                if (!remoteSearchBusy && remoteSearchError.isNullOrBlank() && remotePlaces.isEmpty()) {
                     Text(
-                        "No online results for '${stableCity}'. Try e.g. '${stableCity}, Sweden'.",
+                        "No results for '${stableQuery}'.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
@@ -1140,7 +1546,7 @@ fun ManualTripScreen(
 
             if (sortedPolar.isEmpty()) {
                 Text(
-                    if (!usingSyncedStores && remoteSearchBusy) "Searching…" else "No stores found.",
+                    if (remoteSearchBusy) "Searching…" else "No places found.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
@@ -1152,94 +1558,29 @@ fun ManualTripScreen(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
-                        Text(
-                            "Sort",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                        )
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            val isName = manualTripStoreSortMode == "NAME"
-                            val isDistance = manualTripStoreSortMode == "DISTANCE"
-                            val isVisits = manualTripStoreSortMode == "VISITS"
-
-                            if (isName) {
-                                Button(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("NAME") } },
-                                    modifier = Modifier.weight(1f),
-
-                                ) { Text("A–Z") }
-                            } else {
-                                OutlinedButton(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("NAME") } },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("A–Z") }
-                            }
-
-                            Spacer(Modifier.width(10.dp))
-
-                            if (isDistance) {
-                                Button(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("DISTANCE") } },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("Closest") }
-                            } else {
-                                OutlinedButton(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("DISTANCE") } },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("Closest") }
-                            }
-
-                            Spacer(Modifier.width(10.dp))
-
-                            if (isVisits) {
-                                Button(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("VISITS") } },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("Most") }
-                            } else {
-                                OutlinedButton(
-                                    onClick = { scope.launch { AppGraph.settings.setManualTripStoreSortMode("VISITS") } },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("Most") }
-                            }
-                        }
+                        // Kept for layout stability when scrolling the grid.
+                        // The same controls are also shown above the grid for the empty state.
+                        FilterRow()
                     }
 
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        SectionHeaderRow(
-                            title = "Butiker",
-                            subtitle = "${visibleStorePolar.size}",
-                            expanded = expandStores,
-                            onToggle = { expandStores = !expandStores },
-                        )
-                    }
-
-                    if (expandStores) {
-                        items(visibleStorePolar, key = { it.store.id }) { polar ->
-                            val uri = storeImages[polar.store.id]
-                            val displayName = cleanStoreNameForCity(
-                                name = polar.store.name,
-                                city = titleCity,
+                    if (searchResultPolar.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            SectionHeaderRow(
+                                title = "Search results",
+                                subtitle = "${searchResultPolar.size}",
+                                expanded = true,
+                                onToggle = {},
                             )
+                        }
 
-                            val tagLabel = when {
-                                isLoppisName(polar.store.name) -> "Loppis"
-                                isSecondHandName(polar.store.name) -> "Second hand"
-                                else -> null
-                            }
-                            val tagColor = when {
-                                isLoppisName(polar.store.name) -> MaterialTheme.colorScheme.secondary
-                                isSecondHandName(polar.store.name) -> MaterialTheme.colorScheme.primary
-                                else -> null
-                            }
-
+                        items(searchResultPolar, key = { it.store.id }) { polar ->
                             StoreThumbnailButton(
-                                name = displayName,
-                                imageUri = uri,
+                                name = polar.store.name,
+                                imageUri = null,
                                 defaultIcon = defaultIconForStoreName(polar.store.name),
                                 distanceMeters = polar.distance,
-                                tagLabel = tagLabel,
-                                tagColor = tagColor,
+                                tagLabel = null,
+                                tagColor = null,
                                 enabled = !isSaving,
                                 showTripActions = addTripMenuStoreId == polar.store.id,
                                 onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
@@ -1271,14 +1612,8 @@ fun ManualTripScreen(
                                         }
                                     }
                                 },
-                                onSet = {
-                                    hoursDialogStore = polar.store
-                                    val existing = storeBusinessHours[polar.store.id]?.byDay.orEmpty()
-                                    hoursDraft = existing
-                                },
-                                onLongPress = {
-                                    hideStoreDialog = polar.store
-                                },
+                                onSet = {},
+                                onLongPress = { hideStoreDialog = polar.store },
                                 onClick = {
                                     addTripMenuStoreId = if (addTripMenuStoreId == polar.store.id) null else polar.store.id
                                 },
@@ -1286,73 +1621,100 @@ fun ManualTripScreen(
                         }
                     }
 
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        SectionHeaderRow(
-                            title = "Postombud",
-                            subtitle = "${visiblePostOmbudPolar.size}",
-                            expanded = expandPostOmbud,
-                            onToggle = { expandPostOmbud = !expandPostOmbud },
-                        )
-                    }
+                    localPolarByCategory.forEach { (categoryLabel, categoryPolar) ->
+                        val expanded = expandedByCategoryLabel[categoryLabel] ?: true
 
-                    if (expandPostOmbud) {
-                        items(visiblePostOmbudPolar, key = { it.store.id }) { polar ->
-                            val uri = storeImages[polar.store.id]
-                            val displayName = cleanPostOmbudNameForCity(
-                                name = polar.store.name,
-                                city = titleCity,
-                            )
-
-                            StoreThumbnailButton(
-                                name = displayName,
-                                imageUri = uri,
-                                defaultIcon = Icons.Filled.LocalPostOffice,
-                                distanceMeters = polar.distance,
-                                tagLabel = "Postombud",
-                                tagColor = MaterialTheme.colorScheme.tertiary,
-                                enabled = !isSaving,
-                                showTripActions = addTripMenuStoreId == polar.store.id,
-                                onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
-                                onAddTrip = {
-                                    scope.launch {
-                                        isSaving = true
-                                        error = null
-                                        try {
-                                            val tripId = createManualTripToStore(store = polar.store)
-                                            onOpenTrip(tripId, false)
-                                        } catch (e: Exception) {
-                                            error = e.message ?: "Failed"
-                                        } finally {
-                                            isSaving = false
-                                        }
-                                    }
-                                },
-                                onAddTripWithMedia = {
-                                    scope.launch {
-                                        isSaving = true
-                                        error = null
-                                        try {
-                                            val tripId = createManualTripToStore(store = polar.store)
-                                            onOpenTrip(tripId, true)
-                                        } catch (e: Exception) {
-                                            error = e.message ?: "Failed"
-                                        } finally {
-                                            isSaving = false
-                                        }
-                                    }
-                                },
-                                onSet = {
-                                    hoursDialogStore = polar.store
-                                    val existing = storeBusinessHours[polar.store.id]?.byDay.orEmpty()
-                                    hoursDraft = existing
-                                },
-                                onLongPress = {
-                                    hideStoreDialog = polar.store
-                                },
-                                onClick = {
-                                    addTripMenuStoreId = if (addTripMenuStoreId == polar.store.id) null else polar.store.id
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            SectionHeaderRow(
+                                title = categoryLabel,
+                                subtitle = "${categoryPolar.size}",
+                                expanded = expanded,
+                                onToggle = {
+                                    expandedByCategoryLabel[categoryLabel] = !(expandedByCategoryLabel[categoryLabel] ?: true)
                                 },
                             )
+                        }
+
+                        if (expanded) {
+                            items(categoryPolar, key = { it.store.id }) { polar ->
+                                val uri = storeImages[polar.store.id]
+                                val isPost = isPostOmbudName(polar.store.name)
+                                val displayName = if (isPost) {
+                                    cleanPostOmbudNameForCity(
+                                        name = polar.store.name,
+                                        city = titleCity,
+                                    )
+                                } else {
+                                    cleanStoreNameForCity(
+                                        name = polar.store.name,
+                                        city = titleCity,
+                                    )
+                                }
+
+                                val tagLabel = when {
+                                    isPost -> "Postombud"
+                                    isLoppisName(polar.store.name) -> "Loppis"
+                                    isSecondHandName(polar.store.name) -> "Second hand"
+                                    else -> null
+                                }
+                                val tagColor = when {
+                                    isPost -> MaterialTheme.colorScheme.tertiary
+                                    isLoppisName(polar.store.name) -> MaterialTheme.colorScheme.secondary
+                                    isSecondHandName(polar.store.name) -> MaterialTheme.colorScheme.primary
+                                    else -> null
+                                }
+
+                                StoreThumbnailButton(
+                                    name = displayName,
+                                    imageUri = uri,
+                                    defaultIcon = if (isPost) Icons.Filled.LocalPostOffice else defaultIconForStoreName(polar.store.name),
+                                    distanceMeters = polar.distance,
+                                    tagLabel = tagLabel,
+                                    tagColor = tagColor,
+                                    enabled = !isSaving,
+                                    showTripActions = addTripMenuStoreId == polar.store.id,
+                                    onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
+                                    onAddTrip = {
+                                        scope.launch {
+                                            isSaving = true
+                                            error = null
+                                            try {
+                                                val tripId = createManualTripToStore(store = polar.store)
+                                                onOpenTrip(tripId, false)
+                                            } catch (e: Exception) {
+                                                error = e.message ?: "Failed"
+                                            } finally {
+                                                isSaving = false
+                                            }
+                                        }
+                                    },
+                                    onAddTripWithMedia = {
+                                        scope.launch {
+                                            isSaving = true
+                                            error = null
+                                            try {
+                                                val tripId = createManualTripToStore(store = polar.store)
+                                                onOpenTrip(tripId, true)
+                                            } catch (e: Exception) {
+                                                error = e.message ?: "Failed"
+                                            } finally {
+                                                isSaving = false
+                                            }
+                                        }
+                                    },
+                                    onSet = {
+                                        hoursDialogStore = polar.store
+                                        val existing = storeBusinessHours[polar.store.id]?.byDay.orEmpty()
+                                        hoursDraft = existing
+                                    },
+                                    onLongPress = {
+                                        hideStoreDialog = polar.store
+                                    },
+                                    onClick = {
+                                        addTripMenuStoreId = if (addTripMenuStoreId == polar.store.id) null else polar.store.id
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -1672,6 +2034,35 @@ private fun isPostOmbudName(name: String): Boolean {
         n.contains("postnord")
 }
 
+private fun matchesAnyCategory(
+    name: String,
+    categories: List<ManualTripCategoryConfig>,
+): Boolean {
+    if (categories.isEmpty()) return false
+    return categories.any { matchesCategory(name = name, category = it) }
+}
+
+private fun matchesCategory(
+    name: String,
+    category: ManualTripCategoryConfig,
+): Boolean {
+    val keywords = category.keywords
+    if (keywords.isEmpty()) return true
+    return keywords.any { kw -> matchesKeyword(name = name, keyword = kw) }
+}
+
+private fun matchesKeyword(name: String, keyword: String): Boolean {
+    val k = keyword.trim().lowercase()
+    if (k.isBlank()) return false
+
+    return when {
+        k.contains("postombud") || k.contains("paket") || k.contains("ombud") || k.contains("postnord") -> isPostOmbudName(name)
+        k.contains("loppis") || k.contains("loppmarknad") -> isLoppisName(name)
+        k.contains("second") || k.contains("thrift") || k.contains("begagnat") || k.contains("återbruk") || k.contains("aterbruk") -> isSecondHandName(name)
+        else -> name.lowercase().contains(k)
+    }
+}
+
 @Composable
 private fun SectionHeaderRow(
     title: String,
@@ -1838,8 +2229,18 @@ private fun StoreThumbnailButton(
     val shape = RoundedCornerShape(18.dp)
     val iconTint = tagColor ?: MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
     val hasImage = !imageUri.isNullOrBlank()
-    val iconBackground = if (!hasImage && tagColor != null) tagColor else MaterialTheme.colorScheme.surface
-    val iconForeground = if (!hasImage && tagColor != null) contentColorFor(tagColor) else iconTint
+    val fallbackAccent = run {
+        val candidates = listOf(
+            MaterialTheme.colorScheme.primaryContainer,
+            MaterialTheme.colorScheme.secondaryContainer,
+            MaterialTheme.colorScheme.tertiaryContainer,
+        )
+        val idx = (name.trim().lowercase().hashCode().let { if (it == Int.MIN_VALUE) 0 else kotlin.math.abs(it) }) % candidates.size
+        candidates[idx]
+    }
+    val tileAccent = tagColor ?: fallbackAccent
+    val iconBackground = if (!hasImage) tileAccent else MaterialTheme.colorScheme.surface
+    val iconForeground = if (!hasImage) contentColorFor(tileAccent) else iconTint
     val kmLabel = run {
         if (!distanceMeters.isFinite() || distanceMeters <= 0.0) {
             null
@@ -1877,14 +2278,12 @@ private fun StoreThumbnailButton(
                         contentScale = ContentScale.Crop,
                     )
 
-                    // Make the category color visible even when a photo exists.
-                    if (tagColor != null) {
-                        Box(
-                            modifier = Modifier
-                                .matchParentSize()
-                                .background(tagColor.copy(alpha = 0.14f)),
-                        )
-                    }
+                    // Ensure every tile has a visible accent, even when a photo exists.
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(tileAccent.copy(alpha = 0.12f)),
+                    )
                 } else {
                     Surface(
                         modifier = Modifier.matchParentSize(),

@@ -5,9 +5,11 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -32,6 +34,12 @@ data class HiddenTripPlace(
     val id: String,
     val name: String,
     val city: String = "",
+)
+
+@Serializable
+data class ManualTripCategoryConfig(
+    val label: String,
+    val keywords: List<String> = emptyList(),
 )
 
 @Serializable
@@ -108,6 +116,17 @@ data class ProfileScopedSnapshot(
     val hiddenTripPlaces: List<HiddenTripPlace> = emptyList(),
     val expandedStoreCities: List<String> = emptyList(),
     val manualTripStoreSortMode: String = "NAME",
+    val manualTripSelectedStoreIds: List<String> = emptyList(),
+    val manualTripHiddenStoreIds: List<String> = emptyList(),
+    // Manual trip: which "kinds" of places are shown (persistent, per profile)
+    val manualTripShowStores: Boolean = true,
+    val manualTripShowPostOffice: Boolean = true,
+    val manualTripShowOnlineResults: Boolean = true,
+
+    // Manual trip: distance filter + category configuration
+    val manualTripSearchRadiusKm: Int = 10,
+    val manualTripCategoryConfigs: List<ManualTripCategoryConfig> = emptyList(),
+    val manualTripEnabledCategoryLabels: List<String> = emptyList(),
 )
 
 class SettingsStore(private val context: Context) {
@@ -194,6 +213,19 @@ class SettingsStore(private val context: Context) {
 
         // Manual trip UI
         val manualTripStoreSortMode = stringPreferencesKey("manualTripStoreSortMode")
+
+        // Manual trip: user-selected subset of preset stores to show
+        val manualTripSelectedStoreIdsJson = stringPreferencesKey("manualTripSelectedStoreIdsJson")
+        // Manual trip: user-hidden (opt-out) subset of preset stores to hide
+        val manualTripHiddenStoreIdsJson = stringPreferencesKey("manualTripHiddenStoreIdsJson")
+            // Manual trip: visibility toggles ("kinds")
+            val manualTripShowStores = booleanPreferencesKey("manualTripShowStores")
+            val manualTripShowPostOffice = booleanPreferencesKey("manualTripShowPostOffice")
+            val manualTripShowOnlineResults = booleanPreferencesKey("manualTripShowOnlineResults")
+
+            val manualTripSearchRadiusKm = intPreferencesKey("manualTripSearchRadiusKm")
+            val manualTripCategoryConfigsJson = stringPreferencesKey("manualTripCategoryConfigsJson")
+            val manualTripEnabledCategoryLabels = stringSetPreferencesKey("manualTripEnabledCategoryLabels")
 
         // UI theme
         val darkModeEnabled = booleanPreferencesKey("darkModeEnabled")
@@ -311,6 +343,27 @@ class SettingsStore(private val context: Context) {
             if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
         }.getOrDefault(emptyList())
 
+        val manualTripSelectedStoreIds = runCatching {
+            val raw = prefs[Keys.manualTripSelectedStoreIdsJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
+        }.getOrDefault(emptyList())
+
+        val manualTripHiddenStoreIds = runCatching {
+            val raw = prefs[Keys.manualTripHiddenStoreIdsJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
+        }.getOrDefault(emptyList())
+
+        val manualTripCategoryConfigs = runCatching {
+            val raw = prefs[Keys.manualTripCategoryConfigsJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<ManualTripCategoryConfig>>(raw)
+        }.getOrDefault(emptyList())
+
+        val manualTripEnabledCategoryLabels = (prefs[Keys.manualTripEnabledCategoryLabels] ?: emptySet())
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .toList()
+
         return ProfileScopedSnapshot(
             profileId = prefs[Keys.profileId].orEmpty(),
             profileName = prefs[Keys.profileName].orEmpty(),
@@ -357,6 +410,15 @@ class SettingsStore(private val context: Context) {
             hiddenTripPlaces = hiddenTripPlaces,
             expandedStoreCities = expandedStoreCities,
             manualTripStoreSortMode = prefs[Keys.manualTripStoreSortMode] ?: "NAME",
+            manualTripSelectedStoreIds = manualTripSelectedStoreIds,
+            manualTripHiddenStoreIds = manualTripHiddenStoreIds,
+            manualTripShowStores = prefs[Keys.manualTripShowStores] ?: true,
+            manualTripShowPostOffice = prefs[Keys.manualTripShowPostOffice] ?: true,
+            manualTripShowOnlineResults = prefs[Keys.manualTripShowOnlineResults] ?: true,
+
+            manualTripSearchRadiusKm = prefs[Keys.manualTripSearchRadiusKm] ?: 10,
+            manualTripCategoryConfigs = manualTripCategoryConfigs,
+            manualTripEnabledCategoryLabels = manualTripEnabledCategoryLabels,
         )
     }
 
@@ -407,6 +469,15 @@ class SettingsStore(private val context: Context) {
         prefs[Keys.hiddenTripPlacesJson] = json.encodeToString(snapshot.hiddenTripPlaces)
         prefs[Keys.expandedStoreCitiesJson] = json.encodeToString(snapshot.expandedStoreCities)
         prefs[Keys.manualTripStoreSortMode] = snapshot.manualTripStoreSortMode
+        prefs[Keys.manualTripSelectedStoreIdsJson] = json.encodeToString(snapshot.manualTripSelectedStoreIds)
+        prefs[Keys.manualTripHiddenStoreIdsJson] = json.encodeToString(snapshot.manualTripHiddenStoreIds)
+        prefs[Keys.manualTripShowStores] = snapshot.manualTripShowStores
+        prefs[Keys.manualTripShowPostOffice] = snapshot.manualTripShowPostOffice
+        prefs[Keys.manualTripShowOnlineResults] = snapshot.manualTripShowOnlineResults
+
+        prefs[Keys.manualTripSearchRadiusKm] = snapshot.manualTripSearchRadiusKm
+        prefs[Keys.manualTripCategoryConfigsJson] = json.encodeToString(snapshot.manualTripCategoryConfigs)
+        prefs[Keys.manualTripEnabledCategoryLabels] = snapshot.manualTripEnabledCategoryLabels.toSet()
     }
 
     val activeStartMinutes: Flow<Int> = context.dataStore.data.map { it[Keys.activeStartMinutes] ?: (7 * 60) }
@@ -495,6 +566,60 @@ class SettingsStore(private val context: Context) {
     // Manual trip store list sort mode. Values: NAME | DISTANCE | VISITS
     val manualTripStoreSortMode: Flow<String> = context.dataStore.data.map {
         it[Keys.manualTripStoreSortMode] ?: "NAME"
+    }
+    val manualTripShowStores: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.manualTripShowStores] ?: true
+    }
+
+    val manualTripShowPostOffice: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.manualTripShowPostOffice] ?: true
+    }
+
+    val manualTripShowOnlineResults: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.manualTripShowOnlineResults] ?: true
+    }
+
+    val manualTripSearchRadiusKm: Flow<Int> = context.dataStore.data.map {
+        it[Keys.manualTripSearchRadiusKm] ?: 50
+    }
+
+    val manualTripCategoryConfigs: Flow<List<ManualTripCategoryConfig>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.manualTripCategoryConfigsJson].orEmpty()
+        if (raw.isBlank()) emptyList() else runCatching { json.decodeFromString<List<ManualTripCategoryConfig>>(raw) }
+            .getOrDefault(emptyList())
+    }
+
+    val manualTripEnabledCategoryLabels: Flow<Set<String>> = context.dataStore.data.map {
+        it[Keys.manualTripEnabledCategoryLabels] ?: emptySet()
+    }
+
+    val manualTripSelectedStoreIds: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.manualTripSelectedStoreIdsJson].orEmpty()
+        if (raw.isBlank()) {
+            emptySet()
+        } else {
+            runCatching { json.decodeFromString<List<String>>(raw) }
+                .getOrDefault(emptyList())
+                .asSequence()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .toSet()
+        }
+    }
+
+    // Manual trip: stores hidden (opt-out). Empty means "show all".
+    val manualTripHiddenStoreIds: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.manualTripHiddenStoreIdsJson].orEmpty()
+        if (raw.isBlank()) {
+            emptySet()
+        } else {
+            runCatching { json.decodeFromString<List<String>>(raw) }
+                .getOrDefault(emptyList())
+                .asSequence()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .toSet()
+        }
     }
 
     val darkModeEnabled: Flow<Boolean> = context.dataStore.data.map {
@@ -902,6 +1027,107 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setManualTripStoreSortMode(value: String) {
         context.dataStore.edit { it[Keys.manualTripStoreSortMode] = value }
+    }
+        suspend fun setManualTripShowStores(value: Boolean) {
+            context.dataStore.edit { it[Keys.manualTripShowStores] = value }
+        }
+
+        suspend fun setManualTripShowPostOffice(value: Boolean) {
+            context.dataStore.edit { it[Keys.manualTripShowPostOffice] = value }
+        }
+
+        suspend fun setManualTripShowOnlineResults(value: Boolean) {
+            context.dataStore.edit { it[Keys.manualTripShowOnlineResults] = value }
+        }
+
+    suspend fun setManualTripSearchRadiusKm(value: Int) {
+        val safe = value.coerceIn(1, 500)
+        context.dataStore.edit { it[Keys.manualTripSearchRadiusKm] = safe }
+    }
+
+    suspend fun setManualTripCategoryConfigs(configs: List<ManualTripCategoryConfig>) {
+        val normalized = configs
+            .asSequence()
+            .map { cfg ->
+                ManualTripCategoryConfig(
+                    label = cfg.label.trim(),
+                    keywords = cfg.keywords
+                        .asSequence()
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                        .toList(),
+                )
+            }
+            .filter { it.label.isNotBlank() }
+            .distinctBy { it.label.lowercase() }
+            .toList()
+
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripCategoryConfigsJson] = json.encodeToString(normalized)
+        }
+    }
+
+    suspend fun setManualTripEnabledCategoryLabels(labels: Set<String>) {
+        val normalized = labels
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .toSet()
+
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripEnabledCategoryLabels] = normalized
+        }
+    }
+
+    suspend fun resetManualTripCategoriesToDefaults(subProfileIdOverride: String? = null) {
+        val subProfileId = subProfileIdOverride ?: context.dataStore.data.first()[Keys.subProfileId].orEmpty()
+        val defaults = defaultManualTripCategoryConfigsForSubProfileId(subProfileId)
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripCategoryConfigsJson] = json.encodeToString(defaults)
+            prefs[Keys.manualTripEnabledCategoryLabels] = defaults.map { it.label }.toSet()
+        }
+    }
+
+    private fun defaultManualTripCategoryConfigsForSubProfileId(subProfileId: String): List<ManualTripCategoryConfig> {
+        val profile = ProfileDefaults.profileById(subProfileId) ?: IndustryProfile.RESELLER
+        val groups = ProfileDefaults.categoryGroupsFor(profile)
+        return groups
+            .asSequence()
+            .flatMap { group -> group.categories.asSequence() }
+            .map { typeLabel ->
+                ManualTripCategoryConfig(label = typeLabel, keywords = listOf(typeLabel))
+            }
+            .distinctBy { it.label.lowercase() }
+            .toList()
+    }
+
+    suspend fun setManualTripSelectedStoreIds(storeIds: List<String>) {
+        val normalized = storeIds
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sortedWith(String.CASE_INSENSITIVE_ORDER)
+            .toList()
+
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripSelectedStoreIdsJson] = json.encodeToString(normalized)
+        }
+    }
+
+    suspend fun setManualTripHiddenStoreIds(storeIds: List<String>) {
+        val normalized = storeIds
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sortedWith(String.CASE_INSENSITIVE_ORDER)
+            .toList()
+
+        context.dataStore.edit { prefs ->
+            prefs[Keys.manualTripHiddenStoreIdsJson] = json.encodeToString(normalized)
+        }
     }
 
     suspend fun setStoreCityExpanded(city: String, expanded: Boolean) {

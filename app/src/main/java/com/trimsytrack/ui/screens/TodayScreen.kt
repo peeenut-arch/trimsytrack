@@ -81,7 +81,7 @@ fun TodayScreen(
             LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f, fill = true)) {
                 items(trips) { t ->
                     ListItem(
-                        headlineContent = { Text(t.storeNameSnapshot) },
+                        headlineContent = { Text("#${t.id} · ${t.storeNameSnapshot}") },
                         supportingContent = { Text("${t.distanceMeters / 1000.0} km") },
                         modifier = Modifier
                             .fillMaxWidth()

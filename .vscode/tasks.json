@@ -22,54 +22,14 @@
 			"group": "build"
 		},
 		{
-			"label": "Install app on device (Gradle)",
+			"label": "Build + Install + Launch (device)",
 			"type": "shell",
-			"command": "./gradlew installDebug",
+			"command": "./gradlew installDebug; ${env:LOCALAPPDATA}/Android/Sdk/platform-tools/adb.exe shell am start -n com.trimsytrack/.ui.MainActivity",
 			"isBackground": false,
-			"problemMatcher": [
-				"$javac"
-			],
-			"group": "build"
-		},
-		{
-			"label": "Build app after ManualTripScreen city selection update",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Build app after fixing dropdown imports",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Build app after switching to standard DropdownMenu",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Build app after fixing clickable and icon imports",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Build app after fixing dropdown syntax",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Build app after fixing duplicate code and braces",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Build app after adding missing imports",
-			"type": "shell",
-			"command": "./gradlew assembleDebug"
-		},
-		{
-			"label": "Install app on device after successful build",
-			"type": "shell",
-			"command": "./gradlew installDebug"
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
 		}
 	]
 }

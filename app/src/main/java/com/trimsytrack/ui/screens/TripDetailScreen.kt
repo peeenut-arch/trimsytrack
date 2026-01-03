@@ -136,7 +136,7 @@ fun TripDetailScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
-                title = { Text("Trip") },
+                title = { Text("Trip #$tripId") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(

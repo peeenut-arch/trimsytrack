@@ -21,6 +21,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -47,6 +49,7 @@ import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.TextStyle
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.max
 
@@ -58,6 +61,33 @@ fun JournalScreen(
 ) {
     val trips by AppGraph.tripRepository.observeRecent(limit = 500)
         .collectAsState(initial = emptyList())
+
+    var filterDateText by rememberSaveable { mutableStateOf("") }
+    var filterLocationText by rememberSaveable { mutableStateOf("") }
+    var filterTripIdText by rememberSaveable { mutableStateOf("") }
+    var filterMinKmText by rememberSaveable { mutableStateOf("") }
+
+    val filteredTrips = remember(trips, filterDateText, filterLocationText, filterTripIdText, filterMinKmText) {
+        val date = runCatching {
+            val raw = filterDateText.trim()
+            if (raw.isBlank()) null else LocalDate.parse(raw, DateTimeFormatter.ISO_LOCAL_DATE)
+        }.getOrNull()
+
+        val locationQuery = filterLocationText.trim().lowercase()
+        val tripId = filterTripIdText.trim().toLongOrNull()
+        val minKm = filterMinKmText.trim().replace(',', '.').toDoubleOrNull()
+
+        trips.filter { t ->
+            val matchesDate = date == null || t.day == date
+            val matchesTripId = tripId == null || t.id == tripId
+            val matchesLocation = locationQuery.isBlank() ||
+                t.storeNameSnapshot.lowercase().contains(locationQuery) ||
+                t.startLabelSnapshot.lowercase().contains(locationQuery)
+            val matchesMinKm = minKm == null || (t.distanceMeters / 1000.0) >= minKm
+
+            matchesDate && matchesTripId && matchesLocation && matchesMinKm
+        }
+    }
 
     val today = LocalDate.now()
 
@@ -170,8 +200,76 @@ fun JournalScreen(
             Text("Recent trips", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
 
+            OutlinedTextField(
+                value = filterDateText,
+                onValueChange = { filterDateText = it },
+                label = { Text("Date (YYYY-MM-DD)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.outline,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedLabelColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedLabelColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    cursorColor = MaterialTheme.colorScheme.onBackground,
+                ),
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = filterLocationText,
+                onValueChange = { filterLocationText = it },
+                label = { Text("Location") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.outline,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedLabelColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedLabelColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    cursorColor = MaterialTheme.colorScheme.onBackground,
+                ),
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = filterTripIdText,
+                onValueChange = { filterTripIdText = it },
+                label = { Text("Trip ID") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.outline,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedLabelColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedLabelColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    cursorColor = MaterialTheme.colorScheme.onBackground,
+                ),
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = filterMinKmText,
+                onValueChange = { filterMinKmText = it },
+                label = { Text("Min distance (km)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.outline,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedLabelColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedLabelColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    cursorColor = MaterialTheme.colorScheme.onBackground,
+                ),
+            )
+
+            Spacer(Modifier.height(8.dp))
+
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(trips.take(100), key = { it.id }) { t ->
+                items(filteredTrips.take(200), key = { it.id }) { t ->
                     TripRow(t = t, onOpenTrip = onOpenTrip)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
@@ -183,7 +281,7 @@ fun JournalScreen(
 @Composable
 private fun TripRow(t: TripEntity, onOpenTrip: (Long) -> Unit) {
     ListItem(
-        headlineContent = { Text(t.storeNameSnapshot) },
+        headlineContent = { Text("#${t.id} · ${t.storeNameSnapshot}") },
         supportingContent = { Text("${t.day} · ${"%.1f".format(t.distanceMeters / 1000.0)} km") },
         modifier = Modifier
             .fillMaxWidth()

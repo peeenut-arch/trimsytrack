@@ -65,7 +65,10 @@ fun TripConfirmScreen(
 
                 Spacer(Modifier.weight(1f))
 
-                Button(onClick = { vm.useCurrentLocationStart() }) { Text("Use current") }
+                Button(
+                    enabled = state.canUseCurrentLocation,
+                    onClick = { vm.useCurrentLocationStart() },
+                ) { Text("Use current") }
             }
 
             Spacer(Modifier.height(12.dp))
