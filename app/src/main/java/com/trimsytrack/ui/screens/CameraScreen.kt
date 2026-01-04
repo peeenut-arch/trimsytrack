@@ -81,7 +81,6 @@ import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import java.io.File
 import java.time.Instant
-import kotlinx.coroutines.flow.first
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executor
@@ -98,6 +97,7 @@ import kotlinx.coroutines.withContext
 fun CameraScreen(
     tripId: Long? = null,
     returnCaptureToCaller: Boolean = false,
+    autoSaveToTrip: Boolean = false,
     onCaptureConfirmed: (
         uri: String,
         mimeType: String,
@@ -156,7 +156,48 @@ fun CameraScreen(
     val pendingMimeType = remember { mutableStateOf<String?>(null) }
     val pendingIsTempLocalFileProviderUri = remember { mutableStateOf<Boolean?>(null) }
 
+    val autoSaving = remember { mutableStateOf(false) }
+
     val showCaptureChooser = remember { mutableStateOf(false) }
+
+    suspend fun savePendingCaptureToTrip(targetTripId: Long) {
+        val tempFile = pendingTempFile.value
+        val capturedAt = pendingCapturedAt.value ?: Instant.now()
+        val previewUri = pendingPreviewUri.value
+        if (previewUri.isNullOrBlank()) throw IllegalStateException("No capture to save")
+
+        val trip = AppGraph.tripRepository.get(targetTripId) ?: throw IllegalStateException("Trip not found")
+
+        val saved = if (tempFile != null) {
+            saveCapturedPhotoToTrip(
+                context = context,
+                trip = trip,
+                profileId = trip.profileId,
+                tempFile = tempFile,
+                capturedAt = capturedAt,
+                location = pendingLocation.value,
+            )
+        } else {
+            importDocumentToTripFiles(
+                context = context,
+                profileId = trip.profileId,
+                tripId = trip.id,
+                tripDay = trip.day,
+                tripStoreNameSnapshot = trip.storeNameSnapshot,
+                sourceUri = android.net.Uri.parse(previewUri),
+            )
+        }
+
+        AppGraph.tripRepository.addAttachment(saved)
+
+        runCatching { tempFile?.delete() }
+        pendingTempFile.value = null
+        pendingPreviewUri.value = null
+        pendingCapturedAt.value = null
+        pendingLocation.value = null
+        pendingMimeType.value = null
+        pendingIsTempLocalFileProviderUri.value = null
+    }
 
     val activity = context as? Activity
     val scannerOptions = remember {
@@ -197,32 +238,20 @@ fun CameraScreen(
             return@rememberLauncherForActivityResult
         }
 
-        // If we navigated here from a specific trip, save immediately.
-        val targetTripId = tripId
-        if (targetTripId != null && targetTripId > 0L) {
-            saveStatus.value = null
+        val directTripId = tripId?.takeIf { it > 0L }
+        if (directTripId != null && autoSaveToTrip && !autoSaving.value) {
+            autoSaving.value = true
+            saveStatus.value = "Saving…"
             scope.launch {
                 runCatching {
                     withContext(Dispatchers.IO) {
-                        val trip = AppGraph.tripRepository.get(targetTripId)
-                            ?: throw IllegalStateException("Trip not found")
-                        val saved = importDocumentToTripFiles(
-                            context = context,
-                            profileId = trip.profileId,
-                            tripId = targetTripId,
-                            tripDay = trip.day,
-                            tripStoreNameSnapshot = trip.storeNameSnapshot,
-                            sourceUri = uri,
-                        )
-                        AppGraph.tripRepository.addAttachment(saved)
+                        savePendingCaptureToTrip(directTripId)
                     }
                 }.onSuccess {
                     saveStatus.value = "Saved."
-                    pendingPreviewUri.value = null
-                    pendingCapturedAt.value = null
-                    pendingMimeType.value = null
-                    pendingIsTempLocalFileProviderUri.value = null
+                    onBack()
                 }.onFailure {
+                    autoSaving.value = false
                     saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
                 }
             }
@@ -302,35 +331,20 @@ fun CameraScreen(
                     // If caller wants the captured media returned (review flow), do not auto-save.
                     if (returnCaptureToCaller) return
 
-                    // If we navigated here from a specific trip, save immediately.
-                    val targetTripId = tripId
-                    if (targetTripId != null && targetTripId > 0L) {
-                        saveStatus.value = null
+                    val directTripId = tripId?.takeIf { it > 0L }
+                    if (directTripId != null && autoSaveToTrip && !autoSaving.value) {
+                        autoSaving.value = true
+                        saveStatus.value = "Saving…"
                         scope.launch {
                             runCatching {
                                 withContext(Dispatchers.IO) {
-                                    val trip = AppGraph.tripRepository.get(targetTripId)
-                                        ?: throw IllegalStateException("Trip not found")
-                                    val saved = saveCapturedPhotoToTrip(
-                                        context = context,
-                                        trip = trip,
-                                        profileId = trip.profileId,
-                                        tempFile = tempFile,
-                                        capturedAt = capturedAt,
-                                        location = pendingLocation.value,
-                                    )
-                                    AppGraph.tripRepository.addAttachment(saved)
+                                    savePendingCaptureToTrip(directTripId)
                                 }
                             }.onSuccess {
                                 saveStatus.value = "Saved."
-                                runCatching { tempFile.delete() }
-                                pendingTempFile.value = null
-                                pendingPreviewUri.value = null
-                                pendingCapturedAt.value = null
-                                pendingLocation.value = null
-                                pendingMimeType.value = null
-                                pendingIsTempLocalFileProviderUri.value = null
+                                onBack()
                             }.onFailure {
+                                autoSaving.value = false
                                 saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
                             }
                         }
@@ -345,6 +359,8 @@ fun CameraScreen(
     }
 
     val zoomRatio = remember { mutableStateOf(1f) }
+
+    val directTripId = remember(tripId) { tripId?.takeIf { it > 0L } }
 
     LaunchedEffect(Unit) {
         requestPermissionsLauncher.launch(
@@ -482,7 +498,11 @@ fun CameraScreen(
                 ) {
                     Button(
                         onClick = {
-                            showCaptureChooser.value = true
+                            if (tripId != null && tripId > 0L) {
+                                startPhotoCapture()
+                            } else {
+                                showCaptureChooser.value = true
+                            }
                         },
                         shape = CircleShape,
                         contentPadding = PaddingValues(0.dp),
@@ -547,7 +567,9 @@ fun CameraScreen(
 
                 Spacer(Modifier.height(4.dp))
 
-                if (returnCaptureToCaller) {
+                val directTripId = tripId?.takeIf { it > 0L }
+
+                if (returnCaptureToCaller || (directTripId != null && !autoSaveToTrip)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -558,7 +580,25 @@ fun CameraScreen(
                                 val capturedAt = pendingCapturedAt.value ?: Instant.now()
                                 val mt = pendingMimeType.value ?: "application/octet-stream"
                                 val isTemp = pendingIsTempLocalFileProviderUri.value ?: false
-                                onCaptureConfirmed(uri, mt, isTemp, capturedAt.toEpochMilli())
+                                if (returnCaptureToCaller) {
+                                    onCaptureConfirmed(uri, mt, isTemp, capturedAt.toEpochMilli())
+                                    return@Button
+                                }
+
+                                val target = directTripId ?: return@Button
+                                saveStatus.value = null
+                                scope.launch {
+                                    runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            savePendingCaptureToTrip(target)
+                                        }
+                                    }.onSuccess {
+                                        saveStatus.value = "Saved."
+                                        onBack()
+                                    }.onFailure {
+                                        saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
+                                    }
+                                }
                             },
                             modifier = Modifier.weight(1f),
                         ) {

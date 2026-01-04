@@ -1,6 +1,7 @@
 package com.trimsytrack.ui.screens
 
 import android.Manifest
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -46,10 +47,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LocationCity
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.AccountCircle
@@ -167,7 +168,6 @@ fun SettingsScreen(
     val activeDays by AppGraph.settings.activeDays.collectAsState(initial = emptySet())
 
     val storeImages by AppGraph.settings.storeImages.collectAsState(initial = emptyMap())
-    val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
     val ignoredStoreIds by AppGraph.settings.ignoredStoreIds.collectAsState(initial = emptySet())
     val expandedStoreCities by AppGraph.settings.expandedStoreCities.collectAsState(initial = emptySet())
     val storeBusinessHours by AppGraph.settings.storeBusinessHours.collectAsState(initial = emptyMap())
@@ -187,11 +187,13 @@ fun SettingsScreen(
     val backendLastSyncAtMillis by AppGraph.settings.backendLastSyncAtMillis.collectAsState(initial = null)
 
     val dataStoreLoaded by AppGraph.settings.dataStoreLoaded.collectAsState(initial = false)
-
     val manualTripSearchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 50)
     val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
     val manualTripEnabledCategoryLabels by AppGraph.settings.manualTripEnabledCategoryLabels.collectAsState(initial = emptySet())
     val manualTripCategoriesInitialized by AppGraph.settings.manualTripCategoriesInitialized.collectAsState(initial = false)
+
+    val receiptReminderMinutes by AppGraph.settings.receiptReminderMinutes.collectAsState(initial = 17 * 60)
+    val receiptReminderMessage by AppGraph.settings.receiptReminderMessage.collectAsState(initial = "Don't forget to add the media")
 
     LaunchedEffect(dataStoreLoaded, subProfileId, manualTripCategoryConfigs, manualTripCategoriesInitialized) {
         if (!dataStoreLoaded) return@LaunchedEffect
@@ -265,6 +267,7 @@ fun SettingsScreen(
     val backendLastSyncResult by AppGraph.settings.backendLastSyncResult.collectAsState(initial = "")
 
     val darkModeEnabled by AppGraph.settings.darkModeEnabled.collectAsState(initial = false)
+    val useNewUi by AppGraph.settings.useNewUi.collectAsState(initial = false)
 
     // Settings UI layout: allow reverting to the previous tabbed layout.
     val useLegacySettingsLayout by AppGraph.settings.useLegacySettingsLayout.collectAsState(initial = false)
@@ -367,11 +370,12 @@ fun SettingsScreen(
     var showStartOverConfirm by remember { mutableStateOf(false) }
     var startOverBusy by remember { mutableStateOf(false) }
 
-    var clearDataEnabled by rememberSaveable { mutableStateOf(false) }
-    var showClearDataPinDialog by rememberSaveable { mutableStateOf(false) }
-    var showClearDataConfirmDialog by rememberSaveable { mutableStateOf(false) }
+    val clearDataRequiredPassword = "12345109876DELETE"
+    var showClearDataFirstConfirmDialog by rememberSaveable { mutableStateOf(false) }
+    var showClearDataPasswordDialog by rememberSaveable { mutableStateOf(false) }
+    var showClearDataFinalConfirmDialog by rememberSaveable { mutableStateOf(false) }
     var clearDataBusy by rememberSaveable { mutableStateOf(false) }
-    var clearDataPin by rememberSaveable { mutableStateOf("") }
+    var clearDataPassword by rememberSaveable { mutableStateOf("") }
 
     var driverDataBusy by remember { mutableStateOf(false) }
     var driverDataStatus by remember { mutableStateOf<String?>(null) }
@@ -407,23 +411,29 @@ fun SettingsScreen(
     }
 
     // Ensure permissions re-evaluate on resume.
-    val _permTick = refreshTick.intValue
-    val hasFineLocation = ContextCompat.checkSelfPermission(
-        context,
-        Manifest.permission.ACCESS_FINE_LOCATION
-    ) == PackageManager.PERMISSION_GRANTED
-
-    val hasBackgroundLocation = Build.VERSION.SDK_INT < 29 ||
+    val permTick = refreshTick.intValue
+    val hasFineLocation = remember(permTick) {
         ContextCompat.checkSelfPermission(
             context,
-            Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
+    }
 
-    val hasNotifications = Build.VERSION.SDK_INT < 33 ||
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.POST_NOTIFICATIONS
-        ) == PackageManager.PERMISSION_GRANTED
+    val hasBackgroundLocation = remember(permTick) {
+        Build.VERSION.SDK_INT < 29 ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    val hasNotifications = remember(permTick) {
+        Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+    }
 
     fun openAppSettings() {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -989,7 +999,7 @@ fun SettingsScreen(
                             supportingContent = { Text(if (arbetstidExpanded) "Expanded" else "Collapsed") },
                             trailingContent = {
                                 Icon(
-                                    if (arbetstidExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (arbetstidExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = if (arbetstidExpanded) "Collapse" else "Expand",
                                 )
                             },
@@ -1132,7 +1142,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = if (automationExpanded) "Collapse" else "Expand",
                                 )
                             },
@@ -1209,7 +1219,7 @@ fun SettingsScreen(
                             supportingContent = { Text(if (hiddenAndSyncedExpanded) "Expanded" else "Collapsed") },
                             trailingContent = {
                                 Icon(
-                                    if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1226,7 +1236,7 @@ fun SettingsScreen(
                                 supportingContent = { Text(if (syncedStoresExpanded) "Expanded" else "Collapsed") },
                                 trailingContent = {
                                     Icon(
-                                        if (syncedStoresExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                        if (syncedStoresExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                         contentDescription = null,
                                     )
                                 },
@@ -1243,7 +1253,7 @@ fun SettingsScreen(
                                     supportingContent = { Text("Search and sync stores into your list") },
                                     trailingContent = {
                                         Icon(
-                                            Icons.Filled.KeyboardArrowRight,
+                                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                             contentDescription = null,
                                         )
                                     },
@@ -1349,7 +1359,7 @@ fun SettingsScreen(
                                 supportingContent = { Text(if (hiddenTripExpanded) "Expanded" else "Collapsed") },
                                 trailingContent = {
                                     Icon(
-                                        if (hiddenTripExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                        if (hiddenTripExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                         contentDescription = null,
                                     )
                                 },
@@ -1484,6 +1494,92 @@ fun SettingsScreen(
                 }
 
                 item {
+                    SettingsSectionCard(title = "Receipt Reminder") {
+                        val showTimePicker = remember { mutableStateOf(false) }
+                        val draftMessage = remember(receiptReminderMessage) {
+                            mutableStateOf(receiptReminderMessage)
+                        }
+                        var messageHadFocus by remember { mutableStateOf(false) }
+
+                        val timeLabel = remember(receiptReminderMinutes) {
+                            val h = (receiptReminderMinutes / 60).coerceIn(0, 23)
+                            val m = (receiptReminderMinutes % 60).coerceIn(0, 59)
+                            String.format("%02d:%02d", h, m)
+                        }
+
+                        Text(
+                            text = "Schedules a reminder at the chosen time if a trip has no media.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+                        )
+
+                        ListItem(
+                            headlineContent = { Text("Time") },
+                            supportingContent = {
+                                Text(
+                                    timeLabel,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                )
+                            },
+                            trailingContent = {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showTimePicker.value = true },
+                        )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        OutlinedTextField(
+                            value = draftMessage.value,
+                            onValueChange = { draftMessage.value = it },
+                            label = { Text("Message") },
+                            placeholder = { Text("Don't forget to add the media") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                                .onFocusChanged { state ->
+                                    if (messageHadFocus && !state.isFocused) {
+                                        scope.launch { AppGraph.settings.setReceiptReminderMessage(draftMessage.value) }
+                                    }
+                                    messageHadFocus = state.isFocused
+                                },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    scope.launch { AppGraph.settings.setReceiptReminderMessage(draftMessage.value) }
+                                }
+                            ),
+                            singleLine = true,
+                        )
+
+                        if (showTimePicker.value) {
+                            val h = (receiptReminderMinutes / 60).coerceIn(0, 23)
+                            val m = (receiptReminderMinutes % 60).coerceIn(0, 59)
+                            LaunchedEffect(h, m) {
+                                TimePickerDialog(
+                                    context,
+                                    { _, hour, minute ->
+                                        showTimePicker.value = false
+                                        scope.launch { AppGraph.settings.setReceiptReminderMinutes(hour * 60 + minute) }
+                                    },
+                                    h,
+                                    m,
+                                    true,
+                                ).apply {
+                                    setOnDismissListener { showTimePicker.value = false }
+                                }.show()
+                            }
+                        }
+                    }
+                }
+
+                item {
                     SettingsSectionCard(title = "Saved places") {
                         val savedPlaces = remember(allStores) { allStores.filter { it.isFavorite } }
 
@@ -1556,7 +1652,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1577,7 +1673,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1585,6 +1681,30 @@ fun SettingsScreen(
                                 .fillMaxWidth()
                                 .clickable { showLayoutDialog = true },
                         )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Button(
+                                onClick = { showClearDataFirstConfirmDialog = true },
+                                enabled = !clearDataBusy,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                if (clearDataBusy) {
+                                    CircularProgressIndicator(
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .padding(end = 10.dp),
+                                    )
+                                }
+                                Text("Clear all user data")
+                            }
+                        }
                     }
                 }
 
@@ -1600,7 +1720,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1625,7 +1745,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1646,7 +1766,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1667,7 +1787,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1688,7 +1808,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1718,6 +1838,41 @@ fun SettingsScreen(
                                     scope.launch { AppGraph.settings.setDarkModeEnabled(!darkModeEnabled) }
                                 },
                         )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("UI style") },
+                            supportingContent = {
+                                Text(
+                                    if (useNewUi) "New UI (soft)" else "Old UI (classic)",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = { scope.launch { AppGraph.settings.setUseNewUi(false) } },
+                                enabled = useNewUi,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Old UI")
+                            }
+
+                            Button(
+                                onClick = { scope.launch { AppGraph.settings.setUseNewUi(true) } },
+                                enabled = !useNewUi,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("New UI")
+                            }
+                        }
                     }
                 }
 
@@ -1728,7 +1883,7 @@ fun SettingsScreen(
                             supportingContent = { Text(if (backendDataExpanded) "Expanded" else "Collapsed") },
                             trailingContent = {
                                 Icon(
-                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -1790,7 +1945,7 @@ fun SettingsScreen(
                                 supportingContent = { Text(syncModeLabel) },
                                 trailingContent = {
                                     Icon(
-                                        if (syncModeExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                        if (syncModeExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                         contentDescription = null,
                                     )
                                 },
@@ -2005,31 +2160,7 @@ fun SettingsScreen(
                             Text("Start over (new user)")
                         }
 
-                        Button(
-                            onClick = {
-                                if (!clearDataEnabled) {
-                                    clearDataEnabled = true
-                                } else {
-                                    showClearDataPinDialog = true
-                                }
-                            },
-                            enabled = !clearDataBusy,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 0.dp),
-                        ) {
-                            if (clearDataBusy) {
-                                CircularProgressIndicator(
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier
-                                        .size(18.dp)
-                                        .padding(end = 10.dp),
-                                )
-                            }
-                            Text(if (!clearDataEnabled) "Enable Clear Data button" else "Clear Data")
-                        }
-
-                            Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(10.dp))
                         }
                     }
                 }
@@ -2060,7 +2191,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2085,7 +2216,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2106,7 +2237,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2127,7 +2258,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2148,7 +2279,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2575,7 +2706,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = if (automationExpanded) "Collapse" else "Expand",
                                 )
                             },
@@ -2652,7 +2783,7 @@ fun SettingsScreen(
                             supportingContent = { Text(if (hiddenAndSyncedExpanded) "Expanded" else "Collapsed") },
                             trailingContent = {
                                 Icon(
-                                    if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2747,7 +2878,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2768,7 +2899,7 @@ fun SettingsScreen(
                             },
                             trailingContent = {
                                 Icon(
-                                    Icons.Filled.KeyboardArrowRight,
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2776,6 +2907,30 @@ fun SettingsScreen(
                                 .fillMaxWidth()
                                 .clickable { showLayoutDialog = true },
                         )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Button(
+                                onClick = { showClearDataFirstConfirmDialog = true },
+                                enabled = !clearDataBusy,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                if (clearDataBusy) {
+                                    CircularProgressIndicator(
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .padding(end = 10.dp),
+                                    )
+                                }
+                                Text("Clear all user data")
+                            }
+                        }
                     }
                 }
 
@@ -2808,7 +2963,7 @@ fun SettingsScreen(
                             supportingContent = { Text(if (backendDataExpanded) "Expanded" else "Collapsed") },
                             trailingContent = {
                                 Icon(
-                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                 )
                             },
@@ -2849,25 +3004,46 @@ fun SettingsScreen(
         SyncStoresDialog(onDismiss = { showSyncDialog.value = false })
     }
 
-    if (showClearDataPinDialog) {
+    if (showClearDataFirstConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!clearDataBusy) showClearDataFirstConfirmDialog = false },
+            title = { Text("Clear all user data") },
+            text = { Text("Are you sure?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearDataFirstConfirmDialog = false
+                        showClearDataPasswordDialog = true
+                    },
+                    enabled = !clearDataBusy,
+                ) { Text("Yes") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showClearDataFirstConfirmDialog = false },
+                    enabled = !clearDataBusy,
+                ) { Text("No") }
+            },
+        )
+    }
+
+    if (showClearDataPasswordDialog) {
         AlertDialog(
             onDismissRequest = {
                 if (!clearDataBusy) {
-                    showClearDataPinDialog = false
-                    clearDataPin = ""
+                    showClearDataPasswordDialog = false
+                    clearDataPassword = ""
                 }
             },
-            title = { Text("Clear Data") },
+            title = { Text("Password") },
             text = {
                 Column {
-                    Text("Enter PIN to continue.")
-                    Spacer(Modifier.height(8.dp))
-                    Text("PIN: 12345109876DELETE")
+                    Text(clearDataRequiredPassword)
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
-                        value = clearDataPin,
-                        onValueChange = { clearDataPin = it },
-                        label = { Text("PIN") },
+                        value = clearDataPassword,
+                        onValueChange = { clearDataPassword = it },
+                        label = { Text("Password") },
                         singleLine = true,
                         enabled = !clearDataBusy,
                         modifier = Modifier.fillMaxWidth(),
@@ -2877,64 +3053,40 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        showClearDataPinDialog = false
-                        showClearDataConfirmDialog = true
+                        showClearDataPasswordDialog = false
+                        showClearDataFinalConfirmDialog = true
                     },
-                    enabled = !clearDataBusy && clearDataPin == "12345109876DELETE",
-                ) {
-                    Text("Continue")
-                }
+                    enabled = !clearDataBusy && clearDataPassword == clearDataRequiredPassword,
+                ) { Text("Continue") }
             },
             dismissButton = {
                 TextButton(
                     onClick = {
-                        showClearDataPinDialog = false
-                        clearDataPin = ""
+                        showClearDataPasswordDialog = false
+                        clearDataPassword = ""
                     },
                     enabled = !clearDataBusy,
-                ) {
-                    Text("Cancel")
-                }
+                ) { Text("Cancel") }
             },
         )
     }
 
-    if (showClearDataConfirmDialog) {
+    if (showClearDataFinalConfirmDialog) {
         AlertDialog(
             onDismissRequest = {
                 if (!clearDataBusy) {
-                    showClearDataConfirmDialog = false
-                    clearDataPin = ""
+                    showClearDataFinalConfirmDialog = false
+                    clearDataPassword = ""
                 }
             },
             title = { Text("Confirm") },
-            text = { Text("This will clear all profiles data locally and also in the cloud.") },
+            text = { Text("This will remove all user data forever, everything") },
             confirmButton = {
-                Button(
+                TextButton(
                     onClick = {
                         scope.launch {
                             clearDataBusy = true
                             try {
-                                val backendBaseUrl = AppGraph.settings.backendBaseUrl.first()
-                                val backendDriverId = AppGraph.settings.backendDriverId.first()
-                                val profiles = AppGraph.settings.profiles.first().map { it.id }
-                                val idsToClear = (profiles + listOf(backendDriverId))
-                                    .filter { it.isNotBlank() }
-                                    .distinct()
-
-                                // Cloud wipe (best-effort): overwrite snapshots with empty data.
-                                val cloudFailures = mutableListOf<String>()
-                                for (id in idsToClear) {
-                                    runCatching {
-                                        withContext(Dispatchers.IO) {
-                                            driverDataRepository.clearRemoteSnapshot(id)
-                                        }
-                                    }.onFailure {
-                                        cloudFailures.add(id)
-                                    }
-                                }
-
-                                // Local wipe: cancel background work, clear DB + files + settings.
                                 withContext(Dispatchers.IO) {
                                     val wm = WorkManager.getInstance(context)
                                     wm.cancelUniqueWork("backend-sync")
@@ -2946,49 +3098,30 @@ fun SettingsScreen(
                                     AppGraph.db.clearAllTables()
                                     java.io.File(context.filesDir, "regions").deleteRecursively()
                                     java.io.File(context.filesDir, "evidence").deleteRecursively()
+                                    java.io.File(context.filesDir, "store_images").deleteRecursively()
+                                    java.io.File(context.filesDir, "home_tile_icons").deleteRecursively()
                                 }
 
                                 AppGraph.settings.clearAll()
-
-                                // Preserve backend endpoint config (auth/session stays intact).
-                                AppGraph.settings.setBackendBaseUrl(backendBaseUrl)
-                                AppGraph.settings.setBackendDriverId(backendDriverId)
-
-                                clearDataEnabled = false
-                                showClearDataConfirmDialog = false
-                                clearDataPin = ""
-
-                                val msg = if (cloudFailures.isEmpty()) {
-                                    "Cleared local + cloud data."
-                                } else {
-                                    "Cleared local data. Cloud clear failed for: ${cloudFailures.joinToString()}"
-                                }
-                                snackbarHostState.showSnackbar(message = msg, withDismissAction = true)
-                            } catch (t: Throwable) {
-                                snackbarHostState.showSnackbar(
-                                    message = "Clear failed: ${t.message ?: t.javaClass.simpleName}",
-                                    withDismissAction = true,
-                                )
+                                FirebaseAuth.getInstance().signOut()
                             } finally {
                                 clearDataBusy = false
+                                showClearDataFinalConfirmDialog = false
+                                clearDataPassword = ""
                             }
                         }
                     },
                     enabled = !clearDataBusy,
-                ) {
-                    Text("Clear")
-                }
+                ) { Text("Yes") }
             },
             dismissButton = {
                 TextButton(
                     onClick = {
-                        showClearDataConfirmDialog = false
-                        clearDataPin = ""
+                        showClearDataFinalConfirmDialog = false
+                        clearDataPassword = ""
                     },
                     enabled = !clearDataBusy,
-                ) {
-                    Text("Cancel")
-                }
+                ) { Text("No") }
             },
         )
     }
@@ -3064,163 +3197,154 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
     val density = LocalDensity.current
 
     val city = remember { mutableStateOf("") }
-    val searchTerm = remember { mutableStateOf("second hand") }
-    var radiusKm by remember { mutableStateOf(10) }
+    val searchTerm = remember { mutableStateOf("") }
 
-    var cityFieldSize by remember { mutableStateOf(IntSize.Zero) }
-    var termFieldSize by remember { mutableStateOf(IntSize.Zero) }
+    val cityCandidates = remember {
+        listOf(
+            "Stockholm",
+            "Göteborg",
+            "Malmö",
+            "Uppsala",
+            "Västerås",
+            "Örebro",
+            "Linköping",
+            "Helsingborg",
+            "Jönköping",
+            "Norrköping",
+            "Lund",
+        )
+    }
 
+    var lastCitySelected by remember { mutableStateOf<String?>(null) }
     var citySuggestions by remember { mutableStateOf<List<String>>(emptyList()) }
     var citySuggestionsExpanded by remember { mutableStateOf(false) }
-    var lastCitySelected by remember { mutableStateOf<String?>(null) }
+    var cityFieldSize by remember { mutableStateOf(IntSize.Zero) }
 
-    var termExpanded by remember { mutableStateOf(false) }
-    val termPresets = remember {
+    val termSuggestions = remember {
         listOf(
             "second hand",
             "loppis",
-            "postombud",
             "thrift store",
+            "vintage",
+            "charity shop",
         )
     }
-    val termSuggestions = remember(searchTerm.value) {
+    val filteredTermSuggestions = remember(searchTerm.value) {
         val q = searchTerm.value.trim()
-        val filtered = if (q.isBlank()) termPresets else termPresets.filter { it.contains(q, ignoreCase = true) }
-        filtered.take(6)
-    }
-
-    LaunchedEffect(city.value) {
-        val q = city.value.trim()
-        if (q.length < 2 || q == lastCitySelected) {
-            citySuggestions = emptyList()
-            citySuggestionsExpanded = false
-            return@LaunchedEffect
+        if (q.isBlank()) {
+            termSuggestions
+        } else {
+            termSuggestions.filter { it.contains(q, ignoreCase = true) }
         }
-
-        delay(250)
-
-        val suggestions = withContext(Dispatchers.IO) {
-            val geocoder = Geocoder(context)
-            val geocodeQuery = if (q.contains(",")) q else "$q, Sweden"
-            val resolved = runCatching {
-                @Suppress("DEPRECATION")
-                geocoder.getFromLocationName(geocodeQuery, 8)
-            }.getOrNull().orEmpty()
-
-            resolved.asSequence()
-                .filter { it.countryCode.equals("SE", ignoreCase = true) }
-                .mapNotNull { it.locality ?: it.subAdminArea ?: it.adminArea }
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .distinctBy { it.lowercase() }
-                .take(6)
-                .toList()
-        }
-
-        citySuggestions = suggestions
-        citySuggestionsExpanded = suggestions.isNotEmpty()
     }
+    var termExpanded by remember { mutableStateOf(false) }
+    var termFieldSize by remember { mutableStateOf(IntSize.Zero) }
 
-    var isSearching by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var lastStatus by remember { mutableStateOf<String?>(null) }
+    var radiusKm by remember { mutableStateOf(10) }
 
     val searchResults = remember { mutableStateListOf<PlaceSearchItem>() }
     val idToPlace = remember { mutableStateMapOf<String, PlaceSearchItem>() }
     val selected = remember { mutableStateListOf<String>() }
 
-    val retrofit = remember {
+    var isSearching by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var lastStatus by remember { mutableStateOf<String?>(null) }
+
+    val json = remember { Json { ignoreUnknownKeys = true } }
+    val placesApi = remember {
         Retrofit.Builder()
             .baseUrl("https://places.googleapis.com/")
             .addConverterFactory(ScalarsConverterFactory.create())
             .build()
+            .create(RawPlacesApi::class.java)
     }
-    val placesApi = remember { retrofit.create(RawPlacesApi::class.java) }
 
-    val json = remember { Json { ignoreUnknownKeys = true } }
+    fun updateCitySuggestions(text: String) {
+        val q = text.trim()
+        if (q.isBlank()) {
+            citySuggestions = emptyList()
+            citySuggestionsExpanded = false
+            return
+        }
+        val suggestions = cityCandidates
+            .filter { it.startsWith(q, ignoreCase = true) }
+            .take(8)
+        citySuggestions = suggestions
+        citySuggestionsExpanded = suggestions.isNotEmpty() && lastCitySelected != q
+    }
+
+    fun readMapsApiKey(): String? {
+        return try {
+            val info = context.packageManager.getApplicationInfo(
+                context.packageName,
+                PackageManager.GET_META_DATA,
+            )
+            info.metaData?.getString("com.google.android.geo.API_KEY")
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun doSearch(term: String, cityName: String, radiusKm: Int) {
-        scope.launch {
-            isSearching = true
-            error = null
-            lastStatus = null
-            try {
-                val radiusMeters = (radiusKm.coerceIn(0, 50) * 1000)
-                val apiKey = context.packageManager
-                    .getApplicationInfo(context.packageName, android.content.pm.PackageManager.GET_META_DATA)
-                    .metaData
-                    ?.getString("com.google.android.geo.API_KEY")
-                    .orEmpty()
+        if (isSearching) return
+        val cleanTerm = term.trim()
+        val cleanCity = cityName.trim()
+        if (cleanTerm.isBlank() || cleanCity.isBlank()) return
 
+        error = null
+        lastStatus = null
+        isSearching = true
+
+        scope.launch {
+            try {
+                searchResults.clear()
+                idToPlace.clear()
+                selected.clear()
+
+                val apiKey = readMapsApiKey()?.trim().orEmpty()
                 if (apiKey.isBlank()) {
-                    error = "Missing MAPS_API_KEY. Check local.properties and rebuild."
+                    error = "Missing Maps API key (com.google.android.geo.API_KEY)."
                     return@launch
                 }
 
-                val stableCity = cityName.trim()
-                val geocodeQuery = if (stableCity.contains(",")) stableCity else "$stableCity, Sweden"
+                val geocoder = Geocoder(context)
+                val (centerLat, centerLng) = withContext(Dispatchers.IO) {
+                    val query = "$cleanCity, Sweden"
+                    val addresses = runCatching { geocoder.getFromLocationName(query, 1) }.getOrNull()
+                    val first = addresses?.firstOrNull()
+                    if (first == null) null else Pair(first.latitude, first.longitude)
+                } ?: run {
+                    error = "Could not resolve city '$cleanCity' via Geocoder. Try a different city name."
+                    return@launch
+                }
+
+                val radiusMeters = (radiusKm.coerceIn(0, 50) * 1000).toDouble().coerceAtLeast(1000.0)
+
+                val body = buildJsonObject {
+                    put("textQuery", "$cleanTerm in $cleanCity")
+                    put("languageCode", "sv")
+                    put("regionCode", "SE")
+                    put(
+                        "locationBias",
+                        buildJsonObject {
+                            put(
+                                "circle",
+                                buildJsonObject {
+                                    put(
+                                        "center",
+                                        buildJsonObject {
+                                            put("latitude", centerLat)
+                                            put("longitude", centerLng)
+                                        }
+                                    )
+                                    put("radius", radiusMeters)
+                                }
+                            )
+                        }
+                    )
+                }
 
                 val raw = withContext(Dispatchers.IO) {
-                    val geocoder = Geocoder(context)
-                    val resolved = runCatching {
-                        @Suppress("DEPRECATION")
-                        geocoder.getFromLocationName(geocodeQuery, 5)
-                    }.getOrNull().orEmpty()
-
-                    val best = resolved.firstOrNull { it.countryCode.equals("SE", ignoreCase = true) }
-                        ?: resolved.firstOrNull()
-
-                    val cityLat = best?.latitude
-                    val cityLng = best?.longitude
-
-                    if (cityLat == null || cityLng == null) {
-                        throw IllegalArgumentException("Could not find city '$stableCity'. Try a more specific name like 'Köping, Sweden'.")
-                    }
-
-                    val effectiveRadiusMeters = if (radiusMeters > 0) radiusMeters else 20000
-
-                    val metersPerDegree = 111_320.0
-                    val radius = effectiveRadiusMeters.toDouble()
-                    val deltaLat = radius / metersPerDegree
-                    val deltaLng = radius / (metersPerDegree * kotlin.math.cos(Math.toRadians(cityLat)))
-
-                    val lowLat = (cityLat - deltaLat).coerceIn(-90.0, 90.0)
-                    val highLat = (cityLat + deltaLat).coerceIn(-90.0, 90.0)
-                    val lowLng = (cityLng - deltaLng).coerceIn(-180.0, 180.0)
-                    val highLng = (cityLng + deltaLng).coerceIn(-180.0, 180.0)
-
-                    val body = buildJsonObject {
-                        // Include city in query + restrict results strictly to the city area.
-                        put("textQuery", "$term in $stableCity")
-                        put(
-                            "locationRestriction",
-                            buildJsonObject {
-                                put(
-                                    "rectangle",
-                                    buildJsonObject {
-                                        put(
-                                            "low",
-                                            buildJsonObject {
-                                                put("latitude", lowLat)
-                                                put("longitude", lowLng)
-                                            }
-                                        )
-                                        put(
-                                            "high",
-                                            buildJsonObject {
-                                                put("latitude", highLat)
-                                                put("longitude", highLng)
-                                            }
-                                        )
-                                    }
-                                )
-                            }
-                        )
-                        put("regionCode", "SE")
-                    }
-
-                    // Places API (New): https://developers.google.com/maps/documentation/places/web-service/text-search
-                    // Requires X-Goog-Api-Key + X-Goog-FieldMask.
                     placesApi.searchPlacesRaw(
                         apiKey = apiKey,
                         fieldMask = "places.id,places.displayName,places.location",
@@ -3246,10 +3370,8 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                             append(apiMessage)
                         }
                         append("\n")
-                        append("Fix: enable 'Places API (New)' in Google Cloud, ensure Billing is enabled, and use an API key that is allowed for Web Service calls.")
+                        append("Fix: enable 'Places API (New)' + Billing, and ensure your API key allows Places API (New) Web Service calls.")
                     }
-                    searchResults.clear()
-                    idToPlace.clear()
                     return@launch
                 }
 
@@ -3267,8 +3389,6 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                     PlaceSearchItem(placeId = placeId, name = name, lat = lat, lng = lng)
                 }
 
-                searchResults.clear()
-                idToPlace.clear()
                 mapped.forEach { idToPlace[it.placeId] = it }
                 searchResults.addAll(mapped)
             } catch (e: Exception) {
@@ -3328,6 +3448,7 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                         onValueChange = {
                             city.value = it
                             lastCitySelected = null
+                            updateCitySuggestions(it)
                         },
                         label = { Text("City") },
                         modifier = Modifier
@@ -3423,11 +3544,11 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                     )
 
                     DropdownMenu(
-                        expanded = termExpanded && termSuggestions.isNotEmpty(),
+                        expanded = termExpanded && filteredTermSuggestions.isNotEmpty(),
                         onDismissRequest = { termExpanded = false },
                         modifier = Modifier.width(with(density) { termFieldSize.width.toDp() })
                     ) {
-                        termSuggestions.forEach { suggestion ->
+                        filteredTermSuggestions.forEach { suggestion ->
                             DropdownMenuItem(
                                 text = { Text(suggestion) },
                                 onClick = {
@@ -3527,7 +3648,7 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                     val stores = selected.mapNotNull { idToPlace[it] }.mapIndexed { _, place ->
                         // Use Geocoder to get city name for each store, with diagnostics
                         val geocoder = Geocoder(context)
-                        var cityName: String? = null
+                        var resolvedCityName: String?
                         var geoError: String? = null
                         val addresses = try {
                             geocoder.getFromLocation(place.lat, place.lng, 1)
@@ -3545,8 +3666,8 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                         val county = first?.adminArea?.trim().orEmpty().ifBlank { null }
 
                         // Prefer a real city/municipality name (avoid "Uppsala län") when possible.
-                        cityName = locality ?: municipality ?: county
-                        if (cityName.isNullOrBlank()) {
+                        resolvedCityName = locality ?: municipality ?: county
+                        if (resolvedCityName.isNullOrBlank()) {
                             geoError = geoError ?: "No city found for lat=${place.lat}, lng=${place.lng}"
                         }
                         StorePayload(
@@ -3555,7 +3676,7 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                             lat = place.lat,
                             lng = place.lng,
                             radiusMeters = 120,
-                            city = cityName ?: regionName
+                            city = resolvedCityName ?: regionName
                         )
                     }
 
@@ -3698,7 +3819,7 @@ private fun StoresByCityList(
                     leadingContent = { Icon(Icons.Filled.LocationCity, contentDescription = null) },
                     trailingContent = {
                         Icon(
-                            if (expanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                            if (expanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                             contentDescription = if (expanded) "Collapse" else "Expand",
                         )
                     },
@@ -3986,7 +4107,7 @@ private fun SavedPlacesByCategoryList(
                     },
                     trailingContent = {
                         Icon(
-                            if (expanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                            if (expanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                             contentDescription = null,
                         )
                     },

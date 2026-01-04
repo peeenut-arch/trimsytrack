@@ -28,7 +28,7 @@ import com.trimsytrack.data.entities.TripEntity
         RunEntity::class,
         SyncOutboxEntity::class,
     ],
-    version = 6,
+    version = 10,
     exportSchema = false
 )
 @TypeConverters(RoomConverters::class)

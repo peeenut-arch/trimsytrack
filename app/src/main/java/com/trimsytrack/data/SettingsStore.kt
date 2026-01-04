@@ -140,6 +140,9 @@ class SettingsStore(private val context: Context) {
             val safeSeq = if (sequence < 0) 0 else sequence
             return "$RECEIPT_ID_PREFIX-${safeSeq.toString().padStart(6, '0')}"
         }
+
+        // Preferred naming (matches the system ID convention doc).
+        fun formatDreciptID(sequence: Long): String = formatReceiptId(sequence)
     }
 
     private object Keys {
@@ -234,6 +237,9 @@ class SettingsStore(private val context: Context) {
         // UI theme
         val darkModeEnabled = booleanPreferencesKey("darkModeEnabled")
 
+        // UI style (soft/rounded vs classic)
+        val useNewUi = booleanPreferencesKey("useNewUi")
+
         // UI: Settings screen layout (classic = previous tabbed layout)
         val useLegacySettingsLayout = booleanPreferencesKey("useLegacySettingsLayout")
 
@@ -248,6 +254,10 @@ class SettingsStore(private val context: Context) {
         // Backend sync status (device behavior)
         val backendLastSyncAtMillis = longPreferencesKey("backendLastSyncAtMillis")
         val backendLastSyncResult = stringPreferencesKey("backendLastSyncResult")
+
+        // Receipt Reminder (global)
+        val receiptReminderMinutes = intPreferencesKey("receiptReminderMinutes")
+        val receiptReminderMessage = stringPreferencesKey("receiptReminderMessage")
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -255,6 +265,23 @@ class SettingsStore(private val context: Context) {
     val profileId: Flow<String> = context.dataStore.data.map { it[Keys.profileId].orEmpty() }
     val profileName: Flow<String> = context.dataStore.data.map { it[Keys.profileName].orEmpty() }
     val onboardingCompleted: Flow<Boolean> = context.dataStore.data.map { it[Keys.onboardingCompleted] ?: false }
+
+    val receiptReminderMinutes: Flow<Int> = context.dataStore.data
+        .map { it[Keys.receiptReminderMinutes] ?: (17 * 60) }
+        .distinctUntilChanged()
+
+    val receiptReminderMessage: Flow<String> = context.dataStore.data
+        .map { it[Keys.receiptReminderMessage] ?: "Don't forget to add the media" }
+        .distinctUntilChanged()
+
+    suspend fun setReceiptReminderMinutes(minutes: Int) {
+        val safe = minutes.coerceIn(0, 23 * 60 + 59)
+        context.dataStore.edit { it[Keys.receiptReminderMinutes] = safe }
+    }
+
+    suspend fun setReceiptReminderMessage(message: String) {
+        context.dataStore.edit { it[Keys.receiptReminderMessage] = message.trim() }
+    }
     val subProfileId: Flow<String> = context.dataStore.data.map { it[Keys.subProfileId].orEmpty() }
     val lastPingAtMillis: Flow<Long> = context.dataStore.data.map { it[Keys.lastPingAtMillis] ?: 0L }
 
@@ -272,6 +299,10 @@ class SettingsStore(private val context: Context) {
 
     val useLegacySettingsLayout: Flow<Boolean> = context.dataStore.data.map {
         it[Keys.useLegacySettingsLayout] ?: false
+    }
+
+    val useNewUi: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.useNewUi] ?: false
     }
 
     val profiles: Flow<List<ProfileMeta>> = context.dataStore.data.map { prefs ->
@@ -884,6 +915,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setDarkModeEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.darkModeEnabled] = enabled }
+    }
+
+    suspend fun setUseNewUi(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.useNewUi] = enabled }
     }
 
     suspend fun setUseLegacySettingsLayout(enabled: Boolean) {

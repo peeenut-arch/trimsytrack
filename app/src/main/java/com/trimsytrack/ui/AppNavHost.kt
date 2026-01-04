@@ -11,6 +11,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -19,6 +20,7 @@ import androidx.navigation.navArgument
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.IdKeys
 import com.trimsytrack.ui.screens.AuthScreen
 import com.trimsytrack.ui.screens.HomeScreen
 import com.trimsytrack.ui.screens.JournalScreen
@@ -35,6 +37,7 @@ import com.trimsytrack.ui.screens.ProfileSelectScreen
 import com.trimsytrack.ui.screens.ProfileLocationScreen
 import com.trimsytrack.ui.screens.SavedStoresScreen
 import com.trimsytrack.ui.screens.TestPingActionsScreen
+import com.trimsytrack.notifications.ReceiptReminderWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -63,9 +66,10 @@ object Routes {
 fun AppNavHost(intent: Intent) {
     val navController = rememberNavController()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
-    val onboardingCompleted by AppGraph.settings.onboardingCompleted.collectAsState(initial = false)
     val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
+    val profiles by AppGraph.settings.profiles.collectAsState(initial = emptyList())
     val currentUser = rememberFirebaseUser()
 
     // Deep links from notifications / intents.
@@ -74,7 +78,9 @@ fun AppNavHost(intent: Intent) {
     }
 
     val initialTripId = remember(intent) {
-        intent.getLongExtra("tripId", -1L).takeIf { it > 0 }
+        val a = intent.getLongExtra(IdKeys.TRIP_ID, -1L).takeIf { it > 0 }
+        val b = intent.getLongExtra(IdKeys.TRIP_ID_ALT, -1L).takeIf { it > 0 }
+        (a ?: b)
     }
 
     val openTestPing = remember(intent) {
@@ -111,7 +117,50 @@ fun AppNavHost(intent: Intent) {
     // Spec: app always launches to Login Screen (Auth).
     val startDestination = remember { Routes.Auth }
 
-    LaunchedEffect(currentUser) {
+    fun scheduleReceiptReminder(tripId: Long) {
+        if (tripId <= 0L) return
+        scope.launch {
+            runCatching {
+                val trip = withContext(Dispatchers.IO) { AppGraph.tripRepository.get(tripId) } ?: return@launch
+                val minutes = AppGraph.settings.receiptReminderMinutes.first()
+                val message = AppGraph.settings.receiptReminderMessage.first()
+                ReceiptReminderWorker.scheduleForTrip(
+                    context = context.applicationContext,
+                    profileId = trip.profileId,
+                    tripId = trip.id,
+                    triggerMinutes = minutes,
+                    message = message,
+                )
+            }
+        }
+    }
+
+    fun activateProfileAndNavigate(selectedId: String) {
+        if (selectedId.isBlank()) return
+        scope.launch {
+            AppGraph.settings.activateProfile(selectedId)
+
+            // First-run migration for users upgrading from single-profile builds.
+            withContext(Dispatchers.IO) {
+                AppGraph.db.storeDao().claimUnscoped(selectedId)
+                AppGraph.db.tripDao().claimUnscoped(selectedId)
+                AppGraph.db.promptDao().claimUnscoped(selectedId)
+                AppGraph.db.runDao().claimUnscoped(selectedId)
+                AppGraph.db.attachmentDao().claimUnscoped(selectedId)
+                AppGraph.db.distanceCacheDao().claimUnscoped(selectedId)
+                AppGraph.db.syncOutboxDao().claimUnscoped(selectedId)
+            }
+
+            val onboarded = AppGraph.settings.onboardingCompleted.first()
+            val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
+            navController.navigate(target) {
+                popUpTo(Routes.Auth) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    LaunchedEffect(currentUser, profiles, activeProfileId, pendingInitialRoute) {
         // Soft-migrate legacy single-profile into the list.
         AppGraph.settings.ensureActiveProfileListed()
 
@@ -128,11 +177,35 @@ fun AppNavHost(intent: Intent) {
             return@LaunchedEffect
         }
 
-        // Signed in: move from Auth -> Profile selection.
-        if (currentRoute == Routes.Auth) {
-            navController.navigate(Routes.Profiles) {
-                popUpTo(Routes.Auth) { inclusive = true }
-                launchSingleTop = true
+        // Signed in: auto-select profile if possible.
+        val activeIsValid = activeProfileId.isNotBlank() && profiles.any { it.id == activeProfileId }
+        when {
+            activeIsValid -> {
+                // If we're on Auth or Profiles, skip picker.
+                if (currentRoute == Routes.Auth || currentRoute == Routes.Profiles) {
+                    val onboarded = AppGraph.settings.onboardingCompleted.first()
+                    val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
+                    navController.navigate(target) {
+                        popUpTo(Routes.Auth) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+            }
+
+            profiles.size == 1 -> {
+                if (currentRoute == Routes.Auth || currentRoute == Routes.Profiles) {
+                    activateProfileAndNavigate(profiles.first().id)
+                }
+            }
+
+            else -> {
+                // Multiple profiles and none active: show picker.
+                if (currentRoute == Routes.Auth) {
+                    navController.navigate(Routes.Profiles) {
+                        popUpTo(Routes.Auth) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
             }
         }
     }
@@ -165,27 +238,7 @@ fun AppNavHost(intent: Intent) {
         composable(Routes.Profiles) {
             ProfileSelectScreen(
                 onSelectProfile = { selectedId ->
-                    scope.launch {
-                        AppGraph.settings.activateProfile(selectedId)
-
-                        // First-run migration for users upgrading from single-profile builds.
-                        withContext(Dispatchers.IO) {
-                            AppGraph.db.storeDao().claimUnscoped(selectedId)
-                            AppGraph.db.tripDao().claimUnscoped(selectedId)
-                            AppGraph.db.promptDao().claimUnscoped(selectedId)
-                            AppGraph.db.runDao().claimUnscoped(selectedId)
-                            AppGraph.db.attachmentDao().claimUnscoped(selectedId)
-                            AppGraph.db.distanceCacheDao().claimUnscoped(selectedId)
-                            AppGraph.db.syncOutboxDao().claimUnscoped(selectedId)
-                        }
-
-                        val onboarded = AppGraph.settings.onboardingCompleted.first()
-                        val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
-                        navController.navigate(target) {
-                            popUpTo(Routes.Profiles) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    }
+                    activateProfileAndNavigate(selectedId)
                 },
             )
         }
@@ -229,7 +282,12 @@ fun AppNavHost(intent: Intent) {
             ManualTripScreen(
                 onBack = { navController.popBackStack() },
                 onOpenTrip = { tripId, addMedia ->
-                    navController.navigate("${Routes.Trip}/$tripId?addMedia=${if (addMedia) 1 else 0}")
+                    if (addMedia) {
+                        scheduleReceiptReminder(tripId)
+                        navController.navigate("${Routes.Camera}?tripId=$tripId&return=0&autoSave=1")
+                    } else {
+                        navController.navigate("${Routes.Trip}/$tripId?addMedia=0")
+                    }
                 },
             )
         }
@@ -244,6 +302,9 @@ fun AppNavHost(intent: Intent) {
             JournalScreen(
                 onBack = { navController.popBackStack() },
                 onOpenTrip = { navController.navigate("${Routes.Trip}/$it") },
+                onAddMediaToTrip = { tripId ->
+                    navController.navigate("${Routes.Camera}?tripId=$tripId&return=0")
+                },
             )
         }
         composable(Routes.Settings) {
@@ -292,20 +353,23 @@ fun AppNavHost(intent: Intent) {
         }
 
         composable(
-            route = "${Routes.Camera}?tripId={tripId}&return={return}",
+            route = "${Routes.Camera}?tripId={tripId}&return={return}&autoSave={autoSave}",
             arguments = listOf(
                 navArgument("tripId") {
                     type = NavType.LongType
                     defaultValue = -1L
                 },
                 navArgument("return") { type = NavType.IntType; defaultValue = 0 },
+                navArgument("autoSave") { type = NavType.IntType; defaultValue = 0 },
             )
         ) {
             val tripId = it.arguments?.getLong("tripId") ?: -1L
             val returnCapture = (it.arguments?.getInt("return") ?: 0) == 1
+            val autoSave = (it.arguments?.getInt("autoSave") ?: 0) == 1
             CameraScreen(
                 tripId = tripId.takeIf { id -> id > 0L },
                 returnCaptureToCaller = returnCapture,
+                autoSaveToTrip = autoSave,
                 onCaptureConfirmed = { uri, mimeType, isTempLocalFileProviderUri, capturedAt ->
                     val prev = navController.previousBackStackEntry
                     prev?.savedStateHandle?.set("cameraCaptureUri", uri)
@@ -376,6 +440,14 @@ fun AppNavHost(intent: Intent) {
             TripDetailScreen(
                 tripId = tripId,
                 showAddMediaImmediately = addMedia,
+                onOpenCameraForTrip = { id, scheduleReceiptReminder ->
+                    if (scheduleReceiptReminder) {
+                        scheduleReceiptReminder(id)
+                        navController.navigate("${Routes.Camera}?tripId=$id&return=0&autoSave=1")
+                    } else {
+                        navController.navigate("${Routes.Camera}?tripId=$id&return=0")
+                    }
+                },
                 onOpenMediaReviewForTrip = { id ->
                     navController.navigate("${Routes.MediaReview}/$id")
                 },

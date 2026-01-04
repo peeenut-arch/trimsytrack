@@ -24,7 +24,7 @@
 		{
 			"label": "Build + Install + Launch (device)",
 			"type": "shell",
-			"command": "./gradlew installDebug; ${env:LOCALAPPDATA}/Android/Sdk/platform-tools/adb.exe shell am start -n com.trimsytrack/.ui.MainActivity",
+			"command": "./gradlew installDebug; & \"$env:LOCALAPPDATA\\Android\\Sdk\\platform-tools\\adb.exe\" shell am start -n com.trimsytrack/.ui.MainActivity",
 			"isBackground": false,
 			"group": {
 				"kind": "build",

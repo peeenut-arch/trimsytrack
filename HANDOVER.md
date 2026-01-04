@@ -28,6 +28,29 @@ Android (Kotlin) app that stays idle and relies on Android system geofencing to 
   - "Use current" (last known location)
   - Computes distance via Routes API only on confirmation
 
+## System truths (IDs + scoping)
+These are the invariants to keep in mind when adding features or wiring background work.
+
+- **`profileId` is the primary scope boundary**
+  - Most Room tables include `profileId: String` and all reads/writes should be scoped by it.
+  - Repos typically use `settings.profileId`, falling back to `"default"` if blank.
+  - Legacy rows may have `profileId = ""`; startup migration code calls `claimUnscoped(profileId)` to fix this.
+
+- **Room IDs are local primary keys (not backend IDs)**
+  - `TripEntity.id`, `AttachmentEntity.id`, `PromptEventEntity.id` are `@PrimaryKey(autoGenerate = true)`.
+  - Backend sync has separate fields like `clientRef` and `backendId` (see `TripEntity`).
+
+- **Trip linkage is explicit**
+  - Attachments: `AttachmentEntity.tripId` links to `TripEntity.id` and is always interpreted under the same `profileId`.
+  - Prompts: `PromptEventEntity.linkedTripId` links a prompt to a created trip.
+
+- **Notification IDs vs. entity IDs are different**
+  - Prompt events store a `notificationId: Int` used to manage/cancel the prompt notification.
+  - Receipt reminders use a stable notification id derived from `(profileId, tripId)` and deep-link into `MainActivity` with the `tripId` extra.
+
+- **Background work naming should be stable + scoped**
+  - For receipt reminders we enqueue unique work per `(profileId, tripId)` so multiple trips can have reminders without overwriting each other.
+
 ## Background flow
 1. User enables Tracking (Settings toggle) → app requests location/background location + notifications (as applicable).
 2. Geofence sync worker loads active region stores and registers up to `maxActiveGeofences`.

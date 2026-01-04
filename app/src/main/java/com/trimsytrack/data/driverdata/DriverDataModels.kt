@@ -97,6 +97,7 @@ data class TripDto(
 
     val storeId: String,
     val storeNameSnapshot: String,
+    val citySnapshot: String = "",
     val storeLatSnapshot: Double,
     val storeLngSnapshot: Double,
 

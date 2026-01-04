@@ -22,8 +22,9 @@ class MainActivity : ComponentActivity() {
         currentIntentState.value = intent
         setContent {
             val darkModeEnabled by AppGraph.settings.darkModeEnabled.collectAsState(initial = false)
+            val useNewUi by AppGraph.settings.useNewUi.collectAsState(initial = false)
 
-            TrimsyTheme(darkTheme = darkModeEnabled) {
+            TrimsyTheme(darkTheme = darkModeEnabled, useNewUi = useNewUi) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,

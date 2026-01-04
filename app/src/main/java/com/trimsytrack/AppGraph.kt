@@ -78,6 +78,10 @@ object AppGraph {
                     Migrations.MIGRATION_3_4,
                     Migrations.MIGRATION_4_5,
                     Migrations.MIGRATION_5_6,
+                    Migrations.MIGRATION_6_7,
+                    Migrations.MIGRATION_7_8,
+                    Migrations.MIGRATION_8_9,
+                    Migrations.MIGRATION_9_10,
                 )
                 .fallbackToDestructiveMigration()
                 .build()
@@ -85,7 +89,7 @@ object AppGraph {
             regionRepository = RegionRepository(appContext)
             storeRepository = StoreRepository(db.storeDao(), regionRepository, settings)
             promptRepository = PromptRepository(db.promptDao(), settings)
-            tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao(), settings)
+            tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao(), settings, appContext)
             distanceRepository = DistanceRepository(db.distanceCacheDao(), buildRoutesService(), settings)
 
             backendSyncRepository = BackendSyncRepository(appContext, settings)

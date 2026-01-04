@@ -19,6 +19,13 @@ class TripDetailViewModel(private val tripId: Long) : ViewModel() {
         }
     }
 
+    fun updateTrip(entity: TripEntity) {
+        viewModelScope.launch {
+            AppGraph.tripRepository.updateTrip(entity)
+            _trip.value = entity
+        }
+    }
+
     companion object {
         fun factory(tripId: Long) = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {

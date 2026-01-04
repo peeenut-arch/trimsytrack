@@ -1,25 +1,27 @@
 package com.trimsytrack.ui.screens
 
-import android.app.Activity
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.compose.foundation.layout.Arrangement
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -33,21 +35,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.AttachmentEntity
+import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.ui.vm.TripDetailViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.math.BigDecimal
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.flow.first
@@ -57,6 +59,7 @@ import kotlinx.coroutines.flow.first
 fun TripDetailScreen(
     tripId: Long,
     showAddMediaImmediately: Boolean = false,
+    onOpenCameraForTrip: (tripId: Long, scheduleReceiptReminder: Boolean) -> Unit,
     onOpenMediaReviewForTrip: (Long) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -66,61 +69,57 @@ fun TripDetailScreen(
     val attachments by AppGraph.tripRepository.observeAttachments(tripId).collectAsState(initial = emptyList())
 
     val context = LocalContext.current
-    val activity = context as? Activity
     val scope = rememberCoroutineScope()
     val importMessage = remember { mutableStateOf<String?>(null) }
     val showAddMediaPrompt = remember { mutableStateOf(showAddMediaImmediately) }
 
+    val showFeeDialog = remember { mutableStateOf(false) }
+    val feeInput = remember { mutableStateOf("") }
+    val feeInputError = remember { mutableStateOf<String?>(null) }
+    val pendingFeeMinor = remember { mutableStateOf<Int?>(null) }
+
     val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
 
-    val scannerOptions = remember {
-        GmsDocumentScannerOptions.Builder()
-            .setGalleryImportAllowed(true)
-            .setPageLimit(6)
-            .setResultFormats(
-                GmsDocumentScannerOptions.RESULT_FORMAT_PDF,
-                GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
-            )
-            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-            .build()
-    }
-    val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
-    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
-
-        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data) ?: return@rememberLauncherForActivityResult
-        val uri = scanResult.pdf?.uri ?: scanResult.pages?.firstOrNull()?.imageUri ?: return@rememberLauncherForActivityResult
-
-        val profileId = activeProfileId.ifBlank { "default" }
-        val t = trip
-        if (t == null) {
-            importMessage.value = "Trip not loaded yet. Try again."
-            return@rememberLauncherForActivityResult
-        }
-
-        scope.launch {
-            try {
-                val receiptSeq = AppGraph.settings.nextReceiptSequence(profileId)
-                val receiptId = SettingsStore.formatReceiptId(receiptSeq)
-                val entity = importReceiptToAppFiles(
-                    context = context,
-                    profileId = profileId,
-                    tripId = tripId,
-                    tripDay = t.day,
-                    tripStoreNameSnapshot = t.storeNameSnapshot,
-                    sourceUri = uri,
-                    receiptId = receiptId,
-                )
-                AppGraph.tripRepository.addAttachment(entity)
-
-                // No backend media uploads: receipts/media are local-only.
-
-                importMessage.value = "Receipt scanned and linked to trip."
-            } catch (e: Exception) {
-                importMessage.value = e.message ?: "Failed to import scanned receipt"
+    val uploadFeePhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri: Uri? ->
+            val feeMinor = pendingFeeMinor.value
+            if (uri == null || feeMinor == null) {
+                pendingFeeMinor.value = null
+                return@rememberLauncherForActivityResult
             }
-        }
-    }
+
+            val profileId = activeProfileId.ifBlank { "default" }
+            val t = trip
+            if (t == null) {
+                importMessage.value = "Trip not loaded yet. Try again."
+                pendingFeeMinor.value = null
+                return@rememberLauncherForActivityResult
+            }
+
+            scope.launch {
+                try {
+                    val baseEntity = importDocumentToTripFiles(
+                        context = context,
+                        profileId = profileId,
+                        tripId = tripId,
+                        tripDay = t.day,
+                        tripStoreNameSnapshot = t.storeNameSnapshot,
+                        sourceUri = uri,
+                    )
+                    val feeText = formatMinorAmount(feeMinor)
+                    val entity = baseEntity.copy(displayName = "Parking/Traffic fee ${feeText} — receipt photo")
+                    AppGraph.tripRepository.addAttachment(entity)
+                    vm.updateTrip(t.copy(parkingTrafficFeeMinor = feeMinor))
+                    importMessage.value = "Fee saved and receipt photo attached."
+                } catch (e: Exception) {
+                    importMessage.value = e.message ?: "Failed to upload fee receipt photo"
+                } finally {
+                    pendingFeeMinor.value = null
+                }
+            }
+        },
+    )
 
     val autoOpenedReview = remember { mutableStateOf(false) }
     LaunchedEffect(showAddMediaImmediately) {
@@ -128,7 +127,7 @@ fun TripDetailScreen(
         if (autoOpenedReview.value) return@LaunchedEffect
         autoOpenedReview.value = true
         showAddMediaPrompt.value = false
-        onOpenMediaReviewForTrip(tripId)
+        onOpenCameraForTrip(tripId, true)
     }
 
     Scaffold(
@@ -162,6 +161,16 @@ fun TripDetailScreen(
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
             )
 
+            val feeMinor = trip?.parkingTrafficFeeMinor
+            if (feeMinor != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Parking/Traffic fee: ${formatMinorAmount(feeMinor)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
+            }
+
             Spacer(Modifier.height(14.dp))
             Text(trip?.notes ?: "", style = MaterialTheme.typography.bodyMedium)
 
@@ -171,24 +180,14 @@ fun TripDetailScreen(
 
             OutlinedButton(
                 onClick = {
-                    val a = activity
-                    if (a == null) {
-                        importMessage.value = "Scanner not available in this context."
-                        return@OutlinedButton
-                    }
-
                     importMessage.value = null
-                    scanner.getStartScanIntent(a)
-                        .addOnSuccessListener { intentSender ->
-                            scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-                        }
-                        .addOnFailureListener { e ->
-                            importMessage.value = e.message ?: "Failed to start scanner"
-                        }
+                    feeInputError.value = null
+                    pendingFeeMinor.value = null
+                    showFeeDialog.value = true
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Experimental: Scan receipt")
+                Text("Add Parking/Traffic Fee")
             }
 
             Spacer(Modifier.height(10.dp))
@@ -278,6 +277,94 @@ fun TripDetailScreen(
             }
         }
     }
+
+    if (showFeeDialog.value) {
+        AlertDialog(
+            onDismissRequest = {
+                showFeeDialog.value = false
+                feeInputError.value = null
+            },
+            title = { Text("Parking/Traffic fee") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Enter the amount, then upload a photo of the receipt.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
+                    )
+                    TextField(
+                        value = feeInput.value,
+                        onValueChange = {
+                            feeInput.value = it
+                            feeInputError.value = null
+                        },
+                        singleLine = true,
+                        label = { Text("Amount") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (feeInputError.value != null) {
+                        Text(
+                            feeInputError.value ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val parsed = parseMinorAmountOrNull(feeInput.value)
+                        if (parsed == null || parsed < 0) {
+                            feeInputError.value = "Enter a valid amount"
+                            return@TextButton
+                        }
+
+                        val t = trip
+                        if (t == null) {
+                            feeInputError.value = "Trip not loaded yet"
+                            return@TextButton
+                        }
+
+                        pendingFeeMinor.value = parsed
+                        showFeeDialog.value = false
+                        uploadFeePhotoLauncher.launch(arrayOf("image/*"))
+                    }
+                ) { Text("Upload photo") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showFeeDialog.value = false
+                        feeInputError.value = null
+                    }
+                ) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private fun parseMinorAmountOrNull(input: String): Int? {
+    val trimmed = input.trim()
+    if (trimmed.isBlank()) return null
+
+    // Accept both "," and "." as decimal separators.
+    val normalized = trimmed.replace(" ", "").replace(',', '.')
+    return runCatching {
+        val bd = BigDecimal(normalized)
+        val scaled = bd.setScale(2, java.math.RoundingMode.HALF_UP)
+        val minor = scaled.multiply(BigDecimal(100))
+        minor.intValueExact()
+    }.getOrNull()
+}
+
+private fun formatMinorAmount(minor: Int): String {
+    val abs = kotlin.math.abs(minor)
+    val whole = abs / 100
+    val frac = abs % 100
+    val sign = if (minor < 0) "-" else ""
+    return "$sign$whole.${frac.toString().padStart(2, '0')}"
 }
 
 private fun importReceiptToAppFiles(

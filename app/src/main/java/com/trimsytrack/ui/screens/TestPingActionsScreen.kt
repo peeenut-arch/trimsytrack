@@ -149,6 +149,7 @@ fun TestPingActionsScreen(
             day = day,
             storeId = "testping:${UUID.randomUUID()}",
             storeNameSnapshot = stopLocationName.trim(),
+            citySnapshot = address.ifBlank { "Test Ping" },
             storeLatSnapshot = safeStoreLat,
             storeLngSnapshot = safeStoreLng,
             startLabelSnapshot = startLocationName.trim(),

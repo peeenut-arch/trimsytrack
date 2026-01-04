@@ -20,6 +20,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -119,14 +121,28 @@ import androidx.compose.ui.Alignment
                         StoreThumbnailButton(
                             name = store.name,
                             imageUri = uri,
+                            defaultIcon = defaultIconForStoreName(store.name),
+                            distanceMeters = 0.0,
+                            tagLabel = null,
+                            tagColor = null,
+                            addedLabel = addedLabelFor(store.id, store.name),
+                            addLockedLabel = lockLabelFor(store.id),
                             enabled = !isSaving,
+                            onSet = {},
                             onClick = {
+                                val locked = lockLabelFor(store.id)
+                                if (!locked.isNullOrBlank()) {
+                                    error = "Trip recently added. $locked."
+                                    return@StoreThumbnailButton
+                                }
                                 scope.launch {
                                     isSaving = true
                                     error = null
                                     try {
                                         val tripId = createManualTripToStore(store = store)
                                         onOpenTrip(tripId)
+                                    } catch (e: CancellationException) {
+                                        throw e
                                     } catch (e: Exception) {
                                         error = e.message ?: "Failed"
                                     } finally {
@@ -265,21 +281,35 @@ import androidx.compose.ui.Alignment
                             StoreThumbnailButton(
                                 name = store.name,
                                 imageUri = uri,
+                                defaultIcon = defaultIconForStoreName(store.name),
+                                distanceMeters = 0.0,
+                                tagLabel = null,
+                                tagColor = null,
+                                addedLabel = addedLabelFor(store.id, store.name),
+                                addLockedLabel = lockLabelFor(store.id),
                                 enabled = !isSaving,
+                                onSet = {},
                                 onClick = {
+                                    val locked = lockLabelFor(store.id)
+                                    if (!locked.isNullOrBlank()) {
+                                        error = "Trip recently added. $locked."
+                                        return@StoreThumbnailButton
+                                    }
                                     scope.launch {
                                         isSaving = true
                                         error = null
                                         try {
                                             val tripId = createManualTripToStore(store = store)
                                             onOpenTrip(tripId)
+                                        } catch (e: CancellationException) {
+                                            throw e
                                         } catch (e: Exception) {
                                             error = e.message ?: "Failed"
                                         } finally {
                                             isSaving = false
                                         }
                                     }
-                                }
+                                },
                             )
                         }
                     }
@@ -313,22 +343,34 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
         throw IllegalStateException("Location unavailable or permission denied. Enable location and try again.")
     }
 
-    val route = AppGraph.distanceRepository.getOrComputeDrivingRoute(
-        startLat = startLat,
-        startLng = startLng,
-        destLat = store.lat,
-        destLng = store.lng,
-        startLocationId = null,
-        endLocationId = store.id,
-    )
+    val route = runCatching {
+        AppGraph.distanceRepository.getOrComputeDrivingRoute(
+            startLat = startLat,
+            startLng = startLng,
+            destLat = store.lat,
+            destLng = store.lng,
+            startLocationId = null,
+            endLocationId = store.id,
+        )
+    }.getOrElse {
+        AppGraph.distanceRepository.estimateStraightLineRoute(
+            startLat = startLat,
+            startLng = startLng,
+            destLat = store.lat,
+            destLng = store.lng,
+        )
+    }
 
     val now = Instant.now()
+    val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
     val tripId = AppGraph.tripRepository.createTrip(
         TripEntity(
+            profileId = profileId,
             createdAt = now,
             day = LocalDate.now(),
             storeId = store.id,
             storeNameSnapshot = store.name,
+            citySnapshot = store.city,
             storeLatSnapshot = store.lat,
             storeLngSnapshot = store.lng,
             startLabelSnapshot = "Manual: current location",
@@ -410,6 +452,8 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.location.Geocoder
 import android.net.Uri
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -427,6 +471,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -436,9 +481,11 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Add
@@ -465,6 +512,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -485,17 +534,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import coil.compose.AsyncImage
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
@@ -509,6 +566,7 @@ import java.time.Instant
 import java.time.DayOfWeek
 import java.time.LocalDate
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -530,6 +588,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.mapSaver
+import androidx.core.content.ContextCompat
 
 private data class StorePolar(
     val store: StoreEntity,
@@ -540,6 +599,7 @@ private data class StorePolar(
 private data class ManualTripPlaceSearchItem(
     val placeId: String,
     val name: String,
+    val address: String?,
     val lat: Double,
     val lng: Double,
 )
@@ -551,10 +611,43 @@ fun ManualTripScreen(
     onOpenTrip: (Long, Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val focusManager = LocalFocusManager.current
+    val density = LocalDensity.current
+
+    fun hasLocationPermission(): Boolean {
+        val ctx = AppGraph.appContext
+        val fine = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
+    fun formatAddedSnackbar(storeName: String, createdAt: Instant = Instant.now()): String {
+        val local = java.time.LocalDateTime.ofInstant(createdAt, java.time.ZoneId.systemDefault())
+        val time = local.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+        val date = local.toLocalDate().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
+        val location = storeName.trim().ifBlank { "Trip" }
+        return "Added ($location) ($time) ($date)"
+    }
 
     val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
 
     var addTripMenuStoreId by remember { mutableStateOf<String?>(null) }
+
+    var pendingOpenStoreId by remember { mutableStateOf<String?>(null) }
+
+    var addedToastOffset by remember { mutableStateOf<IntOffset?>(null) }
+    var addedToastMessage by remember { mutableStateOf<String?>(null) }
+
+    fun showAddedToast(offset: IntOffset, message: String = "Added") {
+        addedToastOffset = offset
+        addedToastMessage = message
+        scope.launch {
+            delay(900)
+            addedToastOffset = null
+            addedToastMessage = null
+        }
+    }
 
     val manualTripStoreSortMode by AppGraph.settings.manualTripStoreSortMode.collectAsState(initial = "NAME")
     val manualTripHiddenStoreIds by AppGraph.settings.manualTripHiddenStoreIds.collectAsState(initial = emptySet())
@@ -624,7 +717,13 @@ fun ManualTripScreen(
     var cityQuery by remember { mutableStateOf("") }
     var userEditedCityQuery by remember { mutableStateOf(false) }
     var searchSubmitTick by remember { mutableStateOf(0) }
-    var lastHandledSubmitTick by remember { mutableStateOf(0) }
+    var lastSubmittedQuery by remember { mutableStateOf("") }
+
+    var showSearchDialog by remember { mutableStateOf(false) }
+    var dialogSearchQuery by remember { mutableStateOf("") }
+
+    var searchSuggestionsExpanded by remember { mutableStateOf(false) }
+    var searchFieldSize by remember { mutableStateOf(IntSize.Zero) }
 
     val expandedByCategoryLabel = rememberSaveable(
         saver = mapSaver(
@@ -646,6 +745,11 @@ fun ManualTripScreen(
     var remoteSearchBusy by remember { mutableStateOf(false) }
     var remoteSearchError by remember { mutableStateOf<String?>(null) }
     var remotePlaces by remember { mutableStateOf<List<ManualTripPlaceSearchItem>>(emptyList()) }
+
+    // Manual search (opened from the search bar): should not be affected by distance filtering.
+    var manualSearchBusy by remember { mutableStateOf(false) }
+    var manualSearchError by remember { mutableStateOf<String?>(null) }
+    var manualSearchPlaces by remember { mutableStateOf<List<ManualTripPlaceSearchItem>>(emptyList()) }
     var forceTypeRefreshTick by remember { mutableStateOf(0) }
     var initialInterestFetchDone by remember { mutableStateOf(false) }
     var searchRadiusMenuExpanded by remember { mutableStateOf(false) }
@@ -663,11 +767,10 @@ fun ManualTripScreen(
     }
     val placesSearchApi = remember { placesRetrofit.create(RawPlacesSearchApi::class.java) }
 
-    // Default prompt: when this screen opens (and search bar is empty), immediately fetch "locations of interest".
-    LaunchedEffect(manualTripShowOnlineResults, enabledCategoryConfigs, cityQuery, initialInterestFetchDone) {
+    // Default prompt: when this screen opens, immediately fetch "locations of interest".
+    LaunchedEffect(manualTripShowOnlineResults, enabledCategoryConfigs, initialInterestFetchDone) {
         if (initialInterestFetchDone) return@LaunchedEffect
         if (!manualTripShowOnlineResults) return@LaunchedEffect
-        if (cityQuery.trim().length >= 2) return@LaunchedEffect
         if (enabledCategoryConfigs.isEmpty()) return@LaunchedEffect
 
         initialInterestFetchDone = true
@@ -692,10 +795,6 @@ fun ManualTripScreen(
         }
 
         currentCity = nextCity
-
-        if (detectedCity.isNullOrBlank() && allCities.isNotEmpty()) {
-            error = "Could not detect your city from location. Defaulted to first available city."
-        }
     }
 
     LaunchedEffect(activeProfileId) {
@@ -734,35 +833,24 @@ fun ManualTripScreen(
         }
     }
 
-    // Google Maps-style search: free text (address/company). This is additive to the
-    // GPS-first nearby list, and results should be selectable regardless of categories.
-    LaunchedEffect(cityQuery, searchSubmitTick, businessHomeLat, businessHomeLng, userLocation, manualTripShowOnlineResults) {
-        val submitImmediate = searchSubmitTick != lastHandledSubmitTick
-        val query = cityQuery.trim()
-
-        // When the search bar is empty, online results are handled by the type-based auto search below.
-        if (!manualTripShowOnlineResults || query.length < 2) {
-            remoteSearchBusy = false
-            remoteSearchError = null
+    // Google Maps-style search: free text (address/company).
+    // Requirement: keep the text field usable while typing; only search on Enter.
+    LaunchedEffect(searchSubmitTick, lastSubmittedQuery, businessHomeLat, businessHomeLng, userLocation) {
+        val stableQuery = lastSubmittedQuery.trim()
+        if (stableQuery.length < 2) {
+            manualSearchBusy = false
+            manualSearchError = null
+            manualSearchPlaces = emptyList()
             return@LaunchedEffect
         }
 
-        if (submitImmediate) {
-            lastHandledSubmitTick = searchSubmitTick
-        } else {
-            delay(350)
-        }
-
-        val stableQuery = cityQuery.trim()
-        if (!manualTripShowOnlineResults || stableQuery.length < 2) return@LaunchedEffect
-
-        remoteSearchBusy = true
-        remoteSearchError = null
+        manualSearchBusy = true
+        manualSearchError = null
         try {
             val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
             if (apiKey.isBlank()) {
-                remoteSearchError = "Missing MAPS/Places API key. Check local.properties and rebuild."
-                remotePlaces = emptyList()
+                manualSearchError = "Missing MAPS/Places API key. Check local.properties and rebuild."
+                manualSearchPlaces = emptyList()
                 return@LaunchedEffect
             }
 
@@ -774,33 +862,14 @@ fun ManualTripScreen(
             val raw = withContext(Dispatchers.IO) {
                 val body = buildJsonObject {
                     put("textQuery", JsonPrimitive(stableQuery))
-                    if (originLat != null && originLng != null) {
-                        put(
-                            "locationBias",
-                            buildJsonObject {
-                                put(
-                                    "circle",
-                                    buildJsonObject {
-                                        put(
-                                            "center",
-                                            buildJsonObject {
-                                                put("latitude", JsonPrimitive(originLat))
-                                                put("longitude", JsonPrimitive(originLng))
-                                            }
-                                        )
-                                        // Bias nearby, but don't exclude exact-address searches.
-                                        put("radius", JsonPrimitive(50_000))
-                                    }
-                                )
-                            }
-                        )
-                    }
+                    // Intentionally no locationBias: behave like Google Maps search (country-wide).
                     put("regionCode", JsonPrimitive("SE"))
+                    put("languageCode", JsonPrimitive("sv"))
                 }
 
                 placesSearchApi.searchPlacesRaw(
                     apiKey = apiKey,
-                    fieldMask = "places.id,places.displayName,places.location",
+                    fieldMask = "places.id,places.displayName,places.formattedAddress,places.location",
                     body = body.toString(),
                 )
             }
@@ -810,7 +879,7 @@ fun ManualTripScreen(
             if (apiError != null) {
                 val apiStatus = apiError["status"]?.jsonPrimitive?.content
                 val apiMessage = apiError["message"]?.jsonPrimitive?.content
-                remoteSearchError = buildString {
+                manualSearchError = buildString {
                     append("Places error: ")
                     append(apiStatus ?: "ERROR")
                     if (!apiMessage.isNullOrBlank()) {
@@ -818,7 +887,7 @@ fun ManualTripScreen(
                         append(apiMessage)
                     }
                 }
-                remotePlaces = emptyList()
+                manualSearchPlaces = emptyList()
                 return@LaunchedEffect
             }
 
@@ -828,18 +897,21 @@ fun ManualTripScreen(
                 val placeId = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
                 val displayNameObj = obj["displayName"]?.jsonObject
                 val name = displayNameObj?.get("text")?.jsonPrimitive?.content ?: return@mapNotNull null
+                val address = obj["formattedAddress"]?.jsonPrimitive?.content
                 val locObj = obj["location"]?.jsonObject ?: return@mapNotNull null
                 val lat = locObj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
                 val lng = locObj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
-                ManualTripPlaceSearchItem(placeId = placeId, name = name, lat = lat, lng = lng)
+                ManualTripPlaceSearchItem(placeId = placeId, name = name, address = address, lat = lat, lng = lng)
             }
 
-            remotePlaces = mapped
+            manualSearchPlaces = mapped
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            remoteSearchError = e.message ?: e.javaClass.simpleName
-            remotePlaces = emptyList()
+            manualSearchError = e.message ?: e.javaClass.simpleName
+            manualSearchPlaces = emptyList()
         } finally {
-            remoteSearchBusy = false
+            manualSearchBusy = false
         }
     }
 
@@ -852,15 +924,11 @@ fun ManualTripScreen(
         businessHomeLat,
         businessHomeLng,
         searchRadiusKm,
-        cityQuery,
         forceTypeRefreshTick,
         locationsMenuExpanded,
     ) {
         // Don't refresh searches while the user is editing the Places list.
         if (locationsMenuExpanded) return@LaunchedEffect
-
-        val query = cityQuery.trim()
-        if (query.length >= 2) return@LaunchedEffect
 
         if (!manualTripShowOnlineResults) {
             remoteSearchBusy = false
@@ -926,7 +994,7 @@ fun ManualTripScreen(
 
                     val raw = placesSearchApi.searchPlacesRaw(
                         apiKey = apiKey,
-                        fieldMask = "places.id,places.displayName,places.location",
+                        fieldMask = "places.id,places.displayName,places.formattedAddress,places.location",
                         body = body.toString(),
                     )
 
@@ -940,10 +1008,11 @@ fun ManualTripScreen(
                         val placeId = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
                         val displayNameObj = obj["displayName"]?.jsonObject
                         val name = displayNameObj?.get("text")?.jsonPrimitive?.content ?: return@mapNotNull null
+                        val address = obj["formattedAddress"]?.jsonPrimitive?.content
                         val locObj = obj["location"]?.jsonObject ?: return@mapNotNull null
                         val lat = locObj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
                         val lng = locObj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
-                        ManualTripPlaceSearchItem(placeId = placeId, name = name, lat = lat, lng = lng)
+                        ManualTripPlaceSearchItem(placeId = placeId, name = name, address = address, lat = lat, lng = lng)
                     }
 
                     // Keep the set small per type to avoid spamming UI.
@@ -954,6 +1023,8 @@ fun ManualTripScreen(
             }
 
             remotePlaces = aggregated.values.toList()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             remoteSearchError = e.message ?: e.javaClass.simpleName
             remotePlaces = emptyList()
@@ -968,29 +1039,48 @@ fun ManualTripScreen(
         savedStores
     }
 
-    val remoteStoresForCity = remember(remotePlaces, manualTripShowOnlineResults) {
-        if (!manualTripShowOnlineResults) {
-            emptyList()
-        } else {
-            remotePlaces.map { p ->
-                StoreEntity(
-                    profileId = activeProfileId.ifBlank { "default" },
-                    id = "gmap_${p.placeId}",
-                    name = p.name,
-                    lat = p.lat,
-                    lng = p.lng,
-                    radiusMeters = 120,
-                    regionCode = "manual_places",
-                    city = "",
-                    isActive = false,
-                    isFavorite = false,
+    val remoteStoresForCity = remember(remotePlaces, manualSearchPlaces, manualTripShowOnlineResults) {
+        buildList {
+            if (manualTripShowOnlineResults) {
+                addAll(
+                    remotePlaces.map { p ->
+                        StoreEntity(
+                            profileId = activeProfileId.ifBlank { "default" },
+                            id = "gmap_interest_${p.placeId}",
+                            name = p.name,
+                            lat = p.lat,
+                            lng = p.lng,
+                            radiusMeters = 120,
+                            regionCode = "manual_interest",
+                            city = "",
+                            isActive = false,
+                            isFavorite = false,
+                        )
+                    },
                 )
             }
+
+            addAll(
+                manualSearchPlaces.map { p ->
+                    StoreEntity(
+                        profileId = activeProfileId.ifBlank { "default" },
+                        id = "gmap_search_${p.placeId}",
+                        name = p.name,
+                        lat = p.lat,
+                        lng = p.lng,
+                        radiusMeters = 120,
+                        regionCode = "manual_places",
+                        city = "",
+                        isActive = false,
+                        isFavorite = false,
+                    )
+                },
+            )
         }
     }
 
-    val visibleStores = remember(localStoresForCity, remoteStoresForCity, manualTripShowOnlineResults) {
-        if (manualTripShowOnlineResults) localStoresForCity + remoteStoresForCity else localStoresForCity
+    val visibleStores = remember(localStoresForCity, remoteStoresForCity) {
+        localStoresForCity + remoteStoresForCity
     }
 
     // Cache Google driving distances: Business home -> store. Only used when we don't have current location.
@@ -1133,7 +1223,7 @@ fun ManualTripScreen(
 
                 if (store.regionCode == "manual_places") {
                     // Search bar results should be "add anything" (not constrained by type toggles).
-                    return@filter manualTripShowOnlineResults
+                    return@filter true
                 }
 
                 if (manualTripHiddenStoreIds.contains(store.id)) return@filter false
@@ -1301,10 +1391,6 @@ fun ManualTripScreen(
                 enabled = !remoteSearchBusy,
                 onClick = {
                     // Force showing + fetching "locations of interest" (type-based search).
-                    if (cityQuery.trim().length >= 2) {
-                        userEditedCityQuery = true
-                        cityQuery = ""
-                    }
                     scope.launch {
                         if (!manualTripShowOnlineResults) {
                             AppGraph.settings.setManualTripShowOnlineResults(true)
@@ -1383,7 +1469,7 @@ fun ManualTripScreen(
                             supportingContent = { Text("$shownInCity / ${group.size} shown") },
                             trailingContent = {
                                 Icon(
-                                    imageVector = Icons.Filled.KeyboardArrowRight,
+                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                     contentDescription = null,
                                     modifier = Modifier.alpha(if (isExpanded) 0.6f else 1f),
                                 )
@@ -1506,9 +1592,105 @@ fun ManualTripScreen(
 
     var hideStoreDialog by remember { mutableStateOf<StoreEntity?>(null) }
 
+    val gridState = rememberLazyGridState()
+
+    LaunchedEffect(pendingOpenStoreId, searchResultPolar) {
+        val pendingId = pendingOpenStoreId ?: return@LaunchedEffect
+        if (searchResultPolar.none { it.store.id == pendingId }) return@LaunchedEffect
+
+        // 0 = FilterRow, 1 = "Search results" header, 2 = first tile
+        gridState.animateScrollToItem(2)
+        addTripMenuStoreId = pendingId
+        pendingOpenStoreId = null
+    }
+
+    if (showSearchDialog) {
+        AlertDialog(
+            onDismissRequest = { showSearchDialog = false },
+            title = { Text("Search") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TextField(
+                        value = dialogSearchQuery,
+                        onValueChange = { dialogSearchQuery = it },
+                        placeholder = { Text("Search address or company…") },
+                        singleLine = true,
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Search,
+                                contentDescription = null,
+                            )
+                        },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                lastSubmittedQuery = dialogSearchQuery
+                                searchSubmitTick++
+                            },
+                        ),
+                    )
+
+                    if (manualSearchBusy) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Text(
+                                "Searching…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                            )
+                        }
+                    }
+
+                    if (!manualSearchError.isNullOrBlank()) {
+                        Text(
+                            manualSearchError.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 320.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        lazyItems(manualSearchPlaces, key = { it.placeId }) { p ->
+                            ListItem(
+                                headlineContent = { Text(p.name) },
+                                supportingContent = {
+                                    val addr = p.address?.trim().orEmpty()
+                                    if (addr.isNotBlank()) {
+                                        Text(addr)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        // Pin selection into the grid and open its tile actions.
+                                        manualSearchPlaces = listOf(p)
+                                        lastSubmittedQuery = p.name
+                                        pendingOpenStoreId = "gmap_search_${p.placeId}"
+                                        showSearchDialog = false
+                                    },
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSearchDialog = false }) {
+                    Text("Close")
+                }
+            },
+        )
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -1520,53 +1702,64 @@ fun ManualTripScreen(
                     }
                 },
                 title = {
-                    TextField(
-                        value = cityQuery,
-                        enabled = !remoteSearchBusy,
-                        onValueChange = {
-                            userEditedCityQuery = true
-                            cityQuery = it
-                        },
-                        placeholder = { Text("Search address or company…") },
-                        singleLine = true,
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.Search,
-                                contentDescription = null,
-                            )
-                        },
-                        trailingIcon = {
-                            if (cityQuery.isNotBlank()) {
-                                IconButton(
-                                    onClick = {
-                                        userEditedCityQuery = true
-                                        cityQuery = ""
-                                    },
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Close,
-                                        contentDescription = "Clear",
-                                    )
-                                }
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(
-                            onSearch = {
-                                searchSubmitTick++
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) {
+                                dialogSearchQuery = lastSubmittedQuery
+                                showSearchDialog = true
                             },
-                        ),
-                        shape = RoundedCornerShape(24.dp),
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                            disabledIndicatorColor = Color.Transparent,
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    ) {
+                        TextField(
+                            value = lastSubmittedQuery,
+                            onValueChange = {},
+                            readOnly = true,
+                            enabled = false,
+                            placeholder = { Text("Search address or company…") },
+                            singleLine = true,
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Filled.Search,
+                                    contentDescription = null,
+                                )
+                            },
+                            trailingIcon = {
+                                if (lastSubmittedQuery.isNotBlank() || manualSearchPlaces.isNotEmpty()) {
+                                    IconButton(
+                                        enabled = true,
+                                        onClick = {
+                                            lastSubmittedQuery = ""
+                                            searchSubmitTick++
+                                            manualSearchError = null
+                                            manualSearchPlaces = emptyList()
+                                        },
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Close,
+                                            contentDescription = "Clear search",
+                                        )
+                                    }
+                                }
+                            },
+                            shape = RoundedCornerShape(24.dp),
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                                disabledIndicatorColor = Color.Transparent,
+                                disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                                disabledPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
@@ -1581,6 +1774,27 @@ fun ManualTripScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
+            val toastOffset = addedToastOffset
+            val toastMessage = addedToastMessage
+            if (toastOffset != null && !toastMessage.isNullOrBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier
+                        .zIndex(10f)
+                        .offset { toastOffset }
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
+                ) {
+                    Text(
+                        toastMessage,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1603,77 +1817,51 @@ fun ManualTripScreen(
                 FilterRow()
             }
 
-            val stableQuery = cityQuery.trim()
-            if (stableQuery.length >= 2) {
-                if (remoteSearchBusy) {
+            // Browse status: show helpful status so the screen doesn't feel dead.
+            when {
+                !manualTripShowOnlineResults -> {
                     Text(
-                        "Searching Google Maps for '${stableQuery}'…",
+                        "Enable 'Show online results' in Places to browse locations of interest.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
                 }
-                if (!remoteSearchError.isNullOrBlank()) {
+                enabledCategoryConfigs.isEmpty() -> {
                     Text(
-                        remoteSearchError.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-
-                if (!remoteSearchBusy && remoteSearchError.isNullOrBlank() && remotePlaces.isEmpty()) {
-                    Text(
-                        "No results for '${stableQuery}'.",
+                        "No place types selected. Open Places to pick types.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
                 }
-            } else {
-                // Browse mode (search bar empty): show helpful status so the screen doesn't feel dead.
-                when {
-                    !manualTripShowOnlineResults -> {
-                        Text(
-                            "Enable 'Show online results' in Places to browse locations of interest.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                        )
-                    }
-                    enabledCategoryConfigs.isEmpty() -> {
-                        Text(
-                            "No place types selected. Open Places to pick types.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                        )
-                    }
-                    remoteSearchBusy -> {
-                        Text(
-                            "Loading locations of interest…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                        )
-                    }
-                }
-
-                if (!remoteSearchError.isNullOrBlank()) {
+                remoteSearchBusy -> {
                     Text(
-                        remoteSearchError.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-
-                if (
-                    manualTripShowOnlineResults &&
-                    enabledCategoryConfigs.isNotEmpty() &&
-                    !remoteSearchBusy &&
-                    remoteSearchError.isNullOrBlank() &&
-                    remotePlaces.isEmpty()
-                ) {
-                    Text(
-                        "No locations of interest found. Tap refresh to try again.",
+                        "Loading locations of interest…",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
                 }
+            }
+
+            if (!remoteSearchError.isNullOrBlank()) {
+                Text(
+                    remoteSearchError.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            if (
+                manualTripShowOnlineResults &&
+                enabledCategoryConfigs.isNotEmpty() &&
+                !remoteSearchBusy &&
+                remoteSearchError.isNullOrBlank() &&
+                remotePlaces.isEmpty()
+            ) {
+                Text(
+                    "No locations of interest found. Tap refresh to try again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
             }
 
             if (!canComputeDistances) {
@@ -1692,6 +1880,7 @@ fun ManualTripScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 170.dp),
+                    state = gridState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(0.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -1718,19 +1907,32 @@ fun ManualTripScreen(
                                 name = polar.store.name,
                                 imageUri = null,
                                 defaultIcon = defaultIconForStoreName(polar.store.name),
-                                distanceMeters = polar.distance,
+                                // Search findings should not be tied to the distance filter/indicator.
+                                distanceMeters = Double.NaN,
                                 tagLabel = null,
                                 tagColor = null,
                                 enabled = !isSaving,
                                 showTripActions = addTripMenuStoreId == polar.store.id,
                                 onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
-                                onAddTrip = {
+                                onAddTrip = { tapOffset ->
+                                    addTripMenuStoreId = null
                                     scope.launch {
+                                        val toastOffset = tapOffset
                                         isSaving = true
                                         error = null
                                         try {
-                                            val tripId = createManualTripToStore(store = polar.store)
-                                            onOpenTrip(tripId, false)
+                                            createManualTripToStore(store = polar.store)
+                                            if (toastOffset != null) showAddedToast(toastOffset)
+                                            snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: IllegalStateException) {
+                                            val msg = e.message.orEmpty()
+                                            if (msg.contains("already added", ignoreCase = true)) {
+                                                snackbarHostState.showSnackbar("Already added")
+                                            } else {
+                                                error = e.message ?: "Failed"
+                                            }
                                         } catch (e: Exception) {
                                             error = e.message ?: "Failed"
                                         } finally {
@@ -1738,13 +1940,26 @@ fun ManualTripScreen(
                                         }
                                     }
                                 },
-                                onAddTripWithMedia = {
+                                onAddTripWithMedia = { tapOffset ->
+                                    addTripMenuStoreId = null
                                     scope.launch {
+                                        val toastOffset = tapOffset
                                         isSaving = true
                                         error = null
                                         try {
                                             val tripId = createManualTripToStore(store = polar.store)
+                                            if (toastOffset != null) showAddedToast(toastOffset)
+                                            snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
                                             onOpenTrip(tripId, true)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: IllegalStateException) {
+                                            val msg = e.message.orEmpty()
+                                            if (msg.contains("already added", ignoreCase = true)) {
+                                                snackbarHostState.showSnackbar("Already added")
+                                            } else {
+                                                error = e.message ?: "Failed"
+                                            }
                                         } catch (e: Exception) {
                                             error = e.message ?: "Failed"
                                         } finally {
@@ -1792,14 +2007,11 @@ fun ManualTripScreen(
                                 }
 
                                 val tagLabel = when {
-                                    isPost -> "Postombud"
                                     isLoppisName(polar.store.name) -> "Loppis"
                                     isSecondHandName(polar.store.name) -> "Second hand"
                                     else -> null
                                 }
                                 val tagColor = when {
-                                    isPost -> MaterialTheme.colorScheme.tertiary
-                                    isLoppisName(polar.store.name) -> MaterialTheme.colorScheme.secondary
                                     isSecondHandName(polar.store.name) -> MaterialTheme.colorScheme.primary
                                     else -> null
                                 }
@@ -1814,13 +2026,25 @@ fun ManualTripScreen(
                                     enabled = !isSaving,
                                     showTripActions = addTripMenuStoreId == polar.store.id,
                                     onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
-                                    onAddTrip = {
+                                    onAddTrip = { tapOffset ->
+                                        addTripMenuStoreId = null
                                         scope.launch {
+                                            val toastOffset = tapOffset
                                             isSaving = true
                                             error = null
                                             try {
-                                                val tripId = createManualTripToStore(store = polar.store)
-                                                onOpenTrip(tripId, false)
+                                                createManualTripToStore(store = polar.store)
+                                                if (toastOffset != null) showAddedToast(toastOffset)
+                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                            } catch (e: CancellationException) {
+                                                throw e
+                                            } catch (e: IllegalStateException) {
+                                                val msg = e.message.orEmpty()
+                                                if (msg.contains("already added", ignoreCase = true)) {
+                                                    snackbarHostState.showSnackbar("Already added")
+                                                } else {
+                                                    error = e.message ?: "Failed"
+                                                }
                                             } catch (e: Exception) {
                                                 error = e.message ?: "Failed"
                                             } finally {
@@ -1828,13 +2052,26 @@ fun ManualTripScreen(
                                             }
                                         }
                                     },
-                                    onAddTripWithMedia = {
+                                    onAddTripWithMedia = { tapOffset ->
+                                        addTripMenuStoreId = null
                                         scope.launch {
+                                            val toastOffset = tapOffset
                                             isSaving = true
                                             error = null
                                             try {
                                                 val tripId = createManualTripToStore(store = polar.store)
+                                                if (toastOffset != null) showAddedToast(toastOffset)
+                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
                                                 onOpenTrip(tripId, true)
+                                            } catch (e: CancellationException) {
+                                                throw e
+                                            } catch (e: IllegalStateException) {
+                                                val msg = e.message.orEmpty()
+                                                if (msg.contains("already added", ignoreCase = true)) {
+                                                    snackbarHostState.showSnackbar("Already added")
+                                                } else {
+                                                    error = e.message ?: "Failed"
+                                                }
                                             } catch (e: Exception) {
                                                 error = e.message ?: "Failed"
                                             } finally {
@@ -1861,34 +2098,6 @@ fun ManualTripScreen(
             }
         }
 
-            if (remoteSearchBusy) {
-                // Full-screen scrim: centers the indicator and blocks all clicks while searching.
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.background.copy(alpha = 0.75f))
-                        .clickable(
-                            indication = null,
-                            interactionSource = remember { MutableInteractionSource() },
-                        ) { /* consume */ },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(18.dp),
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(110.dp),
-                            strokeWidth = 10.dp,
-                        )
-                        Text(
-                            "Searching…",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
-                        )
-                    }
-                }
-            }
         }
     }
 
@@ -2250,7 +2459,7 @@ private fun SectionHeaderRow(
         },
         trailingContent = {
             Icon(
-                if (expanded) Icons.Filled.ExpandMore else Icons.Filled.KeyboardArrowRight,
+                if (expanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,
             )
         },
@@ -2362,6 +2571,7 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             day = LocalDate.now(),
             storeId = store.id,
             storeNameSnapshot = store.name,
+            citySnapshot = store.city,
             storeLatSnapshot = store.lat,
             storeLngSnapshot = store.lng,
             startLabelSnapshot = "Manual: current location",
@@ -2390,8 +2600,8 @@ private fun StoreThumbnailButton(
     enabled: Boolean,
     showTripActions: Boolean = false,
     onDismissTripActions: () -> Unit = {},
-    onAddTrip: () -> Unit = {},
-    onAddTripWithMedia: () -> Unit = {},
+    onAddTrip: (IntOffset?) -> Unit = {},
+    onAddTripWithMedia: (IntOffset?) -> Unit = {},
     onSet: () -> Unit,
     onLongPress: (() -> Unit)? = null,
     onClick: () -> Unit,
@@ -2547,6 +2757,15 @@ private fun StoreThumbnailButton(
 
                     val iconTint = MaterialTheme.colorScheme.onSurfaceVariant
 
+                    var addTripPosInRoot by remember { mutableStateOf(Offset.Zero) }
+                    var addTripMediaPosInRoot by remember { mutableStateOf(Offset.Zero) }
+
+                    fun globalOffset(posInRoot: Offset, localTap: Offset): IntOffset {
+                        val x = (posInRoot.x + localTap.x).toInt()
+                        val y = (posInRoot.y + localTap.y).toInt()
+                        return IntOffset(x, y)
+                    }
+
                     Column(
                         modifier = Modifier
                             .matchParentSize()
@@ -2558,7 +2777,13 @@ private fun StoreThumbnailButton(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth()
-                                .clickable(enabled = enabled) { onAddTrip() },
+                                .onGloballyPositioned { addTripPosInRoot = it.positionInRoot() }
+                                .pointerInput(enabled) {
+                                    if (!enabled) return@pointerInput
+                                    detectTapGestures(
+                                        onTap = { tap -> onAddTrip(globalOffset(addTripPosInRoot, tap)) },
+                                    )
+                                },
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxSize(),
@@ -2589,7 +2814,13 @@ private fun StoreThumbnailButton(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth()
-                                .clickable(enabled = enabled) { onAddTripWithMedia() },
+                                .onGloballyPositioned { addTripMediaPosInRoot = it.positionInRoot() }
+                                .pointerInput(enabled) {
+                                    if (!enabled) return@pointerInput
+                                    detectTapGestures(
+                                        onTap = { tap -> onAddTripWithMedia(globalOffset(addTripMediaPosInRoot, tap)) },
+                                    )
+                                },
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxSize(),
@@ -2653,8 +2884,8 @@ private suspend fun detectCurrentCityBestEffort(): String? {
             val a = list?.firstOrNull()
             val locality = a?.locality
             val municipality = a?.subAdminArea?.replace(" kommun", "")
-            val county = a?.adminArea
-            normalizeCityName(locality ?: municipality ?: county ?: "")
+            // Never fall back to county/adminArea here; it causes "Upplands län" style labels.
+            normalizeCityName(locality ?: municipality ?: "")
         }.getOrNull()
     }?.takeIf { it.isNotBlank() } ?: mostCommonActiveStoreCityOrNull()
 }

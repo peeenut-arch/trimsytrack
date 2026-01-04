@@ -20,6 +20,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -36,6 +37,19 @@ fun TripConfirmScreen(
 
     val state by vm.state.collectAsState()
     val notes = remember { mutableStateOf("") }
+    val context = LocalContext.current
+
+    fun showAddedToast() {
+        runCatching {
+            val now = java.time.Instant.now()
+            val time = java.time.LocalDateTime.ofInstant(now, java.time.ZoneId.systemDefault())
+                .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+            val date = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
+            val location = (state.storeName ?: "Trip").trim().ifBlank { "Trip" }
+            val msg = "Added ($location) ($time) ($date)"
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -98,7 +112,12 @@ fun TripConfirmScreen(
 
             Button(
                 enabled = state.canConfirm,
-                onClick = { vm.confirm(notes.value, onCreated = onAddTrip) },
+                onClick = {
+                    vm.confirm(notes.value) { tripId ->
+                        showAddedToast()
+                        onAddTrip(tripId)
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (state.isConfirming) "Saving…" else "Add trip")
@@ -108,7 +127,12 @@ fun TripConfirmScreen(
 
             Button(
                 enabled = state.canConfirm,
-                onClick = { vm.confirm(notes.value, onCreated = onAddTripWithMedia) },
+                onClick = {
+                    vm.confirm(notes.value) { tripId ->
+                        showAddedToast()
+                        onAddTripWithMedia(tripId)
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (state.isConfirming) "Saving…" else "Add trip & media")

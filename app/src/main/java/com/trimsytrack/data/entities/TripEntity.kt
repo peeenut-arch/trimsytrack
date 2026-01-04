@@ -30,6 +30,8 @@ data class TripEntity(
     // Destination stop (store)
     val storeId: String,
     val storeNameSnapshot: String,
+    /** City at the time the trip was created (used for grouping/search even if stores change). */
+    val citySnapshot: String,
     val storeLatSnapshot: Double,
     val storeLngSnapshot: Double,
 
@@ -52,4 +54,7 @@ data class TripEntity(
     // Future foundation
     val currencyCode: String?,
     val mileageRateMicros: Long?,
+
+    // Optional receipts/fees
+    val parkingTrafficFeeMinor: Int? = null,
 )

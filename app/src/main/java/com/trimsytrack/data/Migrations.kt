@@ -183,4 +183,113 @@ object Migrations {
             db.execSQL("CREATE INDEX IF NOT EXISTS index_stores_profileId_regionCode ON stores(profileId, regionCode)")
         }
     }
+
+    val MIGRATION_6_7 = object : Migration(6, 7) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Trips: optional parking/traffic fee amount stored in minor units (e.g. cents).
+            db.execSQL("ALTER TABLE trips ADD COLUMN parkingTrafficFeeMinor INTEGER")
+        }
+    }
+
+    val MIGRATION_7_8 = object : Migration(7, 8) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Trips: snapshot the destination city so Journal grouping doesn't depend on the stores table.
+            db.execSQL("ALTER TABLE trips ADD COLUMN citySnapshot TEXT NOT NULL DEFAULT ''")
+        }
+    }
+
+    val MIGRATION_8_9 = object : Migration(8, 9) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Backfill citySnapshot for existing trips where possible.
+            // Stores are profile-scoped, so join on (profileId, storeId).
+            db.execSQL(
+                """
+                UPDATE trips
+                SET citySnapshot = COALESCE(
+                    (
+                        SELECT NULLIF(TRIM(s.city), '')
+                        FROM stores s
+                        WHERE s.profileId = trips.profileId
+                          AND s.id = trips.storeId
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT NULLIF(TRIM(s2.city), '')
+                        FROM stores s2
+                        WHERE s2.profileId = ''
+                          AND s2.id = trips.storeId
+                        LIMIT 1
+                    ),
+                    ''
+                )
+                WHERE (citySnapshot IS NULL OR citySnapshot = '')
+                """.trimIndent()
+            )
+        }
+    }
+
+    val MIGRATION_9_10 = object : Migration(9, 10) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Canonical default profile id in code is "default".
+            // Older databases used profileId = '' for legacy rows; "claim" those rows once.
+
+            // stores: avoid primary key conflicts by copying then deleting legacy rows.
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO stores (
+                    profileId,
+                    id,
+                    name,
+                    lat,
+                    lng,
+                    radiusMeters,
+                    regionCode,
+                    city,
+                    isActive,
+                    isFavorite
+                )
+                SELECT
+                    'default',
+                    id,
+                    name,
+                    lat,
+                    lng,
+                    radiusMeters,
+                    regionCode,
+                    city,
+                    isActive,
+                    isFavorite
+                FROM stores
+                WHERE profileId = ''
+                """.trimIndent()
+            )
+            db.execSQL("DELETE FROM stores WHERE profileId = ''")
+
+            // Remaining tables: profileId isn't part of the primary key, so UPDATE is safe.
+            db.execSQL("UPDATE trips SET profileId = 'default' WHERE profileId = ''")
+            db.execSQL("UPDATE prompt_events SET profileId = 'default' WHERE profileId = ''")
+            db.execSQL("UPDATE attachments SET profileId = 'default' WHERE profileId = ''")
+            db.execSQL("UPDATE runs SET profileId = 'default' WHERE profileId = ''")
+            db.execSQL("UPDATE sync_outbox SET profileId = 'default' WHERE profileId = ''")
+            db.execSQL("UPDATE distance_cache SET profileId = 'default' WHERE profileId = ''")
+
+            // Now that stores are visible under the default profile, backfill citySnapshot again.
+            db.execSQL(
+                """
+                UPDATE trips
+                SET citySnapshot = COALESCE(
+                    (
+                        SELECT NULLIF(TRIM(s.city), '')
+                        FROM stores s
+                        WHERE s.profileId = trips.profileId
+                          AND s.id = trips.storeId
+                        LIMIT 1
+                    ),
+                    ''
+                )
+                WHERE (citySnapshot IS NULL OR citySnapshot = '')
+                """.trimIndent()
+            )
+        }
+    }
 }

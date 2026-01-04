@@ -11,6 +11,7 @@ import com.trimsytrack.R
 object Notifications {
     const val CHANNEL_PROMPTS = "prompts"
     const val CHANNEL_LOCATION_PING = "location_ping"
+    const val CHANNEL_RECEIPT_REMINDER = "receipt_reminder"
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -28,6 +29,14 @@ object Notifications {
             NotificationChannel(
                 CHANNEL_LOCATION_PING,
                 "Location ping",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            )
+        )
+
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_RECEIPT_REMINDER,
+                "Receipt Reminder",
                 NotificationManager.IMPORTANCE_DEFAULT,
             )
         )

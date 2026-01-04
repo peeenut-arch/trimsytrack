@@ -1,10 +1,13 @@
 package com.trimsytrack.ui.theme
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
 
 private val TrimsyLightColors = lightColorScheme(
     // Home tile accents (Manual / Review / Journal)
@@ -70,13 +73,26 @@ private val TrimsyDarkColors = darkColorScheme(
     scrim = Color.Black,
 )
 
+private val OldUiShapes = Shapes()
+
+private val NewUiShapes = Shapes(
+    // Modern minimal: visibly softer corners throughout the UI.
+    extraSmall = RoundedCornerShape(16.dp),
+    small = RoundedCornerShape(20.dp),
+    medium = RoundedCornerShape(24.dp),
+    large = RoundedCornerShape(32.dp),
+    extraLarge = RoundedCornerShape(40.dp),
+)
+
 @Composable
 fun TrimsyTheme(
     darkTheme: Boolean,
+    useNewUi: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     MaterialTheme(
         colorScheme = if (darkTheme) TrimsyDarkColors else TrimsyLightColors,
+        shapes = if (useNewUi) NewUiShapes else OldUiShapes,
         content = content,
     )
 }

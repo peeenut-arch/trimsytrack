@@ -6,7 +6,13 @@ import com.trimsytrack.distance.RoutesDistanceService
 import java.time.Instant
 import kotlin.math.roundToInt
 import kotlin.math.ceil
+import kotlin.math.cos
+import kotlin.math.atan2
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 
 class DistanceRepository(
     private val dao: DistanceCacheDao,
@@ -20,6 +26,23 @@ class DistanceRepository(
         val source: String,
     )
 
+    fun estimateStraightLineRoute(
+        startLat: Double,
+        startLng: Double,
+        destLat: Double,
+        destLng: Double,
+        assumedKmh: Double = 50.0,
+    ): RouteMetrics {
+        val meters = haversineDistanceMeters(startLat, startLng, destLat, destLng)
+        val minutes = ceil(((meters / 1000.0) / assumedKmh) * 60.0).toInt().coerceAtLeast(0)
+        return RouteMetrics(
+            distanceMeters = meters,
+            durationMinutes = minutes,
+            routePolyline = null,
+            source = "STRAIGHT_LINE",
+        )
+    }
+
     suspend fun getOrComputeDrivingRoute(
         startLat: Double,
         startLng: Double,
@@ -28,60 +51,62 @@ class DistanceRepository(
         startLocationId: String? = null,
         endLocationId: String? = null,
     ): RouteMetrics {
-        val profileId = settings.profileId.first().ifBlank { "default" }
-        // 1) Prefer stable location IDs when present.
-        if (!startLocationId.isNullOrBlank() && !endLocationId.isNullOrBlank()) {
-            val cachedById = dao.findByLocationIds(profileId, startLocationId, endLocationId, "DRIVE")
-            if (cachedById != null) {
-                return RouteMetrics(
-                    distanceMeters = cachedById.distanceMeters,
-                    durationMinutes = cachedById.durationMinutes,
-                    routePolyline = cachedById.routePolyline,
-                    source = cachedById.source,
+        return withContext(Dispatchers.IO) {
+            val profileId = settings.profileId.first().ifBlank { "default" }
+            // 1) Prefer stable location IDs when present.
+            if (!startLocationId.isNullOrBlank() && !endLocationId.isNullOrBlank()) {
+                val cachedById = dao.findByLocationIds(profileId, startLocationId, endLocationId, "DRIVE")
+                if (cachedById != null) {
+                    return@withContext RouteMetrics(
+                        distanceMeters = cachedById.distanceMeters,
+                        durationMinutes = cachedById.durationMinutes,
+                        routePolyline = cachedById.routePolyline,
+                        source = cachedById.source,
+                    )
+                }
+            }
+
+            // 2) Fallback to coordinate quantization for cases without stable IDs.
+            val key = QuantizedLatLngPair(startLat, startLng, destLat, destLng)
+            val cached = dao.find(profileId, key.startLatE5, key.startLngE5, key.destLatE5, key.destLngE5, "DRIVE")
+            if (cached != null) {
+                return@withContext RouteMetrics(
+                    distanceMeters = cached.distanceMeters,
+                    durationMinutes = cached.durationMinutes,
+                    routePolyline = cached.routePolyline,
+                    source = cached.source,
                 )
             }
-        }
 
-        // 2) Fallback to coordinate quantization for cases without stable IDs.
-        val key = QuantizedLatLngPair(startLat, startLng, destLat, destLng)
-        val cached = dao.find(profileId, key.startLatE5, key.startLngE5, key.destLatE5, key.destLngE5, "DRIVE")
-        if (cached != null) {
-            return RouteMetrics(
-                distanceMeters = cached.distanceMeters,
-                durationMinutes = cached.durationMinutes,
-                routePolyline = cached.routePolyline,
-                source = cached.source,
+            // 3) Cache miss => compute externally ONCE and persist.
+            val computed = routes.computeDrivingRoute(startLat, startLng, destLat, destLng)
+            val minutes = ceil(computed.durationSeconds / 60.0).toInt().coerceAtLeast(0)
+
+            dao.upsert(
+                DistanceCacheEntity(
+                    profileId = profileId,
+                    startLocationId = startLocationId,
+                    endLocationId = endLocationId,
+                    startLatE5 = key.startLatE5,
+                    startLngE5 = key.startLngE5,
+                    destLatE5 = key.destLatE5,
+                    destLngE5 = key.destLngE5,
+                    travelMode = "DRIVE",
+                    distanceMeters = computed.distanceMeters,
+                    durationMinutes = minutes,
+                    routePolyline = computed.routePolyline,
+                    source = "GOOGLE",
+                    createdAt = Instant.now(),
+                )
             )
-        }
 
-        // 3) Cache miss => compute externally ONCE and persist.
-        val computed = routes.computeDrivingRoute(startLat, startLng, destLat, destLng)
-        val minutes = ceil(computed.durationSeconds / 60.0).toInt().coerceAtLeast(0)
-
-        dao.upsert(
-            DistanceCacheEntity(
-                profileId = profileId,
-                startLocationId = startLocationId,
-                endLocationId = endLocationId,
-                startLatE5 = key.startLatE5,
-                startLngE5 = key.startLngE5,
-                destLatE5 = key.destLatE5,
-                destLngE5 = key.destLngE5,
-                travelMode = "DRIVE",
+            RouteMetrics(
                 distanceMeters = computed.distanceMeters,
                 durationMinutes = minutes,
                 routePolyline = computed.routePolyline,
                 source = "GOOGLE",
-                createdAt = Instant.now(),
             )
-        )
-
-        return RouteMetrics(
-            distanceMeters = computed.distanceMeters,
-            durationMinutes = minutes,
-            routePolyline = computed.routePolyline,
-            source = "GOOGLE",
-        )
+        }
     }
 
     // Back-compat: callers that only want meters.
@@ -119,4 +144,15 @@ private data class QuantizedLatLngPair(
         destLatE5 = (destLat * 1e5).roundToInt(),
         destLngE5 = (destLng * 1e5).roundToInt(),
     )
+}
+
+private fun haversineDistanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Int {
+    val r = 6371000.0
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a =
+        sin(dLat / 2) * sin(dLat / 2) +
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2) * sin(dLon / 2)
+    val c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return (r * c).roundToInt().coerceAtLeast(0)
 }

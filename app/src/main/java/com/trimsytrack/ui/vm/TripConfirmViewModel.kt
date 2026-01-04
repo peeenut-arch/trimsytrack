@@ -208,19 +208,33 @@ class TripConfirmViewModel(
             _state.update { it.copy(isConfirming = true, error = null) }
 
             try {
-                val route = AppGraph.distanceRepository.getOrComputeDrivingRoute(
-                    startLat = startLat,
-                    startLng = startLng,
-                    destLat = destLat,
-                    destLng = destLng,
-                    startLocationId = s.startStoreId,
-                    endLocationId = store,
-                )
+                val route = runCatching {
+                    AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                        startLat = startLat,
+                        startLng = startLng,
+                        destLat = destLat,
+                        destLng = destLng,
+                        startLocationId = s.startStoreId,
+                        endLocationId = store,
+                    )
+                }.getOrElse {
+                    AppGraph.distanceRepository.estimateStraightLineRoute(
+                        startLat = startLat,
+                        startLng = startLng,
+                        destLat = destLat,
+                        destLng = destLng,
+                    )
+                }
 
                 val now = Instant.now()
                 val createdAt = promptTriggeredAt ?: now
                 val day = promptDay ?: LocalDate.now()
                 val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+                val citySnapshot = runCatching {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        AppGraph.storeRepository.getStore(store)?.city
+                    }
+                }.getOrNull().orEmpty()
                 val tripId = AppGraph.tripRepository.createTrip(
                     TripEntity(
                         profileId = profileId,
@@ -228,6 +242,7 @@ class TripConfirmViewModel(
                         day = day,
                         storeId = store,
                         storeNameSnapshot = storeName,
+                        citySnapshot = citySnapshot,
                         storeLatSnapshot = destLat,
                         storeLngSnapshot = destLng,
                         startLabelSnapshot = s.startLabel ?: "",
