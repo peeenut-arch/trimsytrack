@@ -54,7 +54,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.entities.StoreEntity
-import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.data.entities.VisitedStoreEntity
 import com.trimsytrack.distance.MapsKeyProvider
 import com.trimsytrack.util.PlaceNameNormalizer
 import kotlinx.coroutines.launch
@@ -88,13 +88,25 @@ fun SavedStoresScreen(
     val profileId by AppGraph.settings.profileId.collectAsState(initial = "")
     val effectiveProfileId = profileId.ifBlank { "default" }
     val stores by AppGraph.db.storeDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
-    val trips by AppGraph.db.tripDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
+    val visitedStores by AppGraph.db.visitedStoreDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
+
+    fun canonicalizeStoreId(storeId: String): String {
+        return when {
+            storeId.startsWith("gmap_search_") -> "gmap_" + storeId.removePrefix("gmap_search_")
+            storeId.startsWith("gmap_interest_") -> "gmap_" + storeId.removePrefix("gmap_interest_")
+            else -> storeId
+        }
+    }
 
     // Permanent removal from the Visited Stores list (persisted in DataStore).
     val persistedRemovedIds by AppGraph.settings.visitedHiddenStoreIds.collectAsState(initial = emptySet())
     var optimisticRemovedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val removedVisitedStoreIds = remember(persistedRemovedIds, optimisticRemovedIds) {
-        persistedRemovedIds + optimisticRemovedIds
+        // Canonicalize so legacy stored ids (e.g. gmap_search_*) still match current visited rows.
+        (persistedRemovedIds + optimisticRemovedIds)
+            .asSequence()
+            .map { canonicalizeStoreId(it) }
+            .toSet()
     }
 
     var searchText by remember { mutableStateOf("") }
@@ -116,16 +128,15 @@ fun SavedStoresScreen(
     // Details dialog on tap.
     var detailsStore by remember { mutableStateOf<VisitedStoreRow?>(null) }
 
-    val storeById = remember(stores) { stores.associateBy { it.id } }
+    val storeById = remember(stores) {
+        stores.associateBy { canonicalizeStoreId(it.id) }
+    }
 
-    val customStores = remember(stores) { stores.filter { it.regionCode == CUSTOM_REGION_CODE } }
-
-    val visitedRows = remember(trips, storeById, removedVisitedStoreIds) {
+    val visitedRows = remember(visitedStores, storeById, removedVisitedStoreIds) {
         buildVisitedStoreRows(
-            trips = trips,
+            visitedStores = visitedStores,
             storeById = storeById,
             excludedVisitedStoreIds = removedVisitedStoreIds,
-            customStores = customStores,
         )
     }
 
@@ -199,6 +210,7 @@ fun SavedStoresScreen(
     val addPlaceResult: (PlaceSearchResult) -> Unit = { place ->
         scope.launch {
             val storeId = "gmap_${place.placeId}"
+            val canonicalStoreId = canonicalizeStoreId(storeId)
 
             val resolvedCity = place.city.trim().ifBlank {
                 resolveCity(
@@ -230,8 +242,20 @@ fun SavedStoresScreen(
                     )
                 )
             )
-            optimisticRemovedIds = optimisticRemovedIds - storeId
-            AppGraph.settings.setVisitedStoreHidden(storeId, false)
+
+            // Preserve existing UX: manually adding a store to this screen implies it's "visited".
+            AppGraph.db.visitedStoreDao().markVisitedOnce(
+                profileId = effectiveProfileId,
+                storeId = canonicalStoreId,
+                visitedAt = System.currentTimeMillis(),
+                name = normalizedName,
+                city = resolvedCity,
+                lat = place.lat,
+                lng = place.lng,
+            )
+
+            optimisticRemovedIds = optimisticRemovedIds - canonicalStoreId
+            AppGraph.settings.setVisitedStoreHidden(canonicalStoreId, false)
             searchText = ""
             selectedSearchPlace = null
             searchResults = emptyList()
@@ -432,12 +456,13 @@ fun SavedStoresScreen(
                 TextButton(
                     onClick = {
                         val storeId = pending.storeId
-                        optimisticRemovedIds = optimisticRemovedIds + storeId
+                        val canonicalStoreId = canonicalizeStoreId(storeId)
+                        optimisticRemovedIds = optimisticRemovedIds + canonicalStoreId
                         confirmDeleteStore = null
                         revealedDeleteStoreId = null
                         scope.launch {
-                            AppGraph.settings.setVisitedStoreHidden(storeId, true)
-                            optimisticRemovedIds = optimisticRemovedIds - storeId
+                            AppGraph.settings.setVisitedStoreHidden(canonicalStoreId, true)
+                            optimisticRemovedIds = optimisticRemovedIds - canonicalStoreId
                         }
                     },
                 ) { Text("Yes") }
@@ -534,8 +559,9 @@ fun SavedStoresScreen(
                                     )
                                 )
                             )
-                            optimisticRemovedIds = optimisticRemovedIds - storeId
-                            AppGraph.settings.setVisitedStoreHidden(storeId, false)
+                            val canonicalStoreId = canonicalizeStoreId(storeId)
+                            optimisticRemovedIds = optimisticRemovedIds - canonicalStoreId
+                            AppGraph.settings.setVisitedStoreHidden(canonicalStoreId, false)
                             showManualAddDialog = false
                             searchText = ""
                             selectedSearchPlace = null
@@ -731,80 +757,31 @@ private data class VisitedStoreRow(
     val isFavorite: Boolean,
 )
 
-private fun canonicalizeStoreId(storeId: String): String {
-    return when {
-        storeId.startsWith("gmap_search_") -> "gmap_" + storeId.removePrefix("gmap_search_")
-        storeId.startsWith("gmap_interest_") -> "gmap_" + storeId.removePrefix("gmap_interest_")
-        else -> storeId
-    }
-}
-
 private fun buildVisitedStoreRows(
-    trips: List<TripEntity>,
+    visitedStores: List<VisitedStoreEntity>,
     storeById: Map<String, StoreEntity>,
     excludedVisitedStoreIds: Set<String>,
-    customStores: List<StoreEntity>,
 ): List<VisitedStoreRow> {
-    val visitCounts = mutableMapOf<String, Int>()
-    val latestTripByStore = linkedMapOf<String, TripEntity>()
-
-    for (trip in trips) {
-        val canonicalStoreId = canonicalizeStoreId(trip.storeId)
-        visitCounts[canonicalStoreId] = (visitCounts[canonicalStoreId] ?: 0) + 1
-        val existing = latestTripByStore[canonicalStoreId]
-        if (existing == null || trip.createdAt.isAfter(existing.createdAt)) {
-            latestTripByStore[canonicalStoreId] = trip
-        }
-    }
-
-    val customRows = customStores
+    return visitedStores
         .asSequence()
-        .filterNot {
-            excludedVisitedStoreIds.contains(it.id) ||
-                excludedVisitedStoreIds.contains(canonicalizeStoreId(it.id))
-        }
-        .map { store ->
-            val canonicalStoreId = canonicalizeStoreId(store.id)
+        .filterNot { v -> excludedVisitedStoreIds.contains(v.storeId) }
+        .map { v ->
+            val store = storeById[v.storeId]
+            val name = store?.name?.trim().orEmpty().ifBlank { v.lastStoreNameSnapshot.trim() }
+            val city = store?.city?.trim().orEmpty().ifBlank { v.lastCitySnapshot.trim() }
             VisitedStoreRow(
-                storeId = canonicalStoreId,
-                name = store.name,
-                city = store.city,
-                lat = store.lat,
-                lng = store.lng,
-                visitCount = visitCounts[canonicalStoreId] ?: 0,
-                isFavorite = store.isFavorite,
-            )
-        }
-        .toList()
-
-    val tripRows = latestTripByStore.entries
-        .asSequence()
-        .filterNot { (canonicalStoreId, trip) ->
-            excludedVisitedStoreIds.contains(canonicalStoreId) || excludedVisitedStoreIds.contains(trip.storeId)
-        }
-        .mapNotNull { (canonicalStoreId, trip) ->
-            val store = storeById[canonicalStoreId] ?: storeById[trip.storeId]
-            val name = trip.storeNameSnapshot.trim().ifBlank { store?.name.orEmpty() }
-            // Keep the visited list focused; custom-added stores are always included separately.
-            if (!isSecondHandOrLoppisName(name)) return@mapNotNull null
-
-            val city = trip.citySnapshot.trim().ifBlank { store?.city.orEmpty() }
-            VisitedStoreRow(
-                storeId = canonicalStoreId,
-                name = name.ifBlank { trip.storeId },
+                storeId = v.storeId,
+                name = name.ifBlank { v.storeId },
                 city = city,
-                lat = store?.lat ?: trip.storeLatSnapshot,
-                lng = store?.lng ?: trip.storeLngSnapshot,
-                visitCount = visitCounts[canonicalStoreId] ?: 1,
+                lat = store?.lat ?: v.lastLatSnapshot,
+                lng = store?.lng ?: v.lastLngSnapshot,
+                visitCount = v.visitCount,
                 isFavorite = store?.isFavorite ?: false,
             )
         }
-
-    return (customRows + tripRows)
-        .distinctBy { it.storeId }
         .sortedWith(
             compareBy<VisitedStoreRow, String>(String.CASE_INSENSITIVE_ORDER) { it.city }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
         )
         .toList()
 }
@@ -829,17 +806,3 @@ private interface VisitedStoresPlacesSearchApi {
 }
 
 private const val CUSTOM_REGION_CODE = "custom"
-
-private fun isSecondHandOrLoppisName(name: String): Boolean {
-    val n = name.trim().lowercase()
-    if (n.isBlank()) return false
-
-    return n.contains("loppis") ||
-        n.contains("loppmarknad") ||
-        n.contains("second") ||
-        n.contains("thrift") ||
-        n.contains("begagn") ||
-        n.contains("secondhand") ||
-        n.contains("\u00e5terbruk") ||
-        n.contains("aterbruk")
-}

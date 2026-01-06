@@ -292,4 +292,209 @@ object Migrations {
             )
         }
     }
+
+    val MIGRATION_10_11 = object : Migration(10, 11) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Persistent, monotonic visited stores table.
+            // Rule: once a store is visited, it stays visited forever (independent of trip deletions).
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS visited_stores (
+                    profileId TEXT NOT NULL,
+                    storeId TEXT NOT NULL,
+                    firstVisitedAt INTEGER NOT NULL,
+                    lastVisitedAt INTEGER NOT NULL,
+                    visitCount INTEGER NOT NULL,
+                    lastStoreNameSnapshot TEXT NOT NULL,
+                    lastCitySnapshot TEXT NOT NULL,
+                    lastLatSnapshot REAL NOT NULL,
+                    lastLngSnapshot REAL NOT NULL,
+                    PRIMARY KEY(profileId, storeId)
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_visited_stores_profileId_lastVisitedAt ON visited_stores(profileId, lastVisitedAt)")
+
+            // Backfill from existing trips.
+            // Canonicalize storeId so gmap_search_* and gmap_interest_* collapse to gmap_*.
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO visited_stores(
+                    profileId,
+                    storeId,
+                    firstVisitedAt,
+                    lastVisitedAt,
+                    visitCount,
+                    lastStoreNameSnapshot,
+                    lastCitySnapshot,
+                    lastLatSnapshot,
+                    lastLngSnapshot
+                )
+                SELECT
+                    t.profileId,
+                    CASE
+                        WHEN t.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(t.storeId, 13)
+                        WHEN t.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(t.storeId, 15)
+                        ELSE t.storeId
+                    END AS canonicalStoreId,
+                    MIN(t.createdAt) AS firstVisitedAt,
+                    MAX(t.createdAt) AS lastVisitedAt,
+                    COUNT(*) AS visitCount,
+                    '' AS lastStoreNameSnapshot,
+                    '' AS lastCitySnapshot,
+                    0.0 AS lastLatSnapshot,
+                    0.0 AS lastLngSnapshot
+                FROM trips t
+                WHERE t.storeId IS NOT NULL AND TRIM(t.storeId) <> ''
+                GROUP BY t.profileId, canonicalStoreId
+                """.trimIndent()
+            )
+
+            // Fill latest snapshot fields from the most recent trip for each canonical store id.
+            db.execSQL(
+                """
+                UPDATE visited_stores
+                SET
+                    lastStoreNameSnapshot = COALESCE((
+                        SELECT tt.storeNameSnapshot
+                        FROM trips tt
+                        WHERE tt.profileId = visited_stores.profileId
+                          AND (
+                            CASE
+                                WHEN tt.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(tt.storeId, 13)
+                                WHEN tt.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(tt.storeId, 15)
+                                ELSE tt.storeId
+                            END
+                          ) = visited_stores.storeId
+                        ORDER BY tt.createdAt DESC, tt.id DESC
+                        LIMIT 1
+                    ), ''),
+                    lastCitySnapshot = COALESCE((
+                        SELECT tt.citySnapshot
+                        FROM trips tt
+                        WHERE tt.profileId = visited_stores.profileId
+                          AND (
+                            CASE
+                                WHEN tt.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(tt.storeId, 13)
+                                WHEN tt.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(tt.storeId, 15)
+                                ELSE tt.storeId
+                            END
+                          ) = visited_stores.storeId
+                        ORDER BY tt.createdAt DESC, tt.id DESC
+                        LIMIT 1
+                    ), ''),
+                    lastLatSnapshot = COALESCE((
+                        SELECT tt.storeLatSnapshot
+                        FROM trips tt
+                        WHERE tt.profileId = visited_stores.profileId
+                          AND (
+                            CASE
+                                WHEN tt.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(tt.storeId, 13)
+                                WHEN tt.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(tt.storeId, 15)
+                                ELSE tt.storeId
+                            END
+                          ) = visited_stores.storeId
+                        ORDER BY tt.createdAt DESC, tt.id DESC
+                        LIMIT 1
+                    ), 0.0),
+                    lastLngSnapshot = COALESCE((
+                        SELECT tt.storeLngSnapshot
+                        FROM trips tt
+                        WHERE tt.profileId = visited_stores.profileId
+                          AND (
+                            CASE
+                                WHEN tt.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(tt.storeId, 13)
+                                WHEN tt.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(tt.storeId, 15)
+                                ELSE tt.storeId
+                            END
+                          ) = visited_stores.storeId
+                        ORDER BY tt.createdAt DESC, tt.id DESC
+                        LIMIT 1
+                    ), 0.0)
+                """.trimIndent()
+            )
+
+            // Keep visited_stores up-to-date for all future trip inserts.
+            // NOTE: we intentionally do NOT delete visited rows when trips are deleted.
+            db.execSQL("DROP TRIGGER IF EXISTS trg_trips_insert_visited_stores")
+            db.execSQL(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_trips_insert_visited_stores
+                AFTER INSERT ON trips
+                BEGIN
+                    INSERT INTO visited_stores(
+                        profileId,
+                        storeId,
+                        firstVisitedAt,
+                        lastVisitedAt,
+                        visitCount,
+                        lastStoreNameSnapshot,
+                        lastCitySnapshot,
+                        lastLatSnapshot,
+                        lastLngSnapshot
+                    ) VALUES (
+                        NEW.profileId,
+                        CASE
+                            WHEN NEW.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(NEW.storeId, 13)
+                            WHEN NEW.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(NEW.storeId, 15)
+                            ELSE NEW.storeId
+                        END,
+                        NEW.createdAt,
+                        NEW.createdAt,
+                        1,
+                        COALESCE(NEW.storeNameSnapshot, ''),
+                        COALESCE(NEW.citySnapshot, ''),
+                        COALESCE(NEW.storeLatSnapshot, 0.0),
+                        COALESCE(NEW.storeLngSnapshot, 0.0)
+                    )
+                    ON CONFLICT(profileId, storeId) DO UPDATE SET
+                        firstVisitedAt = CASE WHEN NEW.createdAt < firstVisitedAt THEN NEW.createdAt ELSE firstVisitedAt END,
+                        lastVisitedAt = CASE WHEN NEW.createdAt > lastVisitedAt THEN NEW.createdAt ELSE lastVisitedAt END,
+                        visitCount = visitCount + 1,
+                        lastStoreNameSnapshot = CASE WHEN NEW.createdAt >= lastVisitedAt THEN COALESCE(NEW.storeNameSnapshot, '') ELSE lastStoreNameSnapshot END,
+                        lastCitySnapshot = CASE WHEN NEW.createdAt >= lastVisitedAt THEN COALESCE(NEW.citySnapshot, '') ELSE lastCitySnapshot END,
+                        lastLatSnapshot = CASE WHEN NEW.createdAt >= lastVisitedAt THEN COALESCE(NEW.storeLatSnapshot, 0.0) ELSE lastLatSnapshot END,
+                        lastLngSnapshot = CASE WHEN NEW.createdAt >= lastVisitedAt THEN COALESCE(NEW.storeLngSnapshot, 0.0) ELSE lastLngSnapshot END;
+                END
+                """.trimIndent()
+            )
+
+            // Defensive: if some code path only UPDATEs an existing trip row (shouldn't happen for a new trip),
+            // ensure a visited row exists without double-counting.
+            db.execSQL("DROP TRIGGER IF EXISTS trg_trips_update_visited_stores")
+            db.execSQL(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_trips_update_visited_stores
+                AFTER UPDATE ON trips
+                BEGIN
+                    INSERT OR IGNORE INTO visited_stores(
+                        profileId,
+                        storeId,
+                        firstVisitedAt,
+                        lastVisitedAt,
+                        visitCount,
+                        lastStoreNameSnapshot,
+                        lastCitySnapshot,
+                        lastLatSnapshot,
+                        lastLngSnapshot
+                    ) VALUES (
+                        NEW.profileId,
+                        CASE
+                            WHEN NEW.storeId LIKE 'gmap_search_%' THEN 'gmap_' || substr(NEW.storeId, 13)
+                            WHEN NEW.storeId LIKE 'gmap_interest_%' THEN 'gmap_' || substr(NEW.storeId, 15)
+                            ELSE NEW.storeId
+                        END,
+                        NEW.createdAt,
+                        NEW.createdAt,
+                        1,
+                        COALESCE(NEW.storeNameSnapshot, ''),
+                        COALESCE(NEW.citySnapshot, ''),
+                        COALESCE(NEW.storeLatSnapshot, 0.0),
+                        COALESCE(NEW.storeLngSnapshot, 0.0)
+                    );
+                END
+                """.trimIndent()
+            )
+        }
+    }
 }

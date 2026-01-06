@@ -8,6 +8,10 @@
         android:name="com.trimsytrack.permission.READ_EVIDENCE"
         android:protectionLevel="signature" />
 
+    <permission
+        android:name="com.trimsytrack.permission.READ_VISITED_STORES"
+        android:protectionLevel="signature" />
+
     <uses-permission android:name="android.permission.INTERNET" />
 
     <uses-permission android:name="android.permission.CAMERA" />
@@ -55,6 +59,13 @@
             android:exported="true"
             android:grantUriPermissions="true"
             android:readPermission="com.trimsytrack.permission.READ_EVIDENCE" />
+
+        <provider
+            android:name=".export.VisitedStoresProvider"
+            android:authorities="${applicationId}.visitedstores"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:readPermission="com.trimsytrack.permission.READ_VISITED_STORES" />
 
         <activity
             android:name=".ui.MainActivity"

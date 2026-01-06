@@ -199,6 +199,33 @@ Deduping rule for TrimsyApp:
   - attachments: `(profileId, evidenceId)`
 - Only copy files that are not present in the manifest; update the manifest after a successful copy.
 
+### 12.5 Visited Stores pull contract (TrimsyApp)
+- Visited stores can be pulled by the companion app via a **signature-protected** content provider:
+  - Provider authority: `content://<applicationId>.visitedstores`
+  - This provider uses the current active `profileId` (falls back to `default`).
+- Endpoints:
+  - Meta (lightweight change detector): `content://<applicationId>.visitedstores/meta`
+    - Columns: `profileId`, `storeCount`, `maxLastVisitedAtMillis`
+    - Purpose: TrimsyApp can determine if anything changed since last sync.
+  - Full or incremental list: `content://<applicationId>.visitedstores/stores`
+    - Optional filter: `?since=<epochMillis>` returns only rows with `last_visited_at_millis > since`.
+    - Ordering: stable/deterministic (sorted by `store_id`).
+- Store payload columns (per row):
+  - Identity: `store_id` (stable, canonical)
+  - Monotonic visit facts: `first_visited_at_millis`, `last_visited_at_millis`, `visit_count`
+  - Store data for syncing a store list: `name`, `city`, `lat`, `lng`, `radius_meters`, `is_favorite`
+  - Deterministic version: `version` (hash of the returned payload for that store)
+
+Determinism & idempotency rules:
+- Same request  same response (given unchanged DB state).
+- Provider never pushes; TrimsyApp controls when reads happen.
+- Reads have no side effects.
+
+Recommended TrimsyApp sync flow:
+- Query `.../meta` daily and compare `(storeCount, maxLastVisitedAtMillis)` to last stored values.
+- If changed, query `.../stores?since=<lastMaxLastVisitedAtMillis>` and upsert by `store_id`.
+- Optional: use `version` to skip writes when the payload is identical.
+
 - **Settings / preferences / caches**
   - Source of truth: local DataStore.
   - Sync:
@@ -206,6 +233,7 @@ Deduping rule for TrimsyApp:
   - Some caches are intentionally not included (e.g., driving distance cache).
 
 ### 12.3 Derived views
-- **Visited stores list** is derived from trips + stores and filtered by `visitedHiddenStoreIds`.
-  - There is no standalone “visited stores” object to sync.
-  - Cross-device consistency comes from syncing the underlying trips/stores and the filter setting.
+- **Visited stores list** is **persistent and monotonic** (once visited, always visited).
+  - Source of truth: local DB table `visited_stores`, updated whenever a trip is inserted.
+  - Filtered by `visitedHiddenStoreIds`.
+  - Cross-device consistency requires syncing the underlying trips (or the derived visited table) plus the filter setting.
