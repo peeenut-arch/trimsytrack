@@ -1,180 +1,6 @@
 /*
 import android.annotation.SuppressLint
 
-import android.location.Geocoder
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-        if (error != null) {
-            Text(
-                "Error: $error",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(bottom = 8.dp),
-            )
-        }
-
-        if (allCities.isNotEmpty()) {
-            Box {
-                OutlinedTextField(
-                    value = currentCity ?: "",
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("City") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { citySelectionExpanded = true },
-                    trailingIcon = {
-                        Icon(
-                            imageVector = Icons.Filled.ArrowDropDown,
-                            contentDescription = null,
-                        )
-                    },
-                )
-
-                DropdownMenu(
-                    expanded = citySelectionExpanded,
-                    onDismissRequest = { citySelectionExpanded = false },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    allCities.forEach { city ->
-                        DropdownMenuItem(
-                            text = { Text(city) },
-                            onClick = {
-                                currentCity = city
-                                citySelectionExpanded = false
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        val selectedCity = currentCity
-        val visibleStoresPolar = remember(storesPolar, selectedCity) {
-            val city = selectedCity?.trim().orEmpty()
-            if (city.isBlank()) storesPolar
-            else storesPolar.filter { it.store.city.equals(city, ignoreCase = true) }
-        }
-
-        // Show stores in a radial layout by direction/distance from user
-        if (userLocation == null) {
-            Text("Getting your location…", style = MaterialTheme.typography.bodyMedium)
-        } else if (visibleStoresPolar.isEmpty()) {
-            Text("No stores found.", style = MaterialTheme.typography.bodyMedium)
-        } else {
-            // Find max distance for scaling
-            val maxDist = visibleStoresPolar.maxOf { it.distance }.coerceAtLeast(1.0)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(340.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                visibleStoresPolar.forEach { (store, bearing, distance) ->
-                    // Map bearing (0=north) and distance to x/y
-                    val angleRad = Math.toRadians(bearing - 0.0) // 0 deg = north
-                    val radiusPx = 120 * (distance / maxDist).coerceIn(0.15, 1.0)
-                    val x = radiusPx * Math.sin(angleRad)
-                    val y = -radiusPx * Math.cos(angleRad)
-                    Box(
-                        modifier = Modifier
-                            .size(110.dp, 80.dp)
-                            .align(Alignment.Center)
-                            .padding(
-                                start = x.coerceAtLeast(0.0).dp,
-                                top = y.coerceAtLeast(0.0).dp,
-                            ),
-                    ) {
-                        val uri = storeImages[store.id]
-                        StoreThumbnailButton(
-                            name = store.name,
-                            imageUri = uri,
-                            defaultIcon = defaultIconForStoreName(store.name),
-                            distanceMeters = 0.0,
-                            tagLabel = null,
-                            tagColor = null,
-                            addedLabel = addedLabelFor(store.id, store.name),
-                            addLockedLabel = lockLabelFor(store.id),
-                            enabled = !isSaving,
-                            onSet = {},
-                            onClick = {
-                                val locked = lockLabelFor(store.id)
-                                if (!locked.isNullOrBlank()) {
-                                    error = "Trip recently added. $locked."
-                                    return@StoreThumbnailButton
-                                }
-                                scope.launch {
-                                    isSaving = true
-                                    error = null
-                                    try {
-                                        val tripId = createManualTripToStore(store = store)
-                                        onOpenTrip(tripId)
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        error = e.message ?: "Failed"
-                                    } finally {
-                                        isSaving = false
-                                    }
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-        }
-            } else {
-
-}
-                error = "Could not get your location. Please check location permissions and try again."
-                android.util.Log.e("ManualTripScreen", "Location unavailable")
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("ManualTripScreen", "Location error", e)
-            error = "Location error: ${e.message ?: e.javaClass.simpleName}"
-        }
-    }
-
-    // Calculate direction and distance for each store
-    data class StorePolar(val store: StoreEntity, val bearing: Double, val distance: Double)
-    val storesPolar = remember(activeStores to userLocation) {
-        val loc = userLocation
-        if (loc == null) return@remember emptyList()
-        val userLat = loc.first.toDouble()
-        val userLng = loc.second.toDouble()
-        activeStores.mapNotNull { store ->
             try {
                 val dLat = Math.toRadians(store.lat - userLat)
                 val dLng = Math.toRadians(store.lng - userLng)
@@ -387,7 +213,8 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
 
     runCatching {
         AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
-        AppGraph.backendSyncManager.scheduleImmediate("manual-trip")
+        // Trip creation should always attempt a backend flush, regardless of the user's periodic schedule.
+        AppGraph.backendSyncManager.scheduleNow("manual-trip")
     }
 
     return tripId
@@ -471,6 +298,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -481,6 +309,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -528,6 +357,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -536,14 +366,19 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -562,6 +397,7 @@ import com.trimsytrack.data.ManualTripCategoryConfig
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.distance.MapsKeyProvider
+import com.trimsytrack.util.PlaceNameNormalizer
 import java.time.Instant
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -586,9 +422,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.mapSaver
 import androidx.core.content.ContextCompat
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
+import androidx.activity.compose.BackHandler
 
 private data class StorePolar(
     val store: StoreEntity,
@@ -604,6 +442,14 @@ private data class ManualTripPlaceSearchItem(
     val lng: Double,
 )
 
+private fun canonicalizeStoreId(storeId: String): String {
+    return when {
+        storeId.startsWith("gmap_search_") -> "gmap_" + storeId.removePrefix("gmap_search_")
+        storeId.startsWith("gmap_interest_") -> "gmap_" + storeId.removePrefix("gmap_interest_")
+        else -> storeId
+    }
+}
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 fun ManualTripScreen(
@@ -612,8 +458,7 @@ fun ManualTripScreen(
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val focusManager = LocalFocusManager.current
-    val density = LocalDensity.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     fun hasLocationPermission(): Boolean {
         val ctx = AppGraph.appContext
@@ -649,7 +494,6 @@ fun ManualTripScreen(
         }
     }
 
-    val manualTripStoreSortMode by AppGraph.settings.manualTripStoreSortMode.collectAsState(initial = "NAME")
     val manualTripHiddenStoreIds by AppGraph.settings.manualTripHiddenStoreIds.collectAsState(initial = emptySet())
     val manualTripShowOnlineResults by AppGraph.settings.manualTripShowOnlineResults.collectAsState(initial = true)
 
@@ -713,17 +557,12 @@ fun ManualTripScreen(
     }
 
     var detectedCity by remember { mutableStateOf<String?>(null) }
-
-    var cityQuery by remember { mutableStateOf("") }
     var userEditedCityQuery by remember { mutableStateOf(false) }
     var searchSubmitTick by remember { mutableStateOf(0) }
     var lastSubmittedQuery by remember { mutableStateOf("") }
 
     var showSearchDialog by remember { mutableStateOf(false) }
-    var dialogSearchQuery by remember { mutableStateOf("") }
-
-    var searchSuggestionsExpanded by remember { mutableStateOf(false) }
-    var searchFieldSize by remember { mutableStateOf(IntSize.Zero) }
+    var dialogSearchValue by remember { mutableStateOf(TextFieldValue("")) }
 
     val expandedByCategoryLabel = rememberSaveable(
         saver = mapSaver(
@@ -750,6 +589,23 @@ fun ManualTripScreen(
     var manualSearchBusy by remember { mutableStateOf(false) }
     var manualSearchError by remember { mutableStateOf<String?>(null) }
     var manualSearchPlaces by remember { mutableStateOf<List<ManualTripPlaceSearchItem>>(emptyList()) }
+
+    val isSearchMode = remember(lastSubmittedQuery, manualSearchPlaces) {
+        lastSubmittedQuery.trim().length >= 2 || manualSearchPlaces.isNotEmpty()
+    }
+
+    fun exitSearchMode() {
+        addTripMenuStoreId = null
+        pendingOpenStoreId = null
+        manualSearchError = null
+        manualSearchPlaces = emptyList()
+        lastSubmittedQuery = ""
+        searchSubmitTick++
+    }
+
+    BackHandler(enabled = isSearchMode) {
+        exitSearchMode()
+    }
     var forceTypeRefreshTick by remember { mutableStateOf(0) }
     var initialInterestFetchDone by remember { mutableStateOf(false) }
     var searchRadiusMenuExpanded by remember { mutableStateOf(false) }
@@ -800,7 +656,8 @@ fun ManualTripScreen(
     LaunchedEffect(activeProfileId) {
         storeVisitCounts = runCatching {
             AppGraph.db.tripDao().getStoreVisitCounts(activeProfileId.ifBlank { "default" })
-                .associate { it.storeId to it.count }
+                .groupBy { canonicalizeStoreId(it.storeId) }
+                .mapValues { (_, rows) -> rows.sumOf { it.count } }
         }.getOrDefault(emptyMap())
     }
 
@@ -853,11 +710,6 @@ fun ManualTripScreen(
                 manualSearchPlaces = emptyList()
                 return@LaunchedEffect
             }
-
-            val originLat = userLocation?.first ?: businessHomeLat
-            val originLng = userLocation?.second ?: businessHomeLng
-
-            val geocodeQuery = stableQuery
 
             val raw = withContext(Dispatchers.IO) {
                 val body = buildJsonObject {
@@ -966,58 +818,97 @@ fun ManualTripScreen(
             val aggregated = LinkedHashMap<String, ManualTripPlaceSearchItem>()
 
             withContext(Dispatchers.IO) {
-                for (typeQuery in typeQueries) {
-                    val body = buildJsonObject {
-                        put("textQuery", JsonPrimitive(typeQuery))
-                        if (originLat != null && originLng != null) {
-                            put(
-                                "locationBias",
-                                buildJsonObject {
-                                    put(
-                                        "circle",
-                                        buildJsonObject {
-                                            put(
-                                                "center",
-                                                buildJsonObject {
-                                                    put("latitude", JsonPrimitive(originLat))
-                                                    put("longitude", JsonPrimitive(originLng))
-                                                }
-                                            )
-                                            put("radius", JsonPrimitive(biasRadiusMeters))
-                                        }
-                                    )
-                                }
-                            )
+                val postOmbudHostQueries = listOf(
+                    "ICA postombud",
+                    "Coop postombud",
+                    "Direkten postombud",
+                    "Pressbyrån postombud",
+                    "7-Eleven postombud",
+                    "Circle K postombud",
+                    "OKQ8 postombud",
+                    "Hemköp postombud",
+                    "Willys postombud",
+                    "City Gross postombud",
+                    "Snus Tobak postombud",
+                )
+
+                fun looksLikePostOmbudQuery(q: String): Boolean {
+                    val k = q.trim().lowercase()
+                    return k.contains("postombud") ||
+                        k.contains("paketombud") ||
+                        k.contains("ombud") ||
+                        k.contains("postnord") ||
+                        k.contains("dhl") ||
+                        k.contains("schenker")
+                }
+
+                loop@ for (typeQuery in typeQueries) {
+                    val queryVariants = if (looksLikePostOmbudQuery(typeQuery)) {
+                        (postOmbudHostQueries + listOf(
+                            "PostNord postombud",
+                            "DHL postombud",
+                            "Schenker postombud",
+                        )).distinct()
+                    } else {
+                        listOf(typeQuery)
+                    }
+
+                    for (textQuery in queryVariants) {
+                        val body = buildJsonObject {
+                            put("textQuery", JsonPrimitive(textQuery))
+                            if (originLat != null && originLng != null) {
+                                put(
+                                    "locationBias",
+                                    buildJsonObject {
+                                        put(
+                                            "circle",
+                                            buildJsonObject {
+                                                put(
+                                                    "center",
+                                                    buildJsonObject {
+                                                        put("latitude", JsonPrimitive(originLat))
+                                                        put("longitude", JsonPrimitive(originLng))
+                                                    }
+                                                )
+                                                put("radius", JsonPrimitive(biasRadiusMeters))
+                                            }
+                                        )
+                                    }
+                                )
+                            }
+                            put("regionCode", JsonPrimitive("SE"))
                         }
-                        put("regionCode", JsonPrimitive("SE"))
-                    }
 
-                    val raw = placesSearchApi.searchPlacesRaw(
-                        apiKey = apiKey,
-                        fieldMask = "places.id,places.displayName,places.formattedAddress,places.location",
-                        body = body.toString(),
-                    )
+                        val raw = placesSearchApi.searchPlacesRaw(
+                            apiKey = apiKey,
+                            fieldMask = "places.id,places.displayName,places.formattedAddress,places.location",
+                            body = body.toString(),
+                        )
 
-                    val root = placesJson.parseToJsonElement(raw).jsonObject
-                    val apiError = root["error"]?.jsonObject
-                    if (apiError != null) continue
+                        val root = placesJson.parseToJsonElement(raw).jsonObject
+                        val apiError = root["error"]?.jsonObject
+                        if (apiError != null) continue
 
-                    val places = root["places"]?.jsonArray ?: JsonArray(emptyList())
-                    val mapped = places.mapNotNull { el ->
-                        val obj = el.jsonObject
-                        val placeId = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                        val displayNameObj = obj["displayName"]?.jsonObject
-                        val name = displayNameObj?.get("text")?.jsonPrimitive?.content ?: return@mapNotNull null
-                        val address = obj["formattedAddress"]?.jsonPrimitive?.content
-                        val locObj = obj["location"]?.jsonObject ?: return@mapNotNull null
-                        val lat = locObj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
-                        val lng = locObj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
-                        ManualTripPlaceSearchItem(placeId = placeId, name = name, address = address, lat = lat, lng = lng)
-                    }
+                        val places = root["places"]?.jsonArray ?: JsonArray(emptyList())
+                        val mapped = places.mapNotNull { el ->
+                            val obj = el.jsonObject
+                            val placeId = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                            val displayNameObj = obj["displayName"]?.jsonObject
+                            val name = displayNameObj?.get("text")?.jsonPrimitive?.content ?: return@mapNotNull null
+                            val address = obj["formattedAddress"]?.jsonPrimitive?.content
+                            val locObj = obj["location"]?.jsonObject ?: return@mapNotNull null
+                            val lat = locObj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
+                            val lng = locObj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
+                            ManualTripPlaceSearchItem(placeId = placeId, name = name, address = address, lat = lat, lng = lng)
+                        }
 
-                    // Keep the set small per type to avoid spamming UI.
-                    mapped.take(12).forEach { item ->
-                        aggregated.putIfAbsent(item.placeId, item)
+                        // Keep the set small per query to avoid spamming UI.
+                        val perQueryLimit = if (looksLikePostOmbudQuery(typeQuery)) 6 else 12
+                        mapped.take(perQueryLimit).forEach { item ->
+                            aggregated.putIfAbsent(item.placeId, item)
+                        }
+
+                        if (aggregated.size >= 60) break@loop
                     }
                 }
             }
@@ -1036,51 +927,89 @@ fun ManualTripScreen(
     val localStoresForCity = remember(savedStores, currentCity, userLocation) {
         // Presets are the source of truth: show all saved/synced stores by default.
         // City is only used for display name cleanup (not filtering).
-        savedStores
-    }
+        val byCanonicalId = LinkedHashMap<String, Pair<StoreEntity, Boolean>>()
 
-    val remoteStoresForCity = remember(remotePlaces, manualSearchPlaces, manualTripShowOnlineResults) {
-        buildList {
-            if (manualTripShowOnlineResults) {
-                addAll(
-                    remotePlaces.map { p ->
-                        StoreEntity(
-                            profileId = activeProfileId.ifBlank { "default" },
-                            id = "gmap_interest_${p.placeId}",
-                            name = p.name,
-                            lat = p.lat,
-                            lng = p.lng,
-                            radiusMeters = 120,
-                            regionCode = "manual_interest",
-                            city = "",
-                            isActive = false,
-                            isFavorite = false,
-                        )
-                    },
-                )
+        for (store in savedStores) {
+            val isLegacy = store.id.startsWith("gmap_search_") || store.id.startsWith("gmap_interest_")
+            val canonicalId = canonicalizeStoreId(store.id)
+            val candidate = if (canonicalId != store.id) store.copy(id = canonicalId) else store
+
+            val existing = byCanonicalId[canonicalId]
+            if (existing == null) {
+                byCanonicalId[canonicalId] = candidate to isLegacy
+                continue
             }
 
-            addAll(
-                manualSearchPlaces.map { p ->
+            val (existingStore, existingWasLegacy) = existing
+            val preferred = when {
+                existingWasLegacy && !isLegacy -> candidate
+                !existingWasLegacy && isLegacy -> existingStore
+                existingStore.isFavorite && !candidate.isFavorite -> existingStore
+                !existingStore.isFavorite && candidate.isFavorite -> candidate
+                existingStore.city.isNotBlank() && candidate.city.isBlank() -> existingStore
+                existingStore.city.isBlank() && candidate.city.isNotBlank() -> candidate
+                else -> existingStore
+            }
+
+            val merged = preferred.copy(
+                isFavorite = existingStore.isFavorite || candidate.isFavorite,
+                isActive = existingStore.isActive || candidate.isActive,
+                city = if (preferred.city.isNotBlank()) preferred.city else (existingStore.city.ifBlank { candidate.city }),
+                radiusMeters = maxOf(existingStore.radiusMeters, candidate.radiusMeters),
+            )
+
+            byCanonicalId[canonicalId] = merged to (existingWasLegacy && isLegacy)
+        }
+
+        byCanonicalId.values.map { it.first }
+    }
+
+    val remoteStoresForCity = remember(remotePlaces, manualSearchPlaces, manualTripShowOnlineResults, activeProfileId) {
+        val profileId = activeProfileId.ifBlank { "default" }
+
+        val interest = if (manualTripShowOnlineResults) {
+            remotePlaces
+                .distinctBy { it.placeId }
+                .map { p ->
                     StoreEntity(
-                        profileId = activeProfileId.ifBlank { "default" },
-                        id = "gmap_search_${p.placeId}",
+                        profileId = profileId,
+                        id = "gmap_${p.placeId}",
                         name = p.name,
                         lat = p.lat,
                         lng = p.lng,
                         radiusMeters = 120,
-                        regionCode = "manual_places",
+                        regionCode = "manual_interest",
                         city = "",
                         isActive = false,
                         isFavorite = false,
                     )
-                },
-            )
+                }
+        } else {
+            emptyList()
         }
+
+        val search = manualSearchPlaces
+            .distinctBy { it.placeId }
+            .map { p ->
+                StoreEntity(
+                    profileId = profileId,
+                    id = "gmap_${p.placeId}",
+                    name = p.name,
+                    lat = p.lat,
+                    lng = p.lng,
+                    radiusMeters = 120,
+                    regionCode = "manual_places",
+                    city = "",
+                    isActive = false,
+                    isFavorite = false,
+                )
+            }
+
+        (interest + search).distinctBy { it.id }
     }
 
     val visibleStores = remember(localStoresForCity, remoteStoresForCity) {
-        localStoresForCity + remoteStoresForCity
+        (localStoresForCity + remoteStoresForCity).distinctBy { it.id }
     }
 
     // Cache Google driving distances: Business home -> store. Only used when we don't have current location.
@@ -1409,9 +1338,50 @@ fun ManualTripScreen(
 
     if (showStorePicker) {
         val candidateStores = remember(savedStores, ignoredStoreIds) {
-            savedStores
+            fun isIgnored(storeId: String): Boolean {
+                val canonicalId = canonicalizeStoreId(storeId)
+                if (ignoredStoreIds.contains(storeId) || ignoredStoreIds.contains(canonicalId)) return true
+
+                if (!canonicalId.startsWith("gmap_")) return false
+                val placeId = canonicalId.removePrefix("gmap_")
+                if (placeId.isBlank()) return false
+                return ignoredStoreIds.contains("gmap_search_$placeId") || ignoredStoreIds.contains("gmap_interest_$placeId")
+            }
+
+            val byCanonicalId = LinkedHashMap<String, Pair<StoreEntity, Boolean>>()
+            for (store in savedStores) {
+                if (isIgnored(store.id)) continue
+
+                val isLegacy = store.id.startsWith("gmap_search_") || store.id.startsWith("gmap_interest_")
+                val canonicalId = canonicalizeStoreId(store.id)
+                val candidate = if (canonicalId != store.id) store.copy(id = canonicalId) else store
+
+                val existing = byCanonicalId[canonicalId]
+                if (existing == null) {
+                    byCanonicalId[canonicalId] = candidate to isLegacy
+                    continue
+                }
+
+                val (existingStore, existingWasLegacy) = existing
+                val preferred = when {
+                    existingWasLegacy && !isLegacy -> candidate
+                    !existingWasLegacy && isLegacy -> existingStore
+                    existingStore.isFavorite && !candidate.isFavorite -> existingStore
+                    !existingStore.isFavorite && candidate.isFavorite -> candidate
+                    else -> existingStore
+                }
+                val merged = preferred.copy(
+                    isFavorite = existingStore.isFavorite || candidate.isFavorite,
+                    isActive = existingStore.isActive || candidate.isActive,
+                    radiusMeters = maxOf(existingStore.radiusMeters, candidate.radiusMeters),
+                    city = if (preferred.city.isNotBlank()) preferred.city else (existingStore.city.ifBlank { candidate.city }),
+                )
+                byCanonicalId[canonicalId] = merged to (existingWasLegacy && isLegacy)
+            }
+
+            byCanonicalId.values
                 .asSequence()
-                .filterNot { ignoredStoreIds.contains(it.id) }
+                .map { it.first }
                 .sortedWith(
                     compareBy<StoreEntity> { it.city.trim().lowercase() }
                         .thenBy { it.name.trim().lowercase() },
@@ -1591,6 +1561,7 @@ fun ManualTripScreen(
     }
 
     var hideStoreDialog by remember { mutableStateOf<StoreEntity?>(null) }
+    var viewStoreDialog by remember { mutableStateOf<StoreEntity?>(null) }
 
     val gridState = rememberLazyGridState()
 
@@ -1604,89 +1575,6 @@ fun ManualTripScreen(
         pendingOpenStoreId = null
     }
 
-    if (showSearchDialog) {
-        AlertDialog(
-            onDismissRequest = { showSearchDialog = false },
-            title = { Text("Search") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TextField(
-                        value = dialogSearchQuery,
-                        onValueChange = { dialogSearchQuery = it },
-                        placeholder = { Text("Search address or company…") },
-                        singleLine = true,
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.Search,
-                                contentDescription = null,
-                            )
-                        },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(
-                            onSearch = {
-                                lastSubmittedQuery = dialogSearchQuery
-                                searchSubmitTick++
-                            },
-                        ),
-                    )
-
-                    if (manualSearchBusy) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Text(
-                                "Searching…",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                            )
-                        }
-                    }
-
-                    if (!manualSearchError.isNullOrBlank()) {
-                        Text(
-                            manualSearchError.orEmpty(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-
-                    LazyColumn(
-                        modifier = Modifier.heightIn(max = 320.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        lazyItems(manualSearchPlaces, key = { it.placeId }) { p ->
-                            ListItem(
-                                headlineContent = { Text(p.name) },
-                                supportingContent = {
-                                    val addr = p.address?.trim().orEmpty()
-                                    if (addr.isNotBlank()) {
-                                        Text(addr)
-                                    }
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        // Pin selection into the grid and open its tile actions.
-                                        manualSearchPlaces = listOf(p)
-                                        lastSubmittedQuery = p.name
-                                        pendingOpenStoreId = "gmap_search_${p.placeId}"
-                                        showSearchDialog = false
-                                    },
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showSearchDialog = false }) {
-                    Text("Close")
-                }
-            },
-        )
-    }
-
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
@@ -1694,7 +1582,11 @@ fun ManualTripScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(
+                        onClick = {
+                            if (isSearchMode) exitSearchMode() else onBack()
+                        },
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
@@ -1702,63 +1594,184 @@ fun ManualTripScreen(
                     }
                 },
                 title = {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(
-                                indication = null,
-                                interactionSource = remember { MutableInteractionSource() },
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            tonalElevation = 0.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp)
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) {
+                                    val t = lastSubmittedQuery
+                                    dialogSearchValue = TextFieldValue(
+                                        text = t,
+                                        selection = if (t.isBlank()) TextRange(0) else TextRange(0, t.length),
+                                    )
+                                    showSearchDialog = true
+                                },
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                dialogSearchQuery = lastSubmittedQuery
-                                showSearchDialog = true
-                            },
-                    ) {
-                        TextField(
-                            value = lastSubmittedQuery,
-                            onValueChange = {},
-                            readOnly = true,
-                            enabled = false,
-                            placeholder = { Text("Search address or company…") },
-                            singleLine = true,
-                            leadingIcon = {
                                 Icon(
                                     imageVector = Icons.Filled.Search,
                                     contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
                                 )
-                            },
-                            trailingIcon = {
+
+                                Text(
+                                    text = lastSubmittedQuery.ifBlank { "Search address or company…" },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (lastSubmittedQuery.isBlank()) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    maxLines = 1,
+                                    modifier = Modifier.weight(1f),
+                                )
+
                                 if (lastSubmittedQuery.isNotBlank() || manualSearchPlaces.isNotEmpty()) {
                                     IconButton(
-                                        enabled = true,
                                         onClick = {
                                             lastSubmittedQuery = ""
                                             searchSubmitTick++
                                             manualSearchError = null
                                             manualSearchPlaces = emptyList()
                                         },
+                                        modifier = Modifier.size(32.dp),
                                     ) {
                                         Icon(
                                             imageVector = Icons.Filled.Close,
                                             contentDescription = "Clear search",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp),
                                         )
                                     }
                                 }
-                            },
-                            shape = RoundedCornerShape(24.dp),
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                                disabledIndicatorColor = Color.Transparent,
-                                disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                                disabledPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            ),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                            }
+                        }
+
+                        if (showSearchDialog) {
+                            val focusRequester = remember { FocusRequester() }
+
+                            LaunchedEffect(Unit) {
+                                focusRequester.requestFocus()
+                                keyboardController?.show()
+                            }
+
+                            DropdownMenu(
+                                expanded = true,
+                                onDismissRequest = {
+                                    showSearchDialog = false
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp),
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    TextField(
+                                        value = dialogSearchValue,
+                                        onValueChange = { dialogSearchValue = it },
+                                        placeholder = { Text("Search address or company…") },
+                                        singleLine = true,
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.Search,
+                                                contentDescription = null,
+                                            )
+                                        },
+                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                        keyboardActions = KeyboardActions(
+                                            onSearch = {
+                                                lastSubmittedQuery = dialogSearchValue.text
+                                                searchSubmitTick++
+                                            },
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .focusRequester(focusRequester),
+                                    )
+
+                                    if (manualSearchBusy) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        ) {
+                                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                            Text(
+                                                "Searching…",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                                            )
+                                        }
+                                    }
+
+                                    if (!manualSearchError.isNullOrBlank()) {
+                                        Text(
+                                            manualSearchError.orEmpty(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+
+                                    if (manualSearchPlaces.isNotEmpty()) {
+                                        val resultsScroll = rememberScrollState()
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 320.dp)
+                                                .verticalScroll(resultsScroll),
+                                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                                        ) {
+                                            manualSearchPlaces.forEach { p ->
+                                                ListItem(
+                                                    headlineContent = { Text(p.name) },
+                                                    supportingContent = {
+                                                        val addr = p.address?.trim().orEmpty()
+                                                        if (addr.isNotBlank()) {
+                                                            Text(addr)
+                                                        }
+                                                    },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clickable {
+                                                            // Pin selection into the grid and open its tile actions.
+                                                            manualSearchPlaces = listOf(p)
+                                                            lastSubmittedQuery = p.name
+                                                            pendingOpenStoreId = "gmap_${p.placeId}"
+                                                            showSearchDialog = false
+                                                        },
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
+                                    ) {
+                                        TextButton(onClick = { showSearchDialog = false }) {
+                                            Text("Close")
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -1777,20 +1790,49 @@ fun ManualTripScreen(
             val toastOffset = addedToastOffset
             val toastMessage = addedToastMessage
             if (toastOffset != null && !toastMessage.isNullOrBlank()) {
+                val configuration = LocalConfiguration.current
+                val density = LocalDensity.current
+                val screenWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
+                val screenHeightPx = with(density) { configuration.screenHeightDp.dp.roundToPx() }
+
+                var toastSizePx by remember { mutableStateOf(IntSize.Zero) }
+                val aboveFingerPx = with(density) { 18.dp.roundToPx() }
+
+                val desiredX = if (toastSizePx.width > 0) {
+                    toastOffset.x - (toastSizePx.width / 2)
+                } else {
+                    toastOffset.x
+                }
+                val desiredY = if (toastSizePx.height > 0) {
+                    toastOffset.y - toastSizePx.height - aboveFingerPx
+                } else {
+                    toastOffset.y - aboveFingerPx
+                }
+
+                val clampedX = desiredX.coerceIn(
+                    0,
+                    (screenWidthPx - toastSizePx.width).coerceAtLeast(0),
+                )
+                val clampedY = desiredY.coerceIn(
+                    0,
+                    (screenHeightPx - toastSizePx.height).coerceAtLeast(0),
+                )
+
                 Surface(
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RoundedCornerShape(999.dp),
                     color = MaterialTheme.colorScheme.surface,
                     tonalElevation = 0.dp,
                     modifier = Modifier
                         .zIndex(10f)
-                        .offset { toastOffset }
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
+                        .offset { IntOffset(clampedX, clampedY) }
+                        .onGloballyPositioned { toastSizePx = it.size }
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(999.dp)),
                 ) {
                     Text(
                         toastMessage,
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                     )
                 }
             }
@@ -1879,34 +1921,21 @@ fun ManualTripScreen(
                 )
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 170.dp),
+                    columns = GridCells.Fixed(3),
                     state = gridState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(0.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        // Kept for layout stability when scrolling the grid.
-                        // The same controls are also shown above the grid for the empty state.
-                        FilterRow()
-                    }
-
-                    if (searchResultPolar.isNotEmpty()) {
-                        item(span = { GridItemSpan(maxLineSpan) }) {
-                            SectionHeaderRow(
-                                title = "Search results",
-                                subtitle = "${searchResultPolar.size}",
-                                expanded = true,
-                                onToggle = {},
-                            )
-                        }
-
-                        items(searchResultPolar, key = { it.store.id }) { polar ->
+                    if (isSearchMode) {
+                        itemsIndexed(searchResultPolar, key = { index, polar -> "${polar.store.id}:$index" }) { _, polar ->
                             StoreThumbnailButton(
                                 name = polar.store.name,
                                 imageUri = null,
                                 defaultIcon = defaultIconForStoreName(polar.store.name),
+                                lat = polar.store.lat,
+                                lng = polar.store.lng,
                                 // Search findings should not be tied to the distance filter/indicator.
                                 distanceMeters = Double.NaN,
                                 tagLabel = null,
@@ -1917,19 +1946,27 @@ fun ManualTripScreen(
                                 onAddTrip = { tapOffset ->
                                     addTripMenuStoreId = null
                                     scope.launch {
-                                        val toastOffset = tapOffset
+                                        val tapToastOffset = tapOffset
                                         isSaving = true
                                         error = null
                                         try {
                                             createManualTripToStore(store = polar.store)
-                                            if (toastOffset != null) showAddedToast(toastOffset)
-                                            snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                            if (tapToastOffset != null) {
+                                                showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
+                                            } else {
+                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                            }
+                                            exitSearchMode()
                                         } catch (e: CancellationException) {
                                             throw e
                                         } catch (e: IllegalStateException) {
                                             val msg = e.message.orEmpty()
                                             if (msg.contains("already added", ignoreCase = true)) {
-                                                snackbarHostState.showSnackbar("Already added")
+                                                if (tapToastOffset != null) {
+                                                    showAddedToast(tapToastOffset, "Already added")
+                                                } else {
+                                                    snackbarHostState.showSnackbar("Already added")
+                                                }
                                             } else {
                                                 error = e.message ?: "Failed"
                                             }
@@ -1943,20 +1980,28 @@ fun ManualTripScreen(
                                 onAddTripWithMedia = { tapOffset ->
                                     addTripMenuStoreId = null
                                     scope.launch {
-                                        val toastOffset = tapOffset
+                                        val tapToastOffset = tapOffset
                                         isSaving = true
                                         error = null
                                         try {
                                             val tripId = createManualTripToStore(store = polar.store)
-                                            if (toastOffset != null) showAddedToast(toastOffset)
-                                            snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                            if (tapToastOffset != null) {
+                                                showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
+                                            } else {
+                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                            }
                                             onOpenTrip(tripId, true)
+                                            exitSearchMode()
                                         } catch (e: CancellationException) {
                                             throw e
                                         } catch (e: IllegalStateException) {
                                             val msg = e.message.orEmpty()
                                             if (msg.contains("already added", ignoreCase = true)) {
-                                                snackbarHostState.showSnackbar("Already added")
+                                                if (tapToastOffset != null) {
+                                                    showAddedToast(tapToastOffset, "Already added")
+                                                } else {
+                                                    snackbarHostState.showSnackbar("Already added")
+                                                }
                                             } else {
                                                 error = e.message ?: "Failed"
                                             }
@@ -1967,16 +2012,20 @@ fun ManualTripScreen(
                                         }
                                     }
                                 },
-                                onSet = {},
-                                onLongPress = { hideStoreDialog = polar.store },
+                                onLongPress = { viewStoreDialog = polar.store },
                                 onClick = {
                                     addTripMenuStoreId = if (addTripMenuStoreId == polar.store.id) null else polar.store.id
                                 },
                             )
                         }
-                    }
+                    } else {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            // Kept for layout stability when scrolling the grid.
+                            // The same controls are also shown above the grid for the empty state.
+                            FilterRow()
+                        }
 
-                    localPolarByCategory.forEach { (categoryLabel, categoryPolar) ->
+                        localPolarByCategory.forEach { (categoryLabel, categoryPolar) ->
                         val expanded = expandedByCategoryLabel[categoryLabel] ?: true
 
                         item(span = { GridItemSpan(maxLineSpan) }) {
@@ -1991,7 +2040,7 @@ fun ManualTripScreen(
                         }
 
                         if (expanded) {
-                            items(categoryPolar, key = { it.store.id }) { polar ->
+                            itemsIndexed(categoryPolar, key = { index, polar -> "${polar.store.id}:$categoryLabel:$index" }) { _, polar ->
                                 val uri = storeImages[polar.store.id]
                                 val isPost = isPostOmbudName(polar.store.name)
                                 val displayName = if (isPost) {
@@ -2020,6 +2069,8 @@ fun ManualTripScreen(
                                     name = displayName,
                                     imageUri = uri,
                                     defaultIcon = if (isPost) Icons.Filled.LocalPostOffice else defaultIconForStoreName(polar.store.name),
+                                    lat = polar.store.lat,
+                                    lng = polar.store.lng,
                                     distanceMeters = polar.distance,
                                     tagLabel = tagLabel,
                                     tagColor = tagColor,
@@ -2029,19 +2080,26 @@ fun ManualTripScreen(
                                     onAddTrip = { tapOffset ->
                                         addTripMenuStoreId = null
                                         scope.launch {
-                                            val toastOffset = tapOffset
+                                            val tapToastOffset = tapOffset
                                             isSaving = true
                                             error = null
                                             try {
                                                 createManualTripToStore(store = polar.store)
-                                                if (toastOffset != null) showAddedToast(toastOffset)
-                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                                if (tapToastOffset != null) {
+                                                    showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
+                                                } else {
+                                                    snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                                }
                                             } catch (e: CancellationException) {
                                                 throw e
                                             } catch (e: IllegalStateException) {
                                                 val msg = e.message.orEmpty()
                                                 if (msg.contains("already added", ignoreCase = true)) {
-                                                    snackbarHostState.showSnackbar("Already added")
+                                                    if (tapToastOffset != null) {
+                                                        showAddedToast(tapToastOffset, "Already added")
+                                                    } else {
+                                                        snackbarHostState.showSnackbar("Already added")
+                                                    }
                                                 } else {
                                                     error = e.message ?: "Failed"
                                                 }
@@ -2055,20 +2113,27 @@ fun ManualTripScreen(
                                     onAddTripWithMedia = { tapOffset ->
                                         addTripMenuStoreId = null
                                         scope.launch {
-                                            val toastOffset = tapOffset
+                                            val tapToastOffset = tapOffset
                                             isSaving = true
                                             error = null
                                             try {
                                                 val tripId = createManualTripToStore(store = polar.store)
-                                                if (toastOffset != null) showAddedToast(toastOffset)
-                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                                if (tapToastOffset != null) {
+                                                    showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
+                                                } else {
+                                                    snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
+                                                }
                                                 onOpenTrip(tripId, true)
                                             } catch (e: CancellationException) {
                                                 throw e
                                             } catch (e: IllegalStateException) {
                                                 val msg = e.message.orEmpty()
                                                 if (msg.contains("already added", ignoreCase = true)) {
-                                                    snackbarHostState.showSnackbar("Already added")
+                                                    if (tapToastOffset != null) {
+                                                        showAddedToast(tapToastOffset, "Already added")
+                                                    } else {
+                                                        snackbarHostState.showSnackbar("Already added")
+                                                    }
                                                 } else {
                                                     error = e.message ?: "Failed"
                                                 }
@@ -2079,19 +2144,13 @@ fun ManualTripScreen(
                                             }
                                         }
                                     },
-                                    onSet = {
-                                        hoursDialogStore = polar.store
-                                        val existing = storeBusinessHours[polar.store.id]?.byDay.orEmpty()
-                                        hoursDraft = existing
-                                    },
-                                    onLongPress = {
-                                        hideStoreDialog = polar.store
-                                    },
+                                    onLongPress = { viewStoreDialog = polar.store },
                                     onClick = {
                                         addTripMenuStoreId = if (addTripMenuStoreId == polar.store.id) null else polar.store.id
                                     },
                                 )
                             }
+                        }
                         }
                     }
                 }
@@ -2138,6 +2197,188 @@ fun ManualTripScreen(
             dismissButton = {
                 TextButton(onClick = { hideStoreDialog = null }) {
                     Text("Cancel")
+                }
+            },
+        )
+    }
+
+    val storeForView = viewStoreDialog
+    if (storeForView != null) {
+        val scroll = rememberScrollState()
+
+        var loading by remember(storeForView.id) { mutableStateOf(false) }
+        var fetchError by remember(storeForView.id) { mutableStateOf<String?>(null) }
+        var fetchedAddress by remember(storeForView.id) { mutableStateOf<String?>(null) }
+        var fetchedHours by remember(storeForView.id) { mutableStateOf<List<String>>(emptyList()) }
+        var fetchedCity by remember(storeForView.id) { mutableStateOf<String?>(null) }
+
+        fun bestEffortCityFromAddress(address: String): String? {
+            val parts = address.split(",").map { it.trim() }.filter { it.isNotBlank() }
+            if (parts.size < 2) return null
+            val candidate = parts.getOrNull(parts.size - 2) ?: return null
+            val cleaned = candidate
+                .replace(Regex("\\b\\d{3}\\s?\\d{2}\\b"), "")
+                .trim()
+            return cleaned.takeIf { it.isNotBlank() }
+        }
+
+        val placesApi = remember { placesRetrofit.create(RawPlacesDetailsApi::class.java) }
+
+        LaunchedEffect(storeForView.id) {
+            loading = false
+            fetchError = null
+            fetchedAddress = null
+            fetchedHours = emptyList()
+            fetchedCity = null
+
+            // Only Google-backed places can be fetched via Places Details.
+            val isGoogle = storeForView.id.startsWith("gmap_")
+            if (!isGoogle) return@LaunchedEffect
+
+            // Prefer cached details so we don't re-fetch repeatedly.
+            val cached = runCatching { AppGraph.settings.getCachedStoreFetchedDetails(storeForView.id) }.getOrNull()
+            if (cached != null) {
+                fetchedAddress = cached.formattedAddress
+                fetchedHours = cached.weekdayDescriptions
+                fetchedCity = cached.formattedAddress?.let { bestEffortCityFromAddress(it) }
+                // If we have *any* cached details, treat as done.
+                if (!cached.formattedAddress.isNullOrBlank() || cached.weekdayDescriptions.isNotEmpty()) {
+                    return@LaunchedEffect
+                }
+            }
+
+            loading = true
+            try {
+                val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
+                val raw = placesApi.getPlaceDetailsRaw(
+                    placeId = storeIdToPlaceId(storeForView.id),
+                    apiKey = apiKey,
+                    fieldMask = "formattedAddress,regularOpeningHours.weekdayDescriptions",
+                )
+
+                val root = runCatching { placesJson.parseToJsonElement(raw).jsonObject }.getOrNull()
+                val addr = root
+                    ?.get("formattedAddress")
+                    ?.let { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
+
+                val hours = runCatching {
+                    root
+                        ?.get("regularOpeningHours")
+                        ?.jsonObject
+                        ?.get("weekdayDescriptions")
+                        ?.jsonArray
+                        ?.mapNotNull { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
+                        .orEmpty()
+                }.getOrDefault(emptyList())
+
+                fetchedAddress = addr
+                fetchedHours = hours
+                fetchedCity = addr?.let { bestEffortCityFromAddress(it) }
+
+                // Persist what we got so the app can reuse it offline.
+                runCatching {
+                    AppGraph.settings.upsertStoreFetchedDetails(
+                        storeForView.id,
+                        com.trimsytrack.data.StoreFetchedDetails(
+                            formattedAddress = addr,
+                            weekdayDescriptions = hours,
+                            fetchedAtMillis = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+
+                if (addr.isNullOrBlank() && hours.isEmpty()) {
+                    fetchError = "No details found on Google for this place."
+                }
+            } catch (e: Exception) {
+                fetchError = e.message ?: "Failed to fetch details"
+            } finally {
+                loading = false
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { viewStoreDialog = null },
+            title = { Text(storeForView.name) },
+            text = {
+                Column(modifier = Modifier.verticalScroll(scroll)) {
+                    val city = storeForView.city.takeIf { it.isNotBlank() } ?: fetchedCity
+                    if (!city.isNullOrBlank()) {
+                        Text(
+                            city,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+
+                    if (!fetchedAddress.isNullOrBlank()) {
+                        Text(
+                            fetchedAddress.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+
+                    if (loading) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text(
+                                "Loading from Google…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
+
+                    if (!fetchError.isNullOrBlank()) {
+                        Text(
+                            fetchError.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+
+                    if (fetchedHours.isNotEmpty()) {
+                        Text(
+                            "Opening hours",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        fetchedHours.forEach { line ->
+                            Text(
+                                line,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
+                    } else if (!storeForView.id.startsWith("gmap_")) {
+                        Text(
+                            "Opening hours and address are only available for Google places.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewStoreDialog = null
+                        hideStoreDialog = storeForView
+                    },
+                ) {
+                    Text("Hide")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewStoreDialog = null }) {
+                    Text("Close")
                 }
             },
         )
@@ -2237,6 +2478,18 @@ fun ManualTripScreen(
                                         if (desc.isEmpty()) {
                                             fetchError = "No opening hours found on Google for this place."
                                             return@launch
+                                        }
+
+                                        runCatching {
+                                            val prior = AppGraph.settings.getCachedStoreFetchedDetails(storeForDialog.id)
+                                            AppGraph.settings.upsertStoreFetchedDetails(
+                                                storeForDialog.id,
+                                                com.trimsytrack.data.StoreFetchedDetails(
+                                                    formattedAddress = prior?.formattedAddress,
+                                                    weekdayDescriptions = desc,
+                                                    fetchedAtMillis = System.currentTimeMillis(),
+                                                ),
+                                            )
                                         }
 
                                         val mapped: Map<String, String> = desc.mapNotNull { line: String ->
@@ -2380,7 +2633,7 @@ private interface RawPlacesSearchApi {
 }
 
 private fun storeIdToPlaceId(storeId: String): String {
-    return storeId.removePrefix("gmap_")
+    return canonicalizeStoreId(storeId).removePrefix("gmap_")
 }
 
 private fun weekdayKeyFromLabel(label: String): String? {
@@ -2406,11 +2659,7 @@ private fun normalizeCityName(raw: String): String {
 }
 
 private fun isPostOmbudName(name: String): Boolean {
-    val n = name.lowercase()
-    return n.contains("postombud") ||
-        n.contains("paketombud") ||
-        n.contains("ombud") ||
-        n.contains("postnord")
+    return PlaceNameNormalizer.isPostOmbudName(name)
 }
 
 private fun matchesAnyCategory(
@@ -2483,100 +2732,93 @@ private fun cleanStoreNameForCity(name: String, city: String): String {
 }
 
 private fun cleanPostOmbudNameForCity(name: String, city: String): String {
-    val fullName = name.trim()
-    if (fullName.isBlank()) return fullName
-
-    val lower = fullName.lowercase()
-    val known = listOf(
-        "coop" to "Coop",
-        "ica" to "Ica",
-        "direkten" to "Direkten",
-        "hemköp" to "Hemköp",
-        "hemkop" to "Hemköp",
-        "willys" to "Willys",
-        "city gross" to "City Gross",
-        "pressbyrån" to "Pressbyrån",
-        "pressbyran" to "Pressbyrån",
-        "7-eleven" to "7-Eleven",
-        "7 eleven" to "7-Eleven",
-        "circle k" to "Circle K",
-        "okq8" to "OKQ8",
-    )
-    known.firstOrNull { (key, _) -> lower.contains(key) }?.let { return it.second }
-
-    val withoutFluff = fullName
-        .replace(Regex("(?i)postnord"), "")
-        .replace(Regex("(?i)postombud"), "")
-        .replace(Regex("(?i)paketombud"), "")
-        .replace(Regex("(?i)ombud"), "")
-        .replace(Regex("\""), "")
-        .trim()
-
-    val cityTrim = city.trim()
-    val withoutCity = if (cityTrim.isBlank() || cityTrim.equals("Stores", ignoreCase = true)) {
-        withoutFluff
-    } else {
-        withoutFluff
-            .replace(Regex("(?i)\\b" + Regex.escape(cityTrim) + "\\b"), "")
-            .replace(Regex("\\s{2,}"), " ")
-            .trim()
-    }
-
-    val cutIdx = withoutCity.indexOfAny(charArrayOf('–', '—', '-', ',', '|', '(', ')'))
-    val base = if (cutIdx > 0) withoutCity.substring(0, cutIdx).trim() else withoutCity
-    val candidate = base.ifBlank { fullName }
-    return candidate.replace(Regex("\\s{2,}"), " ").trim()
+    return PlaceNameNormalizer.formatPostOmbudDisplayName(name = name, city = city)
 }
 
 @SuppressLint("MissingPermission")
 private suspend fun createManualTripToStore(store: StoreEntity): Long {
-    val context = AppGraph.appContext
-    val fused = LocationServices.getFusedLocationProviderClient(context)
+    val day = LocalDate.now()
+    val homeLat = AppGraph.settings.businessHomeLat.first()
+    val homeLng = AppGraph.settings.businessHomeLng.first()
+    val last = runCatching { AppGraph.tripRepository.latestTripForDay(day) }.getOrNull()
 
-    val loc = try {
-        kotlinx.coroutines.suspendCancellableCoroutine<android.location.Location?> { cont ->
-            try {
-                fused.lastLocation
-                    .addOnSuccessListener { cont.resume(it) }
-                    .addOnFailureListener { cont.resume(null) }
-            } catch (_: SecurityException) {
-                cont.resume(null)
+    val derivedStart = when {
+        homeLat != null && homeLng != null && last == null ->
+            DerivedStart(label = "Business home", lat = homeLat, lng = homeLng, locationId = com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID)
+
+        last != null ->
+            DerivedStart(
+                label = "Last store: ${last.storeNameSnapshot}",
+                lat = last.storeLatSnapshot,
+                lng = last.storeLngSnapshot,
+                locationId = last.storeId,
+            )
+
+        else -> {
+            val context = AppGraph.appContext
+            val fused = LocationServices.getFusedLocationProviderClient(context)
+            val loc = try {
+                kotlinx.coroutines.suspendCancellableCoroutine<android.location.Location?> { cont ->
+                    try {
+                        fused.lastLocation
+                            .addOnSuccessListener { cont.resume(it) }
+                            .addOnFailureListener { cont.resume(null) }
+                    } catch (_: SecurityException) {
+                        cont.resume(null)
+                    }
+                }
+            } catch (_: Exception) {
+                null
             }
+
+            val startLat = loc?.latitude
+            val startLng = loc?.longitude
+            if (startLat == null || startLng == null) {
+                throw IllegalStateException("Location unavailable or permission denied. Enable location and try again.")
+            }
+            DerivedStart(label = "Manual: current location", lat = startLat, lng = startLng, locationId = null)
         }
-    } catch (_: Exception) {
-        null
     }
 
-    val startLat = loc?.latitude
-    val startLng = loc?.longitude
-    if (startLat == null || startLng == null) {
-        throw IllegalStateException("Location unavailable or permission denied. Enable location and try again.")
+    val route = runCatching {
+        AppGraph.distanceRepository.getOrComputeDrivingRoute(
+            startLat = derivedStart.lat,
+            startLng = derivedStart.lng,
+            destLat = store.lat,
+            destLng = store.lng,
+            startLocationId = derivedStart.locationId,
+            endLocationId = store.id,
+        )
+    }.getOrElse {
+        AppGraph.distanceRepository.estimateStraightLineRoute(
+            startLat = derivedStart.lat,
+            startLng = derivedStart.lng,
+            destLat = store.lat,
+            destLng = store.lng,
+        )
     }
-
-    val route = AppGraph.distanceRepository.getOrComputeDrivingRoute(
-        startLat = startLat,
-        startLng = startLng,
-        destLat = store.lat,
-        destLng = store.lng,
-        startLocationId = null,
-        endLocationId = store.id,
-    )
 
     val now = Instant.now()
     val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+
+    val normalizedStoreNameSnapshot = if (PlaceNameNormalizer.isPostOmbudName(store.name)) {
+        PlaceNameNormalizer.formatPostOmbudDisplayName(name = store.name, city = store.city)
+    } else {
+        store.name
+    }
     return AppGraph.tripRepository.createTrip(
         TripEntity(
             profileId = profileId,
             createdAt = now,
             day = LocalDate.now(),
             storeId = store.id,
-            storeNameSnapshot = store.name,
+            storeNameSnapshot = normalizedStoreNameSnapshot,
             citySnapshot = store.city,
             storeLatSnapshot = store.lat,
             storeLngSnapshot = store.lng,
-            startLabelSnapshot = "Manual: current location",
-            startLat = startLat,
-            startLng = startLng,
+            startLabelSnapshot = derivedStart.label,
+            startLat = derivedStart.lat,
+            startLng = derivedStart.lng,
             distanceMeters = route.distanceMeters,
             durationMinutes = route.durationMinutes,
             notes = "",
@@ -2588,12 +2830,21 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
 
 }
 
+private data class DerivedStart(
+    val label: String,
+    val lat: Double,
+    val lng: Double,
+    val locationId: String?,
+)
+
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 private fun StoreThumbnailButton(
     name: String,
     imageUri: String?,
     defaultIcon: ImageVector,
+    lat: Double,
+    lng: Double,
     distanceMeters: Double,
     tagLabel: String?,
     tagColor: Color?,
@@ -2602,10 +2853,11 @@ private fun StoreThumbnailButton(
     onDismissTripActions: () -> Unit = {},
     onAddTrip: (IntOffset?) -> Unit = {},
     onAddTripWithMedia: (IntOffset?) -> Unit = {},
-    onSet: () -> Unit,
     onLongPress: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
+    val context = LocalContext.current
+
     val shape = RoundedCornerShape(18.dp)
     val iconTint = tagColor ?: MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
     val hasImage = !imageUri.isNullOrBlank()
@@ -2630,12 +2882,26 @@ private fun StoreThumbnailButton(
         }
     }
 
+    fun openGoogleMapsNavigation() {
+        val latLng = "${lat},${lng}"
+        val gmmIntentUri = Uri.parse("google.navigation:q=$latLng")
+        val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).setPackage("com.google.android.apps.maps")
+        try {
+            context.startActivity(mapIntent)
+        } catch (_: Exception) {
+            // Fallback to browser if Google Maps isn't installed.
+            val webUri = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$latLng")
+            context.startActivity(Intent(Intent.ACTION_VIEW, webUri))
+        }
+    }
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             shape = shape,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 0.dp,
             modifier = Modifier
+                .fillMaxWidth()
                 .border(1.dp, tagColor ?: MaterialTheme.colorScheme.outlineVariant, shape)
                 .alpha(if (enabled) 1f else 0.7f)
                 .combinedClickable(
@@ -2646,7 +2912,8 @@ private fun StoreThumbnailButton(
         ) {
             Box(
                 modifier = Modifier
-                    .size(150.dp)
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
                     .clip(shape),
                 contentAlignment = Alignment.Center,
             ) {
@@ -2708,13 +2975,17 @@ private fun StoreThumbnailButton(
                             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
                     ) {
                         IconButton(
-                            onClick = onSet,
+                            onClick = {
+                                if (enabled && lat.isFinite() && lng.isFinite()) {
+                                    openGoogleMapsNavigation()
+                                }
+                            },
                             enabled = enabled,
                             modifier = Modifier.size(34.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Settings,
-                                contentDescription = "Set",
+                                imageVector = Icons.Filled.DirectionsCar,
+                                contentDescription = "Navigate",
                                 tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                             )
                         }
@@ -2737,7 +3008,9 @@ private fun StoreThumbnailButton(
                         ) {
                             Text(
                                 kmLabel,
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize * 1.15f,
+                                ),
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                             )
@@ -2755,7 +3028,7 @@ private fun StoreThumbnailButton(
                             .clickable(enabled = enabled) { onDismissTripActions() },
                     )
 
-                    val iconTint = MaterialTheme.colorScheme.onSurfaceVariant
+                    val overlayIconTint = MaterialTheme.colorScheme.onSurfaceVariant
 
                     var addTripPosInRoot by remember { mutableStateOf(Offset.Zero) }
                     var addTripMediaPosInRoot by remember { mutableStateOf(Offset.Zero) }
@@ -2793,14 +3066,14 @@ private fun StoreThumbnailButton(
                                 Icon(
                                     imageVector = Icons.Filled.Add,
                                     contentDescription = "Add trip",
-                                    tint = iconTint,
+                                    tint = overlayIconTint,
                                     modifier = Modifier.size(30.dp),
                                 )
                                 Spacer(Modifier.width(12.dp))
                                 Icon(
                                     imageVector = Icons.Filled.DirectionsCar,
                                     contentDescription = null,
-                                    tint = iconTint,
+                                    tint = overlayIconTint,
                                     modifier = Modifier.size(30.dp),
                                 )
                             }
@@ -2830,14 +3103,14 @@ private fun StoreThumbnailButton(
                                 Icon(
                                     imageVector = Icons.Filled.Receipt,
                                     contentDescription = "Add trip with media",
-                                    tint = iconTint,
+                                    tint = overlayIconTint,
                                     modifier = Modifier.size(30.dp),
                                 )
                                 Spacer(Modifier.width(12.dp))
                                 Icon(
                                     imageVector = Icons.Filled.DirectionsCar,
                                     contentDescription = null,
-                                    tint = iconTint,
+                                    tint = overlayIconTint,
                                     modifier = Modifier.size(30.dp),
                                 )
                             }
@@ -2851,7 +3124,9 @@ private fun StoreThumbnailButton(
 
         Text(
             name,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyLarge.copy(
+                fontSize = MaterialTheme.typography.bodyLarge.fontSize * 1.15f,
+            ),
             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.78f),
             maxLines = 2,
         )

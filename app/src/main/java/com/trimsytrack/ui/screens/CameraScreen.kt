@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.location.Location
+import android.location.Geocoder
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -76,21 +77,26 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.common.util.concurrent.ListenableFuture
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.AttachmentEntity
+import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import java.io.File
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,6 +104,7 @@ fun CameraScreen(
     tripId: Long? = null,
     returnCaptureToCaller: Boolean = false,
     autoSaveToTrip: Boolean = false,
+    quickLogTripOnAutoSave: Boolean = false,
     onCaptureConfirmed: (
         uri: String,
         mimeType: String,
@@ -159,6 +166,146 @@ fun CameraScreen(
     val autoSaving = remember { mutableStateOf(false) }
 
     val showCaptureChooser = remember { mutableStateOf(false) }
+
+    suspend fun bestEffortPlaceLabelFromLatLng(lat: Double, lng: Double): Pair<String, String> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val geocoder = Geocoder(context, Locale.getDefault())
+                @Suppress("DEPRECATION")
+                val results = geocoder.getFromLocation(lat, lng, 1)
+                val a = results?.firstOrNull()
+
+                val feature = a?.featureName?.trim().orEmpty()
+                val line = a?.getAddressLine(0)?.trim().orEmpty()
+                val street = listOfNotNull(a?.thoroughfare, a?.subThoroughfare)
+                    .joinToString(" ") { it.trim() }
+                    .trim()
+                val locality = a?.locality?.trim().orEmpty()
+
+                val label = when {
+                    feature.isNotBlank() && feature.any { !it.isDigit() } -> feature
+                    street.isNotBlank() -> street
+                    line.isNotBlank() -> line
+                    else -> "${"%.5f".format(lat)}, ${"%.5f".format(lng)}"
+                }
+
+                label to locality
+            }.getOrElse {
+                "${"%.5f".format(lat)}, ${"%.5f".format(lng)}" to ""
+            }
+        }
+    }
+
+    suspend fun createQuickLogTripForLocation(location: Location, createdAt: Instant): Long {
+        val lat = location.latitude
+        val lng = location.longitude
+
+        val (label, city) = bestEffortPlaceLabelFromLatLng(lat, lng)
+
+        val latE5 = (lat * 100_000.0).toLong()
+        val lngE5 = (lng * 100_000.0).toLong()
+        val storeId = "gps_${latE5}_${lngE5}"
+
+        val nowProfileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+        val day = LocalDate.now()
+
+        // Upsert a lightweight store row so the trip points to something stable.
+        runCatching {
+            AppGraph.db.storeDao().upsertAll(
+                listOf(
+                    StoreEntity(
+                        profileId = nowProfileId,
+                        id = storeId,
+                        name = label,
+                        lat = lat,
+                        lng = lng,
+                        radiusMeters = 0,
+                        regionCode = "custom",
+                        city = city,
+                        isActive = false,
+                        isFavorite = false,
+                    )
+                )
+            )
+        }
+
+        val homeLat = AppGraph.settings.businessHomeLat.first()
+        val homeLng = AppGraph.settings.businessHomeLng.first()
+        val last = runCatching { AppGraph.tripRepository.latestTripForDay(day) }.getOrNull()
+
+        data class DerivedStart(
+            val label: String,
+            val lat: Double,
+            val lng: Double,
+            val locationId: String?,
+        )
+
+        val derivedStart = when {
+            homeLat != null && homeLng != null && last == null ->
+                DerivedStart(
+                    label = "Business home",
+                    lat = homeLat,
+                    lng = homeLng,
+                    locationId = BUSINESS_HOME_LOCATION_ID,
+                )
+
+            last != null ->
+                DerivedStart(
+                    label = "Last store: ${last.storeNameSnapshot}",
+                    lat = last.storeLatSnapshot,
+                    lng = last.storeLngSnapshot,
+                    locationId = last.storeId,
+                )
+
+            else ->
+                DerivedStart(
+                    label = "Current location",
+                    lat = lat,
+                    lng = lng,
+                    locationId = null,
+                )
+        }
+
+        val route = runCatching {
+            AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                startLat = derivedStart.lat,
+                startLng = derivedStart.lng,
+                destLat = lat,
+                destLng = lng,
+                startLocationId = derivedStart.locationId,
+                endLocationId = storeId,
+            )
+        }.getOrElse {
+            AppGraph.distanceRepository.estimateStraightLineRoute(
+                startLat = derivedStart.lat,
+                startLng = derivedStart.lng,
+                destLat = lat,
+                destLng = lng,
+            )
+        }
+
+        return AppGraph.tripRepository.createTrip(
+            TripEntity(
+                profileId = nowProfileId,
+                createdAt = createdAt,
+                day = day,
+                storeId = storeId,
+                storeNameSnapshot = label,
+                citySnapshot = city,
+                storeLatSnapshot = lat,
+                storeLngSnapshot = lng,
+                startLabelSnapshot = derivedStart.label,
+                startLat = derivedStart.lat,
+                startLng = derivedStart.lng,
+                distanceMeters = route.distanceMeters,
+                durationMinutes = route.durationMinutes,
+                notes = "",
+                runId = null,
+                currencyCode = null,
+                mileageRateMicros = null,
+            )
+        )
+    }
 
     suspend fun savePendingCaptureToTrip(targetTripId: Long) {
         val tempFile = pendingTempFile.value
@@ -339,6 +486,33 @@ fun CameraScreen(
                             runCatching {
                                 withContext(Dispatchers.IO) {
                                     savePendingCaptureToTrip(directTripId)
+                                }
+                            }.onSuccess {
+                                saveStatus.value = "Saved."
+                                onBack()
+                            }.onFailure {
+                                autoSaving.value = false
+                                saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
+                            }
+                        }
+                    }
+
+                    if (directTripId == null && autoSaveToTrip && quickLogTripOnAutoSave && !autoSaving.value) {
+                        autoSaving.value = true
+                        saveStatus.value = "Saving…"
+                        scope.launch {
+                            runCatching {
+                                val capturedAt = pendingCapturedAt.value ?: Instant.now()
+                                val loc = pendingLocation.value ?: runCatching {
+                                    if (hasFineLocationPermission) getCurrentLocation(context) else null
+                                }.getOrNull()
+                                requireNotNull(loc) { "Missing location permission or location not available" }
+
+                                val createdTripId = withContext(Dispatchers.IO) {
+                                    createQuickLogTripForLocation(location = loc, createdAt = capturedAt)
+                                }
+                                withContext(Dispatchers.IO) {
+                                    savePendingCaptureToTrip(createdTripId)
                                 }
                             }.onSuccess {
                                 saveStatus.value = "Saved."

@@ -268,11 +268,17 @@ fun AppNavHost(intent: Intent) {
                     if (withMedia) navController.navigate("${Routes.Manual}?addMedia=1")
                     else navController.navigate(Routes.Manual)
                 },
+                onAddTripQuickLogWithPhoto = {
+                    navController.navigate("${Routes.Camera}?tripId=-1&return=0&autoSave=1&quickLog=1")
+                },
                 onReviewPlaces = { navController.navigate(Routes.Review) },
                 onJournal = { navController.navigate(Routes.Journal) },
                 onCamera = { navController.navigate(Routes.Camera) },
                 onOpenSettings = { navController.navigate(Routes.Settings) },
                 onOpenProfiles = { navController.navigate(Routes.Profiles) },
+                onOpenOnboarding = { navController.navigate(Routes.Onboarding) },
+                onOpenProfileLocation = { navController.navigate(Routes.ProfileLocation) },
+                onOpenSavedStores = { navController.navigate(Routes.SavedStores) },
             )
         }
         composable(
@@ -293,9 +299,9 @@ fun AppNavHost(intent: Intent) {
         }
         composable(Routes.Review) {
             ReviewPlacesScreen(
-                onBack = { navController.popBackStack() },
                 onOpenPrompt = { navController.navigate("${Routes.Confirm}/$it") },
                 onOpenTrip = { navController.navigate("${Routes.Trip}/$it") },
+                onOpenSavedStores = { navController.navigate(Routes.SavedStores) },
             )
         }
         composable(Routes.Journal) {
@@ -353,7 +359,7 @@ fun AppNavHost(intent: Intent) {
         }
 
         composable(
-            route = "${Routes.Camera}?tripId={tripId}&return={return}&autoSave={autoSave}",
+            route = "${Routes.Camera}?tripId={tripId}&return={return}&autoSave={autoSave}&quickLog={quickLog}",
             arguments = listOf(
                 navArgument("tripId") {
                     type = NavType.LongType
@@ -361,15 +367,18 @@ fun AppNavHost(intent: Intent) {
                 },
                 navArgument("return") { type = NavType.IntType; defaultValue = 0 },
                 navArgument("autoSave") { type = NavType.IntType; defaultValue = 0 },
+                navArgument("quickLog") { type = NavType.IntType; defaultValue = 0 },
             )
         ) {
             val tripId = it.arguments?.getLong("tripId") ?: -1L
             val returnCapture = (it.arguments?.getInt("return") ?: 0) == 1
             val autoSave = (it.arguments?.getInt("autoSave") ?: 0) == 1
+            val quickLog = (it.arguments?.getInt("quickLog") ?: 0) == 1
             CameraScreen(
                 tripId = tripId.takeIf { id -> id > 0L },
                 returnCaptureToCaller = returnCapture,
                 autoSaveToTrip = autoSave,
+                quickLogTripOnAutoSave = quickLog,
                 onCaptureConfirmed = { uri, mimeType, isTempLocalFileProviderUri, capturedAt ->
                     val prev = navController.previousBackStackEntry
                     prev?.savedStateHandle?.set("cameraCaptureUri", uri)

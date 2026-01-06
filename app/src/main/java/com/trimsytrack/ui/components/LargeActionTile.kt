@@ -66,7 +66,7 @@ fun LargeActionTile(
             ) {
                 CompositionLocalProvider(LocalContentColor provides contentColor) {
                     if (!iconImageUri.isNullOrBlank()) {
-                        val imageSize = iconSize * 0.90f
+                        val imageSize = iconSize * 0.95f
                         Box(modifier = Modifier.size(iconSize), contentAlignment = Alignment.Center) {
                             AsyncImage(
                                 model = iconImageUri,

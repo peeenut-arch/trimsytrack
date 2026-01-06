@@ -12,7 +12,17 @@ This is the short checklist for adding features safely (IDs, scoping, background
 ### Canonical naming
 - **TripID** → `TripEntity.id: Long`
 - **DreciptID** → human-friendly receipt code string (currently formatted by `SettingsStore.formatDreciptID(...)`)
-- **EvidenceID** → `AttachmentEntity.id: Long` (images/PDFs are stored as attachments)
+- **EvidenceID** → `AttachmentEntity.id: Long` (all media is “Evidence”: photos/screenshots/scans/PDFs)
+  - Human-facing format: `evID` counting from 1 (this is the Room PK; always display as `evID=<id>`)
+
+Evidence linkage truth:
+- Evidence is always tied to a Trip.
+- Canonical identity for a claimed/exported evidence item is:
+  - `(profileId, evidenceId, tripId)`
+- “Date/time/place” for evidence is derived from the linked trip (a trip is a snapshot):
+  - date: `TripEntity.day`
+  - time: `TripEntity.createdAt`
+  - place: `TripEntity.storeNameSnapshot` (+ `citySnapshot` when available)
 
 ## 2) Primary keys vs. sync IDs
 - **Room primary keys** (`id: Long`) are local-only and auto-generated.
@@ -68,3 +78,134 @@ This is the short checklist for adding features safely (IDs, scoping, background
   - stable identifiers
   - correct scoping
   - safe defaults
+
+## 10) Caching & “pull once” behavior
+- **Trips are snapshots.** Once a trip is created, we do not retroactively edit its start/end labels, coordinates, or distance if store metadata changes later.
+- **Driving distance is cached.** Route computations are cached and reused; recomputation should only happen when the cache key changes.
+- **Google Places details are cached after first fetch.** When we fetch formatted address/opening hours for a place, we persist it locally so future views can work offline and do not require refetch.
+- **Destructive restore is explicit.** “Download & restore” is the only operation allowed to replace local DB/settings from the backend.
+
+## 11) Backend sync (API + behavioral contract)
+
+This section defines what the app expects from the backend and what the backend can expect from the app.
+
+### 11.1 Common request requirements (all backend endpoints)
+- Requests must include:
+  - `Authorization: Bearer <Firebase ID token>`
+  - `X-App-Id: <app-id>` (multi-app isolation; compiled as `BuildConfig.APP_ID`)
+  - `X-Profile-Id: <profile-id>` (per-profile isolation; `settings.profileId` or `"default"`)
+- All endpoints are versioned under `/api/v1/...`.
+
+### 11.2 Outbox trip-create sync (small, incremental)
+- Purpose: push newly created trips to backend without uploading the full database.
+- Trigger: when a trip is created locally, the app enqueues an outbox item (`TYPE_TRIP_CREATE`).
+- Idempotency:
+  - The app sends `Idempotency-Key: <uuid>`.
+  - Backend must dedupe on `Idempotency-Key` and return the same canonical object for retries.
+- Canonicalization:
+  - Backend is authoritative for `backendId` and canonical timestamps.
+  - Backend returns a canonical trip object; the app overwrites local trip fields with the canonical values and marks `syncStatus = SYNCED`.
+- Failure semantics:
+  - 4xx → treated as rejected; local trip becomes `REJECTED`.
+  - 5xx/network → treated as retryable; outbox stays pending/failed-retry.
+- Network expectations:
+  - If the outbox is empty, the worker should perform no backend calls (so scheduled runs are effectively “free”).
+
+### 11.3 Snapshot upload/download (bulk, destructive restore)
+- Purpose: move a full “profile snapshot” across devices or recover from backend.
+- Upload (`PUT /api/v1/driverdata/{driverId}`):
+  - App uploads a full `DriverData` JSON payload.
+  - Backend returns a canonical `DriverData` JSON payload.
+  - App immediately restores local DB/settings from that canonical response.
+- Download (`GET /api/v1/driverdata/{driverId}`):
+  - Backend returns a `DriverData` JSON payload.
+  - App restores local DB/settings from it.
+- Destructive by design:
+  - Snapshot download/restore replaces local DB and key settings.
+  - This must remain an explicit user action (no silent background “daily restore”).
+- Evidence policy:
+  - Evidence never reaches the backend (neither bytes nor metadata).
+  - Implication: backend snapshots are not an Evidence backup.
+  - Restore behavior: when restoring from backend snapshot, local Evidence must be preserved.
+
+### 11.4 What is NOT a synced entity
+- “Visited stores” is not synced as its own list; it is derived from local trips/stores and filtered by `visitedHiddenStoreIds` (which is included in snapshot settings).
+- Stores are not currently pushed incrementally via outbox (only trips are).
+
+### 11.5 Versioning expectations
+- `DriverData.schemaVersion` must be bumped for breaking changes.
+- Backend should accept older versions where feasible; app uses `ignoreUnknownKeys` to tolerate forward-compatible fields.
+
+## 12) Sync rules (what moves when)
+
+These rules define how **all information** in the app is expected to move between devices and the backend.
+
+### 12.1 Two sync channels
+- **Incremental outbox (small / frequent)**
+  - Sends *only new trips* as discrete events.
+  - Runs on immediate triggers and/or scheduled runs.
+  - If the outbox is empty, it performs **no backend calls**.
+- **Snapshot upload (bulk / daily)**
+  - Sends a full `DriverData` snapshot (DB + key settings).
+  - Scheduled **once per day**.
+  - Uses a stable fingerprint to **skip uploading when nothing changed**.
+  - Snapshot **download & restore** is destructive and must remain an explicit user action.
+
+### 12.2 Entity-by-entity rules
+- **Trips**
+  - Source of truth: local DB (created by the app), backend becomes authoritative after canonicalization.
+  - Sync:
+    - Incremental: outbox `TYPE_TRIP_CREATE`.
+    - Snapshot: included.
+  - Immutability: treated as snapshots (no retroactive edits based on later store metadata).
+
+- **Stores (saved stores + custom GPS stores)**
+  - Source of truth: local DB.
+  - Sync:
+    - Incremental: not currently.
+    - Snapshot: included.
+
+- **Prompt events**
+  - Source of truth: local DB.
+  - Sync:
+    - Incremental: not currently.
+    - Snapshot: included.
+
+- **Runs**
+  - Source of truth: local DB.
+  - Sync:
+    - Incremental: not currently.
+    - Snapshot: included.
+
+- **Attachments (evidence)**
+- **Evidence (attachments)**
+  - Source of truth: local device file + `AttachmentEntity` metadata.
+  - Sync:
+    - Backend: **never** (neither bytes nor metadata).
+    - Computer: synced separately when connected (not via backend).
+
+### 12.4 Evidence pull contract (TrimsyApp)
+- Evidence can be pulled by the companion app via a **signature-protected** content provider:
+  - List: `content://<applicationId>.evidence/list`
+    - Includes `relativePath` extracted from the app FileProvider URI when possible.
+  - List all files in the on-device evidence folder (including orphans): `content://<applicationId>.evidence/files`
+  - Read bytes: `content://<applicationId>.evidence/ev/<evidenceId>`
+- Read bytes for a raw file path (for orphan recovery): `content://<applicationId>.evidence/file?path=<tripId>/<fileName>`
+- This provider uses the current active `profileId` (falls back to `default`).
+
+Deduping rule for TrimsyApp:
+- Maintain a local manifest of already-exported items keyed by:
+  - preferred: `relativePath` + `sizeBytes` + `lastModified`, or
+  - attachments: `(profileId, evidenceId)`
+- Only copy files that are not present in the manifest; update the manifest after a successful copy.
+
+- **Settings / preferences / caches**
+  - Source of truth: local DataStore.
+  - Sync:
+    - Snapshot: included (e.g., `visitedHiddenStoreIds`, store images, cached Places details).
+  - Some caches are intentionally not included (e.g., driving distance cache).
+
+### 12.3 Derived views
+- **Visited stores list** is derived from trips + stores and filtered by `visitedHiddenStoreIds`.
+  - There is no standalone “visited stores” object to sync.
+  - Cross-device consistency comes from syncing the underlying trips/stores and the filter setting.

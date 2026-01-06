@@ -32,6 +32,16 @@ data class BusinessHours(
 )
 
 @Serializable
+data class StoreFetchedDetails(
+    /** Full formatted address from Google Places Details (if available). */
+    val formattedAddress: String? = null,
+    /** Weekday descriptions from Google Places Details (if available). */
+    val weekdayDescriptions: List<String> = emptyList(),
+    /** Epoch millis when this was fetched. */
+    val fetchedAtMillis: Long = 0L,
+)
+
+@Serializable
 data class HiddenTripPlace(
     val id: String,
     val name: String,
@@ -109,12 +119,16 @@ data class ProfileScopedSnapshot(
     // Per-store customizations
     val storeImages: Map<String, String> = emptyMap(),
     val storeBusinessHours: Map<String, BusinessHours> = emptyMap(),
+    /** Cached Google Places details (address/opening hours) so we don't need to refetch repeatedly. */
+    val storeFetchedDetails: Map<String, StoreFetchedDetails> = emptyMap(),
 
     // UI / preferences
     val homeTileIconImages: Map<String, String> = emptyMap(),
     val preferredCategories: List<String> = emptyList(),
     val storeSyncRadiusKm: Int = 25,
     val ignoredStoreIds: List<String> = emptyList(),
+    // Visited stores: ids hidden from the "Visited Stores" list UI.
+    val visitedHiddenStoreIds: List<String> = emptyList(),
     val hiddenTripPlaces: List<HiddenTripPlace> = emptyList(),
     val expandedStoreCities: List<String> = emptyList(),
     val manualTripStoreSortMode: String = "NAME",
@@ -199,6 +213,9 @@ class SettingsStore(private val context: Context) {
         // Store business hours (storeId -> BusinessHours)
         val storeBusinessHoursJson = stringPreferencesKey("storeBusinessHoursJson")
 
+        // Cached Google Places details (storeId -> StoreFetchedDetails)
+        val storeFetchedDetailsJson = stringPreferencesKey("storeFetchedDetailsJson")
+
         // Home tile icon images (tileId -> fileprovider uri)
         val homeTileIconImagesJson = stringPreferencesKey("homeTileIconImagesJson")
 
@@ -210,6 +227,9 @@ class SettingsStore(private val context: Context) {
 
         // Private zones (minimal): storeIds to never prompt for
         val ignoredStoreIdsJson = stringPreferencesKey("ignoredStoreIdsJson")
+
+        // Visited stores: ids hidden from the visited list
+        val visitedHiddenStoreIdsJson = stringPreferencesKey("visitedHiddenStoreIdsJson")
 
         // Manual trip: hidden places metadata (for items not stored in DB)
         val hiddenTripPlacesJson = stringPreferencesKey("hiddenTripPlacesJson")
@@ -254,6 +274,11 @@ class SettingsStore(private val context: Context) {
         // Backend sync status (device behavior)
         val backendLastSyncAtMillis = longPreferencesKey("backendLastSyncAtMillis")
         val backendLastSyncResult = stringPreferencesKey("backendLastSyncResult")
+
+        // DriverData snapshot auto-upload bookkeeping (daily, best-effort).
+        val driverDataLastUploadAtMillis = longPreferencesKey("driverDataLastUploadAtMillis")
+        val driverDataLastUploadResult = stringPreferencesKey("driverDataLastUploadResult")
+        val driverDataLastUploadFingerprint = stringPreferencesKey("driverDataLastUploadFingerprint")
 
         // Receipt Reminder (global)
         val receiptReminderMinutes = intPreferencesKey("receiptReminderMinutes")
@@ -353,6 +378,11 @@ class SettingsStore(private val context: Context) {
             if (raw.isBlank()) emptyMap() else json.decodeFromString<Map<String, BusinessHours>>(raw)
         }.getOrDefault(emptyMap())
 
+        val storeFetchedDetails = runCatching {
+            val raw = prefs[Keys.storeFetchedDetailsJson].orEmpty()
+            if (raw.isBlank()) emptyMap() else json.decodeFromString<Map<String, StoreFetchedDetails>>(raw)
+        }.getOrDefault(emptyMap())
+
         val homeTileIconImages = runCatching {
             val raw = prefs[Keys.homeTileIconImagesJson].orEmpty()
             if (raw.isBlank()) emptyMap() else json.decodeFromString<Map<String, String>>(raw)
@@ -365,6 +395,11 @@ class SettingsStore(private val context: Context) {
 
         val ignoredStoreIds = runCatching {
             val raw = prefs[Keys.ignoredStoreIdsJson].orEmpty()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
+        }.getOrDefault(emptyList())
+
+        val visitedHiddenStoreIds = runCatching {
+            val raw = prefs[Keys.visitedHiddenStoreIdsJson].orEmpty()
             if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)
         }.getOrDefault(emptyList())
 
@@ -437,11 +472,13 @@ class SettingsStore(private val context: Context) {
 
             storeImages = storeImages,
             storeBusinessHours = storeBusinessHours,
+            storeFetchedDetails = storeFetchedDetails,
 
             homeTileIconImages = homeTileIconImages,
             preferredCategories = preferredCategories,
             storeSyncRadiusKm = prefs[Keys.storeSyncRadiusKm] ?: 25,
             ignoredStoreIds = ignoredStoreIds,
+            visitedHiddenStoreIds = visitedHiddenStoreIds,
             hiddenTripPlaces = hiddenTripPlaces,
             expandedStoreCities = expandedStoreCities,
             manualTripStoreSortMode = prefs[Keys.manualTripStoreSortMode] ?: "NAME",
@@ -497,11 +534,13 @@ class SettingsStore(private val context: Context) {
 
         prefs[Keys.storeImagesJson] = json.encodeToString(snapshot.storeImages)
         prefs[Keys.storeBusinessHoursJson] = json.encodeToString(snapshot.storeBusinessHours)
+        prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(snapshot.storeFetchedDetails)
 
         prefs[Keys.homeTileIconImagesJson] = json.encodeToString(snapshot.homeTileIconImages)
         prefs[Keys.preferredCategoriesJson] = json.encodeToString(snapshot.preferredCategories)
         prefs[Keys.storeSyncRadiusKm] = snapshot.storeSyncRadiusKm
         prefs[Keys.ignoredStoreIdsJson] = json.encodeToString(snapshot.ignoredStoreIds)
+        prefs[Keys.visitedHiddenStoreIdsJson] = json.encodeToString(snapshot.visitedHiddenStoreIds)
         prefs[Keys.hiddenTripPlacesJson] = json.encodeToString(snapshot.hiddenTripPlaces)
         prefs[Keys.expandedStoreCitiesJson] = json.encodeToString(snapshot.expandedStoreCities)
         prefs[Keys.manualTripStoreSortMode] = snapshot.manualTripStoreSortMode
@@ -586,6 +625,12 @@ class SettingsStore(private val context: Context) {
             .getOrDefault(emptyMap())
     }
 
+    val storeFetchedDetails: Flow<Map<String, StoreFetchedDetails>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.storeFetchedDetailsJson].orEmpty()
+        if (raw.isBlank()) emptyMap() else runCatching { json.decodeFromString<Map<String, StoreFetchedDetails>>(raw) }
+            .getOrDefault(emptyMap())
+    }
+
     val homeTileIconImages: Flow<Map<String, String>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.homeTileIconImagesJson].orEmpty()
         if (raw.isBlank()) emptyMap() else runCatching { json.decodeFromString<Map<String, String>>(raw) }.getOrDefault(emptyMap())
@@ -602,6 +647,16 @@ class SettingsStore(private val context: Context) {
         val raw = prefs[Keys.ignoredStoreIdsJson].orEmpty()
         if (raw.isBlank()) emptySet() else runCatching { json.decodeFromString<List<String>>(raw) }
             .getOrDefault(emptyList())
+            .toSet()
+    }
+
+    val visitedHiddenStoreIds: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.visitedHiddenStoreIdsJson].orEmpty()
+        if (raw.isBlank()) emptySet() else runCatching { json.decodeFromString<List<String>>(raw) }
+            .getOrDefault(emptyList())
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
             .toSet()
     }
 
@@ -891,9 +946,10 @@ class SettingsStore(private val context: Context) {
         }
     }
 
-    val backendSyncMode: Flow<BackendSyncMode> = context.dataStore.data.map { prefs ->
-        val raw = prefs[Keys.backendSyncMode] ?: BackendSyncMode.INSTANT.name
-        runCatching { BackendSyncMode.valueOf(raw) }.getOrDefault(BackendSyncMode.INSTANT)
+    // Backend sync scheduling is intentionally fixed to INSTANT.
+    // (We still keep the stored pref key for backwards compatibility / migrations.)
+    val backendSyncMode: Flow<BackendSyncMode> = context.dataStore.data.map {
+        BackendSyncMode.INSTANT
     }
 
     /** Minutes after midnight local time for daily sync. */
@@ -907,6 +963,18 @@ class SettingsStore(private val context: Context) {
 
     val backendLastSyncResult: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[Keys.backendLastSyncResult].orEmpty()
+    }
+
+    val driverDataLastUploadAtMillis: Flow<Long?> = context.dataStore.data.map { prefs ->
+        prefs[Keys.driverDataLastUploadAtMillis]
+    }
+
+    val driverDataLastUploadResult: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.driverDataLastUploadResult].orEmpty()
+    }
+
+    val driverDataLastUploadFingerprint: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.driverDataLastUploadFingerprint].orEmpty()
     }
 
     suspend fun setTrackingEnabled(enabled: Boolean) {
@@ -936,7 +1004,8 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun setBackendSyncMode(value: BackendSyncMode) {
-        context.dataStore.edit { it[Keys.backendSyncMode] = value.name }
+        // Locked to INSTANT: ignore requests to set other modes.
+        context.dataStore.edit { it[Keys.backendSyncMode] = BackendSyncMode.INSTANT.name }
     }
 
     suspend fun setBackendDailySyncMinutes(value: Int) {
@@ -947,6 +1016,16 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit {
             it[Keys.backendLastSyncAtMillis] = atMillis
             it[Keys.backendLastSyncResult] = result
+        }
+    }
+
+    suspend fun setDriverDataLastUpload(atMillis: Long, result: String, fingerprint: String?) {
+        context.dataStore.edit {
+            it[Keys.driverDataLastUploadAtMillis] = atMillis
+            it[Keys.driverDataLastUploadResult] = result
+            if (fingerprint != null) {
+                it[Keys.driverDataLastUploadFingerprint] = fingerprint
+            }
         }
     }
 
@@ -997,15 +1076,35 @@ class SettingsStore(private val context: Context) {
 
             prefs[Keys.storeImagesJson] = json.encodeToString(s.storeImages)
             prefs[Keys.storeBusinessHoursJson] = json.encodeToString(s.storeBusinessHours)
+            prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(s.storeFetchedDetails)
             prefs[Keys.homeTileIconImagesJson] = json.encodeToString(s.homeTileIconImages)
             prefs[Keys.preferredCategoriesJson] = json.encodeToString(s.preferredCategories)
             prefs[Keys.storeSyncRadiusKm] = s.storeSyncRadiusKm
             prefs[Keys.ignoredStoreIdsJson] = json.encodeToString(s.ignoredStoreIds)
+            prefs[Keys.visitedHiddenStoreIdsJson] = json.encodeToString(s.visitedHiddenStoreIds)
             prefs[Keys.expandedStoreCitiesJson] = json.encodeToString(s.expandedStoreCities)
             prefs[Keys.manualTripStoreSortMode] = s.manualTripStoreSortMode
 
             prefs[Keys.backendBaseUrl] = s.backendBaseUrl
             prefs[Keys.backendDriverId] = s.backendDriverId
+        }
+    }
+
+    suspend fun setVisitedStoreHidden(storeId: String, hidden: Boolean) {
+        val normalized = storeId.trim()
+        if (normalized.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.visitedHiddenStoreIdsJson].orEmpty()
+            val list = if (current.isBlank()) emptyList() else runCatching {
+                json.decodeFromString<List<String>>(current)
+            }.getOrDefault(emptyList())
+
+            val updated = list.toMutableSet().apply {
+                if (hidden) add(normalized) else remove(normalized)
+            }.toList()
+
+            prefs[Keys.visitedHiddenStoreIdsJson] = json.encodeToString(updated)
         }
     }
 
@@ -1344,6 +1443,42 @@ class SettingsStore(private val context: Context) {
 
             val updated = map.toMutableMap().apply { remove(storeId) }
             prefs[Keys.storeBusinessHoursJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun getCachedStoreFetchedDetails(storeId: String): StoreFetchedDetails? {
+        val key = storeId.trim()
+        if (key.isBlank()) return null
+        return storeFetchedDetails.first()[key]
+    }
+
+    suspend fun upsertStoreFetchedDetails(storeId: String, details: StoreFetchedDetails) {
+        val key = storeId.trim()
+        if (key.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.storeFetchedDetailsJson].orEmpty()
+            val map = if (current.isBlank()) emptyMap() else runCatching {
+                json.decodeFromString<Map<String, StoreFetchedDetails>>(current)
+            }.getOrDefault(emptyMap())
+
+            val updated = map.toMutableMap().apply { put(key, details) }
+            prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(updated)
+        }
+    }
+
+    suspend fun clearStoreFetchedDetails(storeId: String) {
+        val key = storeId.trim()
+        if (key.isBlank()) return
+
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.storeFetchedDetailsJson].orEmpty()
+            val map = if (current.isBlank()) emptyMap() else runCatching {
+                json.decodeFromString<Map<String, StoreFetchedDetails>>(current)
+            }.getOrDefault(emptyMap())
+
+            val updated = map.toMutableMap().apply { remove(key) }
+            prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(updated)
         }
     }
 

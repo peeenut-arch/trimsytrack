@@ -11,6 +11,7 @@ import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.PromptStatus
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.util.PlaceNameNormalizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -87,13 +88,11 @@ class TripConfirmViewModel(
             }.getOrDefault(false)
 
             val last = AppGraph.tripRepository.latestTripForDay(day)
-            val canUseLast =
-                hasBusinessHomeTripToday && last != null && distanceKm(
-                    last.storeLatSnapshot,
-                    last.storeLngSnapshot,
-                    prompt.storeLatSnapshot,
-                    prompt.storeLngSnapshot
-                ) <= 10.0
+            val canUseLast = when {
+                last == null -> false
+                businessHomeLat == null || businessHomeLng == null -> true
+                else -> hasBusinessHomeTripToday
+            }
 
             _state.update { prev ->
                 val homeLat = businessHomeLat
@@ -146,7 +145,8 @@ class TripConfirmViewModel(
 
     fun useLastStoreStart() {
         viewModelScope.launch {
-            val last = AppGraph.tripRepository.latestTripForDay(LocalDate.now()) ?: return@launch
+            val day = promptDay ?: LocalDate.now()
+            val last = AppGraph.tripRepository.latestTripForDay(day) ?: return@launch
             _state.update {
                 it.copy(
                     startLabel = "Last store: ${last.storeNameSnapshot}",
@@ -235,13 +235,19 @@ class TripConfirmViewModel(
                         AppGraph.storeRepository.getStore(store)?.city
                     }
                 }.getOrNull().orEmpty()
+
+                val normalizedStoreNameSnapshot = if (PlaceNameNormalizer.isPostOmbudName(storeName)) {
+                    PlaceNameNormalizer.formatPostOmbudDisplayName(name = storeName, city = citySnapshot)
+                } else {
+                    storeName
+                }
                 val tripId = AppGraph.tripRepository.createTrip(
                     TripEntity(
                         profileId = profileId,
                         createdAt = createdAt,
                         day = day,
                         storeId = store,
-                        storeNameSnapshot = storeName,
+                        storeNameSnapshot = normalizedStoreNameSnapshot,
                         citySnapshot = citySnapshot,
                         storeLatSnapshot = destLat,
                         storeLngSnapshot = destLng,
@@ -260,7 +266,8 @@ class TripConfirmViewModel(
                 // Backend-authoritative sync: enqueue create intent + attempt immediate send.
                 runCatching {
                     AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
-                    AppGraph.backendSyncManager.scheduleImmediate("trip-confirm")
+                    // Trip creation should always attempt a backend flush, regardless of the user's periodic schedule.
+                    AppGraph.backendSyncManager.scheduleNow("trip-confirm")
                 }
 
                 AppGraph.promptRepository.confirmWithTrip(promptId, tripId, now)

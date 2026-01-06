@@ -1,13 +1,16 @@
 package com.trimsytrack.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -24,10 +27,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.entities.PromptEventEntity
 import com.trimsytrack.data.entities.PromptStatus
@@ -38,9 +41,9 @@ import java.time.format.DateTimeFormatter
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun ReviewPlacesScreen(
-    onBack: () -> Unit,
     onOpenPrompt: (Long) -> Unit,
     onOpenTrip: (Long) -> Unit,
+    onOpenSavedStores: () -> Unit,
 ) {
     val prompts by AppGraph.promptRepository.observeRecent(limit = 200)
         .collectAsState(initial = emptyList())
@@ -55,12 +58,18 @@ fun ReviewPlacesScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
-                title = { Text("Notifications") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
+                modifier = Modifier.fillMaxWidth(),
+                title = {
+                    TextButton(
+                        onClick = onOpenSavedStores,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.onBackground),
+                    ) {
+                        Text(
+                            "Visited stores",
+                            color = MaterialTheme.colorScheme.background,
                         )
                     }
                 },
@@ -71,15 +80,12 @@ fun ReviewPlacesScreen(
             )
         }
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).padding(16.dp)) {
-            Text(
-                "Tap a place to add the trip later (keeps original ping time).",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
-            )
-
-            Spacer(Modifier.height(12.dp))
-
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .padding(16.dp)
+                .fillMaxSize()
+        ) {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(prompts, key = { it.id }) { p ->
                     ReviewPromptRow(

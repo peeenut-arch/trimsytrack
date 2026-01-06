@@ -1,6 +1,7 @@
 package com.trimsytrack.data.driverdata
 
 import com.trimsytrack.data.BusinessHours
+import com.trimsytrack.data.StoreFetchedDetails
 import java.time.Instant
 import java.time.LocalDate
 import kotlinx.serialization.SerialName
@@ -62,12 +63,14 @@ data class DriverSettings(
     // Per-store customizations
     val storeImages: Map<String, String> = emptyMap(),
     val storeBusinessHours: Map<String, BusinessHours> = emptyMap(),
+    val storeFetchedDetails: Map<String, StoreFetchedDetails> = emptyMap(),
 
     // UI / preferences
     val homeTileIconImages: Map<String, String> = emptyMap(),
     val preferredCategories: List<String> = emptyList(),
     val storeSyncRadiusKm: Int = 25,
     val ignoredStoreIds: List<String> = emptyList(),
+    val visitedHiddenStoreIds: List<String> = emptyList(),
     val expandedStoreCities: List<String> = emptyList(),
     val manualTripStoreSortMode: String = "NAME",
 

@@ -7,12 +7,19 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
+import com.trimsytrack.AppGraph
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.TripRepository
 import kotlinx.coroutines.flow.first
 import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 object KorjournalExporter {
     private val dateFormatter: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
@@ -30,6 +37,8 @@ object KorjournalExporter {
         val vehicleRegNumber = settings.vehicleRegNumber.first()
         val driverName = settings.driverName.first()
         val businessHomeAddress = settings.businessHomeAddress.first()
+        val businessHomeLat = settings.businessHomeLat.first()
+        val businessHomeLng = settings.businessHomeLng.first()
         val odometerYearStartKm = settings.odometerYearStartKm.first()
         val odometerYearEndKm = settings.odometerYearEndKm.first()
 
@@ -56,33 +65,88 @@ object KorjournalExporter {
                 ).joinToString(";") { it.csvCell() }
             )
 
-            for (t in tripList) {
-                val distanceKm = (t.distanceMeters / 1000.0)
-                val startAddress = if (t.startLabelSnapshot == "Business home" && businessHomeAddress.isNotBlank()) {
-                    businessHomeAddress
-                } else {
-                    t.startLabelSnapshot
+            val byDay = tripList
+                .groupBy { it.day }
+                .toSortedMap()
+
+            for ((day, dayTrips) in byDay) {
+                val ordered = dayTrips.sortedBy { it.createdAt }
+
+                for (t in ordered) {
+                    val distanceKm = (t.distanceMeters / 1000.0)
+                    val startAddress = if (t.startLabelSnapshot == "Business home" && businessHomeAddress.isNotBlank()) {
+                        businessHomeAddress
+                    } else {
+                        t.startLabelSnapshot
+                    }
+                    appendLine(
+                        listOf(
+                            t.id.toString(),
+                            year.toString(),
+                            vehicleRegNumber,
+                            odometerYearStartKm,
+                            odometerYearEndKm,
+                            businessHomeAddress,
+                            day.format(dateFormatter),
+                            "", // tripOdometerStartKm (not captured yet)
+                            "", // tripOdometerEndKm (not captured yet)
+                            String.format("%.1f", distanceKm),
+                            startAddress,
+                            t.storeNameSnapshot,
+                            t.notes, // purpose (mapped to notes for now)
+                            t.storeNameSnapshot,
+                            driverName,
+                            t.notes,
+                        ).joinToString(";") { it.csvCell() }
+                    )
                 }
-                appendLine(
-                    listOf(
-                        t.id.toString(),
-                        year.toString(),
-                        vehicleRegNumber,
-                        odometerYearStartKm,
-                        odometerYearEndKm,
-                        businessHomeAddress,
-                        t.day.format(dateFormatter),
-                        "", // tripOdometerStartKm (not captured yet)
-                        "", // tripOdometerEndKm (not captured yet)
-                        String.format("%.1f", distanceKm),
-                        startAddress,
-                        t.storeNameSnapshot,
-                        t.notes, // purpose (mapped to notes for now)
-                        t.storeNameSnapshot,
-                        driverName,
-                        t.notes,
-                    ).joinToString(";") { it.csvCell() }
-                )
+
+                // Auto append: last stop -> Business home (to ensure day both starts and ends at home).
+                val homeLat = businessHomeLat
+                val homeLng = businessHomeLng
+                val last = ordered.lastOrNull()
+                if (homeLat != null && homeLng != null && last != null && distanceKm(last.storeLatSnapshot, last.storeLngSnapshot, homeLat, homeLng) > 0.2) {
+                    val returnRoute = runCatching {
+                        AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                            startLat = last.storeLatSnapshot,
+                            startLng = last.storeLngSnapshot,
+                            destLat = homeLat,
+                            destLng = homeLng,
+                            startLocationId = last.storeId,
+                            endLocationId = BUSINESS_HOME_LOCATION_ID,
+                        )
+                    }.getOrElse {
+                        AppGraph.distanceRepository.estimateStraightLineRoute(
+                            startLat = last.storeLatSnapshot,
+                            startLng = last.storeLngSnapshot,
+                            destLat = homeLat,
+                            destLng = homeLng,
+                        )
+                    }
+
+                    val endAddress = if (businessHomeAddress.isNotBlank()) businessHomeAddress else "Business home"
+                    val distanceKm = (returnRoute.distanceMeters / 1000.0)
+                    appendLine(
+                        listOf(
+                            "return-home:${last.id}",
+                            year.toString(),
+                            vehicleRegNumber,
+                            odometerYearStartKm,
+                            odometerYearEndKm,
+                            businessHomeAddress,
+                            day.format(dateFormatter),
+                            "", // tripOdometerStartKm (not captured yet)
+                            "", // tripOdometerEndKm (not captured yet)
+                            String.format("%.1f", distanceKm),
+                            last.storeNameSnapshot,
+                            endAddress,
+                            "Return home",
+                            "Business home",
+                            driverName,
+                            "",
+                        ).joinToString(";") { it.csvCell() }
+                    )
+                }
             }
         }
 
@@ -215,4 +279,14 @@ private fun String.csvCell(): String {
     // Always quote to keep it predictable across locales.
     val escaped = this.replace("\"", "\"\"")
     return "\"$escaped\""
+}
+
+private fun distanceKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val r = 6371.0
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a =
+        sin(dLat / 2).pow(2.0) + cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2.0)
+    val c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return r * c
 }

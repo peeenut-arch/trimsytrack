@@ -41,7 +41,11 @@ class GeofenceSyncWorker(
         )
 
         val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
-        val all = AppGraph.db.storeDao().getByRegion(profileId, region).sortedBy { it.id }
+        val regionStores = AppGraph.db.storeDao().getByRegion(profileId, region)
+        val customStores = AppGraph.db.storeDao().getByRegion(profileId, CUSTOM_REGION_CODE)
+        val all = (regionStores + customStores)
+            .distinctBy { it.id }
+            .sortedBy { it.id }
         if (all.isEmpty()) {
             Log.w(TAG, "GeofenceSyncWorker: no stores found for region=$region")
             return Result.success()
@@ -70,3 +74,5 @@ class GeofenceSyncWorker(
         }
     }
 }
+
+private const val CUSTOM_REGION_CODE = "custom"

@@ -95,6 +95,7 @@ import com.trimsytrack.data.driverdata.DriverDataRepository
 import com.trimsytrack.data.sync.BackendSyncMode
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.export.KorjournalExporter
+import com.trimsytrack.ui.components.HomeTileIds
 import java.io.File
 import java.time.LocalDate
 import kotlin.math.*
@@ -169,15 +170,14 @@ fun SettingsScreen(
 
     val storeImages by AppGraph.settings.storeImages.collectAsState(initial = emptyMap())
     val ignoredStoreIds by AppGraph.settings.ignoredStoreIds.collectAsState(initial = emptySet())
-    val expandedStoreCities by AppGraph.settings.expandedStoreCities.collectAsState(initial = emptySet())
+    // Settings should be collapsed by default; do not auto-restore expanded city sections.
+    var expandedStoreCities by remember { mutableStateOf<Set<String>>(emptySet()) }
     val storeBusinessHours by AppGraph.settings.storeBusinessHours.collectAsState(initial = emptyMap())
 
     val vehicleRegNumber by AppGraph.settings.vehicleRegNumber.collectAsState(initial = "")
     val driverName by AppGraph.settings.driverName.collectAsState(initial = "")
     val businessHomeAddress by AppGraph.settings.businessHomeAddress.collectAsState(initial = "")
     val journalYear by AppGraph.settings.journalYear.collectAsState(initial = LocalDate.now().year)
-    val odometerYearStartKm by AppGraph.settings.odometerYearStartKm.collectAsState(initial = "")
-    val odometerYearEndKm by AppGraph.settings.odometerYearEndKm.collectAsState(initial = "")
 
     val backendBaseUrl by AppGraph.settings.backendBaseUrl.collectAsState(initial = "http://79.76.38.94/")
     val backendDriverId by AppGraph.settings.backendDriverId.collectAsState(initial = "")
@@ -194,6 +194,8 @@ fun SettingsScreen(
 
     val receiptReminderMinutes by AppGraph.settings.receiptReminderMinutes.collectAsState(initial = 17 * 60)
     val receiptReminderMessage by AppGraph.settings.receiptReminderMessage.collectAsState(initial = "Don't forget to add the media")
+
+    val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
 
     LaunchedEffect(dataStoreLoaded, subProfileId, manualTripCategoryConfigs, manualTripCategoriesInitialized) {
         if (!dataStoreLoaded) return@LaunchedEffect
@@ -320,15 +322,52 @@ fun SettingsScreen(
 
     val allStores by AppGraph.storeRepository.observeAllStores().collectAsState(initial = emptyList())
 
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val tabTitles = remember { listOf("Driver", "GPS Settings", "Account") }
+    val effectiveProfileId = remember(activeProfileId) { activeProfileId.ifBlank { "default" } }
+    val allTrips by AppGraph.db.tripDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
 
-    var automationExpanded by rememberSaveable { mutableStateOf(false) }
-    var hiddenAndSyncedExpanded by rememberSaveable { mutableStateOf(false) }
-    var syncedStoresExpanded by rememberSaveable { mutableStateOf(false) }
-    var hiddenTripExpanded by rememberSaveable { mutableStateOf(false) }
+    fun canonicalizeStoreId(storeId: String): String {
+        return when {
+            storeId.startsWith("gmap_search_") -> "gmap_" + storeId.removePrefix("gmap_search_")
+            storeId.startsWith("gmap_interest_") -> "gmap_" + storeId.removePrefix("gmap_interest_")
+            else -> storeId
+        }
+    }
+
+    val visitedStoreIds = remember(allTrips) {
+        allTrips
+            .asSequence()
+            .map { canonicalizeStoreId(it.storeId) }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    val visitedStoresForPhotos = remember(allStores, visitedStoreIds, ignoredStoreIds) {
+        allStores
+            .asSequence()
+            .filter { store ->
+                val canonical = canonicalizeStoreId(store.id)
+                (store.id in visitedStoreIds || canonical in visitedStoreIds) &&
+                    store.id !in ignoredStoreIds && canonical !in ignoredStoreIds
+            }
+            .sortedWith(
+                compareBy<StoreEntity, String>(String.CASE_INSENSITIVE_ORDER) { it.city }
+                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+            )
+            .toList()
+    }
+
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val tabTitles = remember { listOf("Körjournal", "Spårning", "Konto") }
+
+    // Collapsed by default (and reset when reopening Settings).
+    var automationExpanded by remember { mutableStateOf(false) }
+    var hiddenAndSyncedExpanded by remember { mutableStateOf(false) }
+    var syncedStoresExpanded by remember { mutableStateOf(false) }
+    var hiddenTripExpanded by remember { mutableStateOf(false) }
+    var homeTilesMenuExpanded by remember { mutableStateOf(false) }
+    var visitedStorePhotosMenuExpanded by remember { mutableStateOf(false) }
     var resehanterareTab by rememberSaveable { mutableIntStateOf(0) }
-    var arbetstidExpanded by rememberSaveable { mutableStateOf(false) }
+    var arbetstidExpanded by remember { mutableStateOf(false) }
 
     var activeStartText by rememberSaveable { mutableStateOf(minutesToTime(activeStartMinutes)) }
     var activeEndText by rememberSaveable { mutableStateOf(minutesToTime(activeEndMinutes)) }
@@ -380,7 +419,7 @@ fun SettingsScreen(
     var driverDataBusy by remember { mutableStateOf(false) }
     var driverDataStatus by remember { mutableStateOf<String?>(null) }
 
-    var backendDataExpanded by rememberSaveable { mutableStateOf(false) }
+    var backendDataExpanded by remember { mutableStateOf(false) }
 
     suspend fun loadStoredDataCounts(profileId: String): StoredDataCounts = withContext(Dispatchers.IO) {
         StoredDataCounts(
@@ -683,6 +722,90 @@ fun SettingsScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            item {
+                SettingsSectionCard(title = "Startsida tiles") {
+                    ListItem(
+                        headlineContent = { Text("Startsida tiles") },
+                        supportingContent = { Text("Ändra bakgrundsbild på tiles") },
+                        trailingContent = {
+                            Icon(
+                                if (homeTilesMenuExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = if (homeTilesMenuExpanded) "Collapse" else "Expand",
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { homeTilesMenuExpanded = !homeTilesMenuExpanded },
+                    )
+
+                    if (homeTilesMenuExpanded) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HomeTileImageRow(
+                            label = "Add trip",
+                            hasCustomImage = !homeTileIconImages[HomeTileIds.ManualTrip].isNullOrBlank(),
+                            onPick = { pickHomeTileImage(HomeTileIds.ManualTrip) },
+                            onRemove = { removeHomeTileImage(HomeTileIds.ManualTrip) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HomeTileImageRow(
+                            label = "Notifications",
+                            hasCustomImage = !homeTileIconImages[HomeTileIds.ReviewPlaces].isNullOrBlank(),
+                            onPick = { pickHomeTileImage(HomeTileIds.ReviewPlaces) },
+                            onRemove = { removeHomeTileImage(HomeTileIds.ReviewPlaces) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HomeTileImageRow(
+                            label = "Journal",
+                            hasCustomImage = !homeTileIconImages[HomeTileIds.Journal].isNullOrBlank(),
+                            onPick = { pickHomeTileImage(HomeTileIds.Journal) },
+                            onRemove = { removeHomeTileImage(HomeTileIds.Journal) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HomeTileImageRow(
+                            label = "Camera",
+                            hasCustomImage = !homeTileIconImages[HomeTileIds.Camera].isNullOrBlank(),
+                            onPick = { pickHomeTileImage(HomeTileIds.Camera) },
+                            onRemove = { removeHomeTileImage(HomeTileIds.Camera) },
+                        )
+                    }
+                }
+            }
+
+            item {
+                SettingsSectionCard(title = "Visited stores photos") {
+                    ListItem(
+                        headlineContent = { Text("Visited stores photos") },
+                        supportingContent = { Text("Bläddra och sätt bild per besökt butik") },
+                        trailingContent = {
+                            Icon(
+                                if (visitedStorePhotosMenuExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = if (visitedStorePhotosMenuExpanded) "Collapse" else "Expand",
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { visitedStorePhotosMenuExpanded = !visitedStorePhotosMenuExpanded },
+                    )
+
+                    if (visitedStorePhotosMenuExpanded) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        if (visitedStoresForPhotos.isEmpty()) {
+                            Text(
+                                "No visited stores yet.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            )
+                        } else {
+                            VisitedStoresPhotoList(
+                                stores = visitedStoresForPhotos,
+                                storeImages = storeImages,
+                            )
+                        }
+                    }
+                }
+            }
+
             if (useLegacySettingsLayout && selectedTab == 0) {
                 item {
                     SettingsSectionCard(title = "Resehanterare") {
@@ -789,21 +912,7 @@ fun SettingsScreen(
                                         .fillMaxWidth()
                                         .padding(horizontal = 16.dp, vertical = 8.dp),
                                 ) {
-                                    OutlinedTextField(
-                                        value = odometerYearStartKm,
-                                        onValueChange = { scope.launch { AppGraph.settings.setOdometerYearStartKm(it) } },
-                                        label = { Text("Odometer (year start, km)") },
-                                        modifier = Modifier.weight(1f),
-                                        singleLine = true,
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    OutlinedTextField(
-                                        value = odometerYearEndKm,
-                                        onValueChange = { scope.launch { AppGraph.settings.setOdometerYearEndKm(it) } },
-                                        label = { Text("Odometer (year end, km)") },
-                                        modifier = Modifier.weight(1f),
-                                        singleLine = true,
-                                    )
+                                    // Odometer removed (not trackable reliably).
                                 }
                             }
 
@@ -996,7 +1105,7 @@ fun SettingsScreen(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         ListItem(
                             headlineContent = { Text("Arbetstid") },
-                            supportingContent = { Text(if (arbetstidExpanded) "Expanded" else "Collapsed") },
+                            supportingContent = { Text("Aktiva tider (när appen ska jobba)") },
                             trailingContent = {
                                 Icon(
                                     if (arbetstidExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1077,10 +1186,10 @@ fun SettingsScreen(
 
             if (useLegacySettingsLayout && selectedTab == 1) {
                 item {
-                    SettingsSectionCard(title = "Tracking & permissions") {
+                    SettingsSectionCard(title = "Spårning och behörigheter") {
                         ListItem(
-                            headlineContent = { Text("Tracking") },
-                            supportingContent = { Text("Uses Android geofencing only (no GPS polling).") },
+                            headlineContent = { Text("Spårning") },
+                            supportingContent = { Text("Använder Android geofence (ingen GPS-pollning).") },
                             trailingContent = {
                                 Switch(
                                     checked = trackingEnabled,
@@ -1088,7 +1197,7 @@ fun SettingsScreen(
                                         scope.launch {
                                             if (enabled) {
                                                 if (!hasFineLocation || !hasBackgroundLocation) {
-                                                    permissionHint.value = "Grant permissions first."
+                                                    permissionHint.value = "Ge behörigheter först."
                                                     requestNeededPermissions()
                                                     return@launch
                                                 }
@@ -1106,16 +1215,16 @@ fun SettingsScreen(
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         ListItem(
-                            headlineContent = { Text("Permissions") },
+                            headlineContent = { Text("Behörigheter") },
                             supportingContent = {
                                 Text(
-                                    "Location: ${if (hasFineLocation) "OK" else "MISSING"}\n" +
-                                        "Background location: ${if (hasBackgroundLocation) "OK" else "MISSING"}\n" +
-                                        "Notifications: ${if (hasNotifications) "OK" else "MISSING"}",
+                                    "Plats: ${if (hasFineLocation) "OK" else "SAKNAS"}\n" +
+                                        "Bakgrundsplats: ${if (hasBackgroundLocation) "OK" else "SAKNAS"}\n" +
+                                        "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                                 )
                             },
-                            trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Open") } },
+                            trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
                         )
 
                         if (permissionHint.value != null) {
@@ -1131,12 +1240,12 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Automation") {
+                    SettingsSectionCard(title = "Automatiska frågor") {
                         ListItem(
-                            headlineContent = { Text("Automation") },
+                            headlineContent = { Text("Automatiska frågor") },
                             supportingContent = {
                                 Text(
-                                    "Auto-asks when you stay at a place. Dwell ${dwell}m • Radius ${radius}m",
+                                    "Frågar automatiskt när du stannar. Tid ${dwell}m • Radie ${radius}m",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 )
                             },
@@ -1155,39 +1264,39 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             Text(
-                                "Dwell = how long you must stay before it asks.",
+                                "Tid = hur länge du måste stanna innan den frågar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             )
 
                             SettingStepper(
-                                label = "Dwell time (minutes)",
-                                description = "Wait this long at a store before a prompt.",
+                                label = "Tid innan fråga (minuter)",
+                                description = "Vänta så här länge innan en fråga visas.",
                                 value = dwell,
                                 min = 1,
                                 max = 60,
                                 onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
                             )
                             SettingStepper(
-                                label = "Detection radius (meters)",
-                                description = "How close you must be to count as 'there'.",
+                                label = "Upptäcktsradie (meter)",
+                                description = "Hur nära du måste vara för att räknas som 'där'.",
                                 value = radius,
                                 min = 75,
                                 max = 150,
                                 onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
                             )
                             SettingStepper(
-                                label = "Daily prompt limit",
-                                description = "Max number of prompts per day.",
+                                label = "Max frågor per dag",
+                                description = "Högsta antal frågor per dag.",
                                 value = limit,
                                 min = 1,
                                 max = 200,
                                 onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
                             )
                             SettingStepper(
-                                label = "Quiet time after dismiss (minutes)",
-                                description = "After you press Dismiss, it stays quiet.",
+                                label = "Tystnad efter Avfärda (minuter)",
+                                description = "Efter Avfärda väntar den så här länge.",
                                 value = suppression,
                                 min = 0,
                                 max = 24 * 60,
@@ -1201,7 +1310,7 @@ fun SettingsScreen(
                                     .padding(horizontal = 16.dp, vertical = 10.dp),
                             ) { Text("Update places") }
                             Text(
-                                "Refreshes the phone's invisible 'fences'.",
+                                "Uppdaterar telefonens 'geofence'-lista.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
@@ -1213,10 +1322,10 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Hidden & synced") {
+                    SettingsSectionCard(title = "Butiker och dolda") {
                         ListItem(
-                            headlineContent = { Text("Hidden + synced") },
-                            supportingContent = { Text(if (hiddenAndSyncedExpanded) "Expanded" else "Collapsed") },
+                            headlineContent = { Text("Butiker och dolda") },
+                            supportingContent = { Text("Synkade butiker, dolda platser") },
                             trailingContent = {
                                 Icon(
                                     if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1232,8 +1341,8 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             ListItem(
-                                headlineContent = { Text("Synced stores") },
-                                supportingContent = { Text(if (syncedStoresExpanded) "Expanded" else "Collapsed") },
+                                headlineContent = { Text("Synkade butiker") },
+                                supportingContent = { Text("Lista, favoriter, ta bort") },
                                 trailingContent = {
                                     Icon(
                                         if (syncedStoresExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1249,8 +1358,8 @@ fun SettingsScreen(
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                                 ListItem(
-                                    headlineContent = { Text("Sync stores") },
-                                    supportingContent = { Text("Search and sync stores into your list") },
+                                    headlineContent = { Text("Sök och lägg till butiker") },
+                                    supportingContent = { Text("Hämta butiker till din lista") },
                                     trailingContent = {
                                         Icon(
                                             Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1322,7 +1431,7 @@ fun SettingsScreen(
                                         expandedCities = expandedStoreCities,
                                         userLocation = userLocation,
                                         onToggleCityExpanded = { city, expanded ->
-                                            scope.launch { AppGraph.settings.setStoreCityExpanded(city, expanded) }
+                                            expandedStoreCities = if (expanded) expandedStoreCities + city else expandedStoreCities - city
                                         },
                                         onToggleFavorite = { store ->
                                             scope.launch {
@@ -1355,8 +1464,8 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             ListItem(
-                                headlineContent = { Text("Hidden (Trip)") },
-                                supportingContent = { Text(if (hiddenTripExpanded) "Expanded" else "Collapsed") },
+                                headlineContent = { Text("Dolda platser") },
+                                supportingContent = { Text("Platser du dolt i resor") },
                                 trailingContent = {
                                     Icon(
                                         if (hiddenTripExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1580,12 +1689,12 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Saved places") {
+                    SettingsSectionCard(title = "Sparade platser") {
                         val savedPlaces = remember(allStores) { allStores.filter { it.isFavorite } }
 
                         if (savedPlaces.isEmpty()) {
                             Text(
-                                "No saved places yet. Tap ⭐ on a synced store to save it here.",
+                                "Inga sparade platser än. Tryck ⭐ på en synkad butik för att spara den här.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -1598,7 +1707,7 @@ fun SettingsScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    "Show hidden",
+                                    "Visa dolda",
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f),
                                 )
@@ -1616,8 +1725,8 @@ fun SettingsScreen(
                                     scope.launch {
                                         AppGraph.settings.setStoreIgnored(store.id, true)
                                         val result = snackbarHostState.showSnackbar(
-                                            message = "Hidden: ${store.name}",
-                                            actionLabel = "Undo",
+                                            message = "Dold: ${store.name}",
+                                            actionLabel = "Ångra",
                                             withDismissAction = true,
                                         )
                                         if (result == SnackbarResult.ActionPerformed) {
@@ -1702,185 +1811,17 @@ fun SettingsScreen(
                                             .padding(end = 10.dp),
                                     )
                                 }
-                                Text("Clear all user data")
+                                Text("Rensa all användardata")
                             }
                         }
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "Profile") {
+                    SettingsSectionCard(title = "Backend och data") {
                         ListItem(
-                            headlineContent = { Text("Name") },
-                            supportingContent = {
-                                Text(
-                                    if (profileName.isBlank()) "Not set" else profileName,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    editedProfileName = profileName
-                                    showEditProfileNameDialog = true
-                                },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Profile picture") },
-                            supportingContent = {
-                                val status = if (activeProfilePhotoUri.isNullOrBlank()) "Not set" else "Set"
-                                Text(
-                                    status,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { changeProfilePhotoLauncher.launch(arrayOf("image/*")) },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Subprofile setup") },
-                            supportingContent = {
-                                Text(
-                                    "Selected: $subProfileLabel",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenOnboarding() },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Test Ping") },
-                            supportingContent = {
-                                Text(
-                                    "Send a test notification with your current GPS location",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenProfileLocation() },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Saved stores") },
-                            supportingContent = {
-                                Text(
-                                    "Search stores and add individually",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenSavedStores() },
-                        )
-                    }
-                }
-
-                item {
-                    SettingsSectionCard(title = "Appearance") {
-                        ListItem(
-                            headlineContent = { Text("Dark mode") },
-                            supportingContent = { Text(if (darkModeEnabled) "On" else "Off") },
-                            trailingContent = {
-                                Switch(
-                                    checked = darkModeEnabled,
-                                    onCheckedChange = { enabled ->
-                                        scope.launch { AppGraph.settings.setDarkModeEnabled(enabled) }
-                                    },
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    scope.launch { AppGraph.settings.setDarkModeEnabled(!darkModeEnabled) }
-                                },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("UI style") },
-                            supportingContent = {
-                                Text(
-                                    if (useNewUi) "New UI (soft)" else "Old UI (classic)",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                        )
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            OutlinedButton(
-                                onClick = { scope.launch { AppGraph.settings.setUseNewUi(false) } },
-                                enabled = useNewUi,
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("Old UI")
-                            }
-
-                            Button(
-                                onClick = { scope.launch { AppGraph.settings.setUseNewUi(true) } },
-                                enabled = !useNewUi,
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("New UI")
-                            }
-                        }
-                    }
-                }
-
-                item {
-                    SettingsSectionCard(title = "Backend/Data") {
-                        ListItem(
-                            headlineContent = { Text("Backend/Data") },
-                            supportingContent = { Text(if (backendDataExpanded) "Expanded" else "Collapsed") },
+                            headlineContent = { Text("Backend och data") },
+                            supportingContent = { Text("Synk, ID och lagrad data") },
                             trailingContent = {
                                 Icon(
                                     if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1896,7 +1837,7 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             Text(
-                                "Backend Sync",
+                                "Backend-synk",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -1907,7 +1848,7 @@ fun SettingsScreen(
                             onValueChange = { v ->
                                 scope.launch { AppGraph.settings.setBackendBaseUrl(v) }
                             },
-                            label = { Text("Backend base URL") },
+                            label = { Text("Backend-URL") },
                             singleLine = true,
                             enabled = !driverDataBusy,
                             modifier = Modifier
@@ -1920,7 +1861,7 @@ fun SettingsScreen(
                             onValueChange = { v ->
                                 scope.launch { AppGraph.settings.setBackendDriverId(v) }
                             },
-                            label = { Text("Driver ID") },
+                            label = { Text("Förar-ID") },
                             singleLine = true,
                             enabled = !driverDataBusy,
                             modifier = Modifier
@@ -1928,123 +1869,20 @@ fun SettingsScreen(
                                 .padding(horizontal = 16.dp, vertical = 6.dp),
                         )
 
-                        var syncModeExpanded by remember { mutableStateOf(false) }
-                        val syncModeLabel = when (backendSyncMode) {
-                            BackendSyncMode.INSTANT -> "Sync instantly"
-                            BackendSyncMode.HOURLY -> "Sync every hour"
-                            BackendSyncMode.DAILY_AT_TIME -> "Sync every day (set time)"
-                        }
-
-                        Box(
+                        ListItem(
+                            headlineContent = { Text("Synkschema") },
+                            supportingContent = { Text("Synka direkt (fast)") },
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                        ) {
-                            ListItem(
-                                headlineContent = { Text("Sync schedule") },
-                                supportingContent = { Text(syncModeLabel) },
-                                trailingContent = {
-                                    Icon(
-                                        if (syncModeExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                        contentDescription = null,
-                                    )
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable(enabled = !driverDataBusy) { syncModeExpanded = true },
-                            )
-
-                            DropdownMenu(
-                                expanded = syncModeExpanded,
-                                onDismissRequest = { syncModeExpanded = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Sync instantly") },
-                                    onClick = {
-                                        syncModeExpanded = false
-                                        scope.launch {
-                                            AppGraph.settings.setBackendSyncMode(BackendSyncMode.INSTANT)
-                                            AppGraph.backendSyncManager.applySchedule(
-                                                BackendSyncMode.INSTANT,
-                                                backendDailySyncMinutes,
-                                            )
-                                        }
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Sync every hour") },
-                                    onClick = {
-                                        syncModeExpanded = false
-                                        scope.launch {
-                                            AppGraph.settings.setBackendSyncMode(BackendSyncMode.HOURLY)
-                                            AppGraph.backendSyncManager.applySchedule(
-                                                BackendSyncMode.HOURLY,
-                                                backendDailySyncMinutes,
-                                            )
-                                        }
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Sync every day (set time)") },
-                                    onClick = {
-                                        syncModeExpanded = false
-                                        scope.launch {
-                                            AppGraph.settings.setBackendSyncMode(BackendSyncMode.DAILY_AT_TIME)
-                                            AppGraph.backendSyncManager.applySchedule(
-                                                BackendSyncMode.DAILY_AT_TIME,
-                                                backendDailySyncMinutes,
-                                            )
-                                        }
-                                    },
-                                )
-                            }
-                        }
-
-                        if (backendSyncMode == BackendSyncMode.DAILY_AT_TIME) {
-                            OutlinedTextField(
-                                value = backendDailySyncText,
-                                onValueChange = { v ->
-                                    backendDailySyncText = v
-                                    val parsed = parseTimeToMinutes(v)
-                                    if (parsed == null) {
-                                        backendDailySyncError = "Use HH:MM (00:00-23:59)"
-                                    } else {
-                                        backendDailySyncError = null
-                                        scope.launch {
-                                            AppGraph.settings.setBackendDailySyncMinutes(parsed)
-                                            AppGraph.backendSyncManager.applySchedule(
-                                                BackendSyncMode.DAILY_AT_TIME,
-                                                parsed,
-                                            )
-                                        }
-                                    }
-                                },
-                                label = { Text("Daily sync time (HH:MM)") },
-                                singleLine = true,
-                                isError = !backendDailySyncError.isNullOrBlank(),
-                                enabled = !driverDataBusy,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            )
-                            if (!backendDailySyncError.isNullOrBlank()) {
-                                Text(
-                                    backendDailySyncError ?: "",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                                )
-                            }
-                        }
+                                .fillMaxWidth(),
+                        )
 
                         ListItem(
-                            headlineContent = { Text("Backend sync") },
+                            headlineContent = { Text("Synkstatus") },
                             supportingContent = {
                                 val status = when {
-                                    anyRunning -> "Syncing…"
-                                    anyQueued -> "Queued / scheduled"
-                                    else -> "Idle"
+                                    anyRunning -> "Synkar…"
+                                    anyQueued -> "Köad / schemalagd"
+                                    else -> "Vilande"
                                 }
 
                                 val last = backendLastSyncAtMillis
@@ -2052,9 +1890,9 @@ fun SettingsScreen(
                                     val dt = java.time.Instant.ofEpochMilli(last)
                                         .atZone(java.time.ZoneId.systemDefault())
                                         .toLocalDateTime()
-                                    "Last: %02d:%02d (%s)".format(dt.hour, dt.minute, backendLastSyncResult.ifBlank { "unknown" })
+                                    "Senast: %02d:%02d (%s)".format(dt.hour, dt.minute, backendLastSyncResult.ifBlank { "okänt" })
                                 } else {
-                                    "Last: never"
+                                    "Senast: aldrig"
                                 }
 
                                 Text("$status · $lastText")
@@ -2063,7 +1901,7 @@ fun SettingsScreen(
                                 OutlinedButton(
                                     onClick = { AppGraph.backendSyncManager.scheduleNow("user") },
                                     enabled = !anyRunning,
-                                ) { Text("Sync now") }
+                                ) { Text("Synka nu") }
                             },
                         )
 
@@ -2078,14 +1916,14 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             Text(
-                                "Data",
+                                "Lagrad data",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             )
 
                             Text(
-                                "Saved locally on this device (database + settings).",
+                                "Sparat lokalt på den här enheten (databas + inställningar).",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
@@ -2093,7 +1931,7 @@ fun SettingsScreen(
 
                         if (!storedDataError.isNullOrBlank()) {
                             Text(
-                                "Could not load counts: ${storedDataError}",
+                                "Kunde inte läsa antal: ${storedDataError}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
@@ -2102,22 +1940,22 @@ fun SettingsScreen(
                         }
 
                         ListItem(
-                            headlineContent = { Text("Trips") },
-                            supportingContent = { Text("Includes start GPS + destination store + saved distance") },
+                            headlineContent = { Text("Resor") },
+                            supportingContent = { Text("Start-GPS + butik + sparad distans") },
                             trailingContent = { Text(storedDataCounts.trips.toString()) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                         ListItem(
-                            headlineContent = { Text("Stores") },
-                            supportingContent = { Text("Saved places with name + lat/lng") },
+                            headlineContent = { Text("Butiker") },
+                            supportingContent = { Text("Sparade platser (namn + lat/lng)") },
                             trailingContent = { Text(storedDataCounts.stores.toString()) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                         ListItem(
-                            headlineContent = { Text("Prompts") },
-                            supportingContent = { Text("Geofence prompt history (when it asked)") },
+                            headlineContent = { Text("Frågor") },
+                            supportingContent = { Text("Geofence-historik (när den frågade)") },
                             trailingContent = { Text(storedDataCounts.promptEvents.toString()) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -2166,10 +2004,10 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Evidence") {
+                    SettingsSectionCard(title = "Underlag") {
                         ListItem(
-                            headlineContent = { Text("Evidence") },
-                            supportingContent = { Text("Open a 3× grid of trip photos") },
+                            headlineContent = { Text("Underlag") },
+                            supportingContent = { Text("Öppna 3× rutnät med resefoton") },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onOpenEvidence() },
@@ -2179,117 +2017,6 @@ fun SettingsScreen(
             }
 
             if (!useLegacySettingsLayout) {
-                item {
-                    SettingsSectionCard(title = "Profile") {
-                        ListItem(
-                            headlineContent = { Text("Name") },
-                            supportingContent = {
-                                Text(
-                                    if (profileName.isBlank()) "Not set" else profileName,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    editedProfileName = profileName
-                                    showEditProfileNameDialog = true
-                                },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Profile picture") },
-                            supportingContent = {
-                                val status = if (activeProfilePhotoUri.isNullOrBlank()) "Not set" else "Set"
-                                Text(
-                                    status,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { changeProfilePhotoLauncher.launch(arrayOf("image/*")) },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Subprofile setup") },
-                            supportingContent = {
-                                Text(
-                                    "Selected: $subProfileLabel",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenOnboarding() },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Test Ping") },
-                            supportingContent = {
-                                Text(
-                                    "Send a test notification with your current GPS location",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenProfileLocation() },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Saved stores") },
-                            supportingContent = {
-                                Text(
-                                    "Search stores and add individually",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenSavedStores() },
-                        )
-                    }
-                }
-
                 item {
                     SettingsSectionCard(title = "Driver & vehicle") {
                         Text(
@@ -2371,21 +2098,7 @@ fun SettingsScreen(
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
                         ) {
-                            OutlinedTextField(
-                                value = odometerYearStartKm,
-                                onValueChange = { scope.launch { AppGraph.settings.setOdometerYearStartKm(it) } },
-                                label = { Text("Odometer (year start, km)") },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true,
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            OutlinedTextField(
-                                value = odometerYearEndKm,
-                                onValueChange = { scope.launch { AppGraph.settings.setOdometerYearEndKm(it) } },
-                                label = { Text("Odometer (year end, km)") },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true,
-                            )
+                            // Odometer removed (not trackable reliably).
                         }
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -2640,11 +2353,11 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Tracking & permissions") {
+                    SettingsSectionCard(title = "Spårning och behörigheter") {
                         // Reuse the existing card content by showing the same controls as in the legacy GPS tab.
                         ListItem(
-                            headlineContent = { Text("Tracking") },
-                            supportingContent = { Text("Uses Android geofencing only (no GPS polling).") },
+                            headlineContent = { Text("Spårning") },
+                            supportingContent = { Text("Använder Android geofence (ingen GPS-pollning).") },
                             trailingContent = {
                                 Switch(
                                     checked = trackingEnabled,
@@ -2652,7 +2365,7 @@ fun SettingsScreen(
                                         scope.launch {
                                             if (enabled) {
                                                 if (!hasFineLocation || !hasBackgroundLocation) {
-                                                    permissionHint.value = "Grant permissions first."
+                                                    permissionHint.value = "Ge behörigheter först."
                                                     requestNeededPermissions()
                                                     return@launch
                                                 }
@@ -2670,16 +2383,16 @@ fun SettingsScreen(
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         ListItem(
-                            headlineContent = { Text("Permissions") },
+                            headlineContent = { Text("Behörigheter") },
                             supportingContent = {
                                 Text(
-                                    "Location: ${if (hasFineLocation) "OK" else "MISSING"}\n" +
-                                        "Background location: ${if (hasBackgroundLocation) "OK" else "MISSING"}\n" +
-                                        "Notifications: ${if (hasNotifications) "OK" else "MISSING"}",
+                                    "Plats: ${if (hasFineLocation) "OK" else "SAKNAS"}\n" +
+                                        "Bakgrundsplats: ${if (hasBackgroundLocation) "OK" else "SAKNAS"}\n" +
+                                        "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                                 )
                             },
-                            trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Open") } },
+                            trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
                         )
 
                         if (permissionHint.value != null) {
@@ -2695,12 +2408,12 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Automation") {
+                    SettingsSectionCard(title = "Automatiska frågor") {
                         ListItem(
-                            headlineContent = { Text("Automation") },
+                            headlineContent = { Text("Automatiska frågor") },
                             supportingContent = {
                                 Text(
-                                    "Auto-asks when you stay at a place. Dwell ${dwell}m • Radius ${radius}m",
+                                    "Frågar automatiskt när du stannar. Tid ${dwell}m • Radie ${radius}m",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 )
                             },
@@ -2719,39 +2432,39 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             Text(
-                                "Dwell = how long you must stay before it asks.",
+                                "Tid = hur länge du måste stanna innan den frågar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             )
 
                             SettingStepper(
-                                label = "Dwell time (minutes)",
-                                description = "Wait this long at a store before a prompt.",
+                                label = "Tid innan fråga (minuter)",
+                                description = "Vänta så här länge innan en fråga visas.",
                                 value = dwell,
                                 min = 1,
                                 max = 60,
                                 onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
                             )
                             SettingStepper(
-                                label = "Detection radius (meters)",
-                                description = "How close you must be to count as 'there'.",
+                                label = "Upptäcktsradie (meter)",
+                                description = "Hur nära du måste vara för att räknas som 'där'.",
                                 value = radius,
                                 min = 75,
                                 max = 150,
                                 onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
                             )
                             SettingStepper(
-                                label = "Daily prompt limit",
-                                description = "Max number of prompts per day.",
+                                label = "Max frågor per dag",
+                                description = "Högsta antal frågor per dag.",
                                 value = limit,
                                 min = 1,
                                 max = 200,
                                 onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
                             )
                             SettingStepper(
-                                label = "Quiet time after dismiss (minutes)",
-                                description = "After you press Dismiss, it stays quiet.",
+                                label = "Tystnad efter Avfärda (minuter)",
+                                description = "Efter Avfärda väntar den så här länge.",
                                 value = suppression,
                                 min = 0,
                                 max = 24 * 60,
@@ -2765,7 +2478,7 @@ fun SettingsScreen(
                                     .padding(horizontal = 16.dp, vertical = 10.dp),
                             ) { Text("Update places") }
                             Text(
-                                "Refreshes the phone's invisible 'fences'.",
+                                "Uppdaterar telefonens 'geofence'-lista.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
@@ -2777,10 +2490,10 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Hidden & synced") {
+                    SettingsSectionCard(title = "Butiker och dolda") {
                         ListItem(
-                            headlineContent = { Text("Hidden + synced") },
-                            supportingContent = { Text(if (hiddenAndSyncedExpanded) "Expanded" else "Collapsed") },
+                            headlineContent = { Text("Butiker och dolda") },
+                            supportingContent = { Text("Synkade butiker, dolda platser") },
                             trailingContent = {
                                 Icon(
                                     if (hiddenAndSyncedExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -2797,7 +2510,7 @@ fun SettingsScreen(
                             // we intentionally keep this section collapsed by default.
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Text(
-                                "Open this section in classic layout for full controls.",
+                                "Öppna detta i klassiskt läge för fler inställningar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -2807,12 +2520,12 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Saved places") {
+                    SettingsSectionCard(title = "Sparade platser") {
                         val savedPlaces = remember(allStores) { allStores.filter { it.isFavorite } }
 
                         if (savedPlaces.isEmpty()) {
                             Text(
-                                "No saved places yet. Tap ⭐ on a synced store to save it here.",
+                                "Inga sparade platser än. Tryck ⭐ på en synkad butik för att spara den här.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -2825,7 +2538,7 @@ fun SettingsScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    "Show hidden",
+                                    "Visa dolda",
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f),
                                 )
@@ -2843,8 +2556,8 @@ fun SettingsScreen(
                                     scope.launch {
                                         AppGraph.settings.setStoreIgnored(store.id, true)
                                         val result = snackbarHostState.showSnackbar(
-                                            message = "Hidden: ${store.name}",
-                                            actionLabel = "Undo",
+                                            message = "Dold: ${store.name}",
+                                            actionLabel = "Ångra",
                                             withDismissAction = true,
                                         )
                                         if (result == SnackbarResult.ActionPerformed) {
@@ -2928,39 +2641,17 @@ fun SettingsScreen(
                                             .padding(end = 10.dp),
                                     )
                                 }
-                                Text("Clear all user data")
+                                Text("Rensa all användardata")
                             }
                         }
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "Appearance") {
+                    SettingsSectionCard(title = "Backend och data") {
                         ListItem(
-                            headlineContent = { Text("Dark mode") },
-                            supportingContent = { Text(if (darkModeEnabled) "On" else "Off") },
-                            trailingContent = {
-                                Switch(
-                                    checked = darkModeEnabled,
-                                    onCheckedChange = { enabled ->
-                                        scope.launch { AppGraph.settings.setDarkModeEnabled(enabled) }
-                                    },
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    scope.launch { AppGraph.settings.setDarkModeEnabled(!darkModeEnabled) }
-                                },
-                        )
-                    }
-                }
-
-                item {
-                    SettingsSectionCard(title = "Backend/Data") {
-                        ListItem(
-                            headlineContent = { Text("Backend/Data") },
-                            supportingContent = { Text(if (backendDataExpanded) "Expanded" else "Collapsed") },
+                            headlineContent = { Text("Backend och data") },
+                            supportingContent = { Text("Synk, ID och lagrad data") },
                             trailingContent = {
                                 Icon(
                                     if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -2976,7 +2667,7 @@ fun SettingsScreen(
                             // Keep existing detailed block by switching to classic layout.
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Text(
-                                "Open this section in classic layout for full controls.",
+                                "Öppna detta i klassiskt läge för fler inställningar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -2986,10 +2677,10 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Evidence") {
+                    SettingsSectionCard(title = "Underlag") {
                         ListItem(
-                            headlineContent = { Text("Evidence") },
-                            supportingContent = { Text("Open a 3× grid of trip photos") },
+                            headlineContent = { Text("Underlag") },
+                            supportingContent = { Text("Öppna 3× rutnät med resefoton") },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onOpenEvidence() },
@@ -3007,7 +2698,7 @@ fun SettingsScreen(
     if (showClearDataFirstConfirmDialog) {
         AlertDialog(
             onDismissRequest = { if (!clearDataBusy) showClearDataFirstConfirmDialog = false },
-            title = { Text("Clear all user data") },
+            title = { Text("Rensa all användardata") },
             text = { Text("Are you sure?") },
             confirmButton = {
                 TextButton(
@@ -3744,6 +3435,84 @@ private interface RawPlacesApi {
         @retrofit2.http.Header("X-Goog-FieldMask") fieldMask: String,
         @retrofit2.http.Body body: String,
     ): String
+}
+
+@Composable
+private fun VisitedStoresPhotoList(
+    stores: List<StoreEntity>,
+    storeImages: Map<String, String>,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val pendingStoreId = remember { mutableStateOf<String?>(null) }
+    val photoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            val storeId = pendingStoreId.value
+            pendingStoreId.value = null
+            if (uri == null || storeId.isNullOrBlank()) return@rememberLauncherForActivityResult
+
+            scope.launch {
+                val savedUri = importStorePhotoToAppFiles(context, storeId, uri)
+                AppGraph.settings.setStoreImageUri(storeId, savedUri)
+            }
+        }
+    )
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 320.dp),
+    ) {
+        items(stores, key = { it.id }) { store ->
+            val hasPhoto = storeImages[store.id]?.isNotBlank() == true
+
+            ListItem(
+                headlineContent = { Text(store.name) },
+                supportingContent = {
+                    val subtitle = buildString {
+                        if (store.city.isNotBlank()) append(store.city)
+                        if (hasPhoto) {
+                            if (isNotEmpty()) append(" • ")
+                            append("Bild")
+                        }
+                    }
+                    if (subtitle.isNotBlank()) {
+                        Text(
+                            subtitle,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        )
+                    }
+                },
+                trailingContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SettingsIconActionButton(
+                            icon = Icons.Filled.Image,
+                            contentDescription = if (hasPhoto) "Change photo" else "Add photo",
+                            onClick = {
+                                pendingStoreId.value = store.id
+                                photoPicker.launch(arrayOf("image/*"))
+                            },
+                        )
+                        if (hasPhoto) {
+                            SettingsIconActionButton(
+                                icon = Icons.Filled.Delete,
+                                contentDescription = "Remove photo",
+                                onClick = {
+                                    scope.launch {
+                                        AppGraph.settings.clearStoreImage(store.id)
+                                        deleteStorePhotoBestEffort(context, store.id)
+                                    }
+                                },
+                            )
+                        }
+                    }
+                },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+    }
 }
 
 @Composable

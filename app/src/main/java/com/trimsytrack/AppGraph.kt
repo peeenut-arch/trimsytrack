@@ -9,6 +9,8 @@ import com.trimsytrack.data.RegionRepository
 import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.StoreRepository
 import com.trimsytrack.data.TripRepository
+import com.trimsytrack.data.driverdata.DriverDataRepository
+import com.trimsytrack.data.driverdata.DriverDataSyncManager
 import com.trimsytrack.distance.RoutesApi
 import com.trimsytrack.distance.RoutesDistanceService
 import com.trimsytrack.geofence.GeofenceSyncManager
@@ -59,6 +61,12 @@ object AppGraph {
     lateinit var backendSyncManager: BackendSyncManager
         private set
 
+    lateinit var driverDataRepository: DriverDataRepository
+        private set
+
+    lateinit var driverDataSyncManager: DriverDataSyncManager
+        private set
+
     lateinit var backendHttpClient: OkHttpClient
         private set
 
@@ -94,6 +102,9 @@ object AppGraph {
 
             backendSyncRepository = BackendSyncRepository(appContext, settings)
             backendSyncManager = BackendSyncManager(appContext)
+
+            driverDataRepository = DriverDataRepository(appContext, settings)
+            driverDataSyncManager = DriverDataSyncManager(appContext)
 
             Notifications.ensureChannels(appContext)
             geofenceSyncManager = GeofenceSyncManager(appContext, settings, storeRepository)

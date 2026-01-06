@@ -4,6 +4,10 @@
         android:name="com.trimsytrack.permission.READ_KORJOURNAL"
         android:protectionLevel="signature" />
 
+    <permission
+        android:name="com.trimsytrack.permission.READ_EVIDENCE"
+        android:protectionLevel="signature" />
+
     <uses-permission android:name="android.permission.INTERNET" />
 
     <uses-permission android:name="android.permission.CAMERA" />
@@ -44,6 +48,13 @@
             android:exported="true"
             android:grantUriPermissions="true"
             android:readPermission="com.trimsytrack.permission.READ_KORJOURNAL" />
+
+        <provider
+            android:name=".export.EvidenceProvider"
+            android:authorities="${applicationId}.evidence"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:readPermission="com.trimsytrack.permission.READ_EVIDENCE" />
 
         <activity
             android:name=".ui.MainActivity"

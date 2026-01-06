@@ -2,6 +2,7 @@ package com.trimsytrack.ui.screens
 
 import android.content.Intent
 import android.database.Cursor
+import android.location.Geocoder
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.foundation.layout.Arrangement
@@ -42,7 +43,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.trimsytrack.AppGraph
-import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.ui.vm.TripDetailViewModel
@@ -52,7 +52,11 @@ import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 import java.io.File
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.flow.first
+import java.util.Locale
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -152,74 +156,111 @@ fun TripDetailScreen(
             )
         }
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).padding(16.dp)) {
-            Text(trip?.storeNameSnapshot ?: "…", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                trip?.let { "${it.distanceMeters / 1000.0} km" } ?: "",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-            )
+        val zone = remember { ZoneId.systemDefault() }
+        val dateTimeFmt = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm") }
 
-            val feeMinor = trip?.parkingTrafficFeeMinor
-            if (feeMinor != null) {
-                Spacer(Modifier.height(4.dp))
+        val startAddressLine = remember { mutableStateOf<String?>(null) }
+        val startCity = remember { mutableStateOf<String?>(null) }
+        val endAddressLine = remember { mutableStateOf<String?>(null) }
+        val endCity = remember { mutableStateOf<String?>(null) }
+
+        LaunchedEffect(trip?.id) {
+            val t = trip ?: return@LaunchedEffect
+
+            suspend fun lookup(lat: Double, lng: Double): Pair<String?, String?> {
+                return withContext(Dispatchers.IO) {
+                    runCatching {
+                        @Suppress("DEPRECATION")
+                        val geo = Geocoder(context, Locale.getDefault())
+                        @Suppress("DEPRECATION")
+                        val list = geo.getFromLocation(lat, lng, 1)
+                        val a = list?.firstOrNull()
+                        val line = a?.getAddressLine(0)?.takeIf { it.isNotBlank() }
+                        val city = a?.locality
+                            ?.takeIf { it.isNotBlank() }
+                            ?: a?.subAdminArea?.replace(" kommun", "")?.takeIf { it.isNotBlank() }
+                        (line to city)
+                    }.getOrDefault(null to null)
+                }
+            }
+
+            val (sLine, sCity) = lookup(t.startLat, t.startLng)
+            startAddressLine.value = sLine
+            startCity.value = sCity
+
+            val (eLine, eCity) = lookup(t.storeLatSnapshot, t.storeLngSnapshot)
+            endAddressLine.value = eLine
+            endCity.value = eCity
+        }
+
+        Column(modifier = Modifier.padding(padding).padding(16.dp)) {
+            val t = trip
+            Text(t?.storeNameSnapshot ?: "…", style = MaterialTheme.typography.titleMedium)
+
+            Spacer(Modifier.height(8.dp))
+
+            if (t != null) {
+                val dt = runCatching { LocalDateTime.ofInstant(t.createdAt, zone).format(dateTimeFmt) }.getOrDefault("")
                 Text(
-                    "Parking/Traffic fee: ${formatMinorAmount(feeMinor)}",
+                    dt,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
+
+                Spacer(Modifier.height(6.dp))
+
+                val distanceKm = t.distanceMeters / 1000.0
+                Text(
+                    "Distance (from ${t.startLabelSnapshot}): ${String.format(Locale.getDefault(), "%.1f", distanceKm)} km",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
+
+                val feeMinor = t.parkingTrafficFeeMinor
+                if (feeMinor != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Parking fee: ${formatMinorAmount(feeMinor)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Text(
+                    "Start",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                )
+                Text(
+                    listOfNotNull(startAddressLine.value, startCity.value).joinToString(" • ").ifBlank { t.startLabelSnapshot },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    "End",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                )
+                Text(
+                    listOfNotNull(endAddressLine.value, endCity.value.takeIf { !it.isNullOrBlank() } ?: t.citySnapshot.takeIf { it.isNotBlank() })
+                        .joinToString(" • ")
+                        .ifBlank { t.storeNameSnapshot },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )
             }
 
             Spacer(Modifier.height(14.dp))
-            Text(trip?.notes ?: "", style = MaterialTheme.typography.bodyMedium)
+            Text(t?.notes ?: "", style = MaterialTheme.typography.bodyMedium)
 
             Spacer(Modifier.height(18.dp))
-            Text("Pictures/Recipts", style = MaterialTheme.typography.titleMedium)
+            Text("Pictures/Receipts", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
-
-            OutlinedButton(
-                onClick = {
-                    importMessage.value = null
-                    feeInputError.value = null
-                    pendingFeeMinor.value = null
-                    showFeeDialog.value = true
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Add Parking/Traffic Fee")
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            if (showAddMediaPrompt.value) {
-                Text(
-                    "Add media to this trip now?",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
-                )
-                Spacer(Modifier.height(8.dp))
-            }
-
-            OutlinedButton(
-                onClick = {
-                    showAddMediaPrompt.value = false
-                    onOpenMediaReviewForTrip(tripId)
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Add media")
-            }
-
-            if (showAddMediaPrompt.value) {
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    TextButton(
-                        onClick = { showAddMediaPrompt.value = false },
-                    ) {
-                        Text("Not now")
-                    }
-                }
-            }
 
             if (importMessage.value != null) {
                 Spacer(Modifier.height(8.dp))
@@ -233,7 +274,7 @@ fun TripDetailScreen(
             Spacer(Modifier.height(8.dp))
             if (attachments.isEmpty()) {
                 Text(
-                    "No pictures/recipts saved yet.",
+                    "No pictures/receipts saved yet.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )
@@ -272,6 +313,53 @@ fun TripDetailScreen(
                                 }
                             }
                         ) { Text("Delete") }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            if (showAddMediaPrompt.value) {
+                Text(
+                    "Add media to this trip now?",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, alignment = androidx.compose.ui.Alignment.End),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        importMessage.value = null
+                        feeInputError.value = null
+                        pendingFeeMinor.value = null
+                        showFeeDialog.value = true
+                    },
+                ) {
+                    Text("Add Parking")
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        showAddMediaPrompt.value = false
+                        onOpenMediaReviewForTrip(tripId)
+                    },
+                ) {
+                    Text("Add Media")
+                }
+            }
+
+            if (showAddMediaPrompt.value) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = { showAddMediaPrompt.value = false }) {
+                        Text("Not now")
                     }
                 }
             }

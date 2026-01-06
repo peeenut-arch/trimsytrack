@@ -10,6 +10,7 @@ import com.trimsytrack.data.entities.RunEntity
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import java.io.File
+import java.security.MessageDigest
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
@@ -29,20 +31,52 @@ class DriverDataRepository(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
+    @OptIn(ExperimentalSerializationApi::class)
+    private val fingerprintJson = Json {
+        encodeDefaults = true
+        prettyPrint = false
+    }
+
+    suspend fun uploadSnapshotIfChanged(): UploadSnapshotIfChangedResult = withContext(Dispatchers.IO) {
+        val snapshot = exportSnapshotDeterministic()
+        val fingerprint = computeFingerprint(snapshot)
+        val last = settings.driverDataLastUploadFingerprint.first().trim()
+
+        if (fingerprint.isNotBlank() && fingerprint == last) {
+            return@withContext UploadSnapshotIfChangedResult(
+                outcome = DriverDataUploadOutcome.SKIPPED_NO_CHANGES,
+                fingerprint = fingerprint,
+            )
+        }
+
+        uploadSnapshot()
+
+        val after = exportSnapshotDeterministic()
+        val afterFingerprint = computeFingerprint(after)
+
+        UploadSnapshotIfChangedResult(
+            outcome = DriverDataUploadOutcome.UPLOADED,
+            fingerprint = afterFingerprint,
+        )
+    }
+
     suspend fun exportSnapshot(): DriverData = withContext(Dispatchers.IO) {
+        exportSnapshotDeterministic()
+    }
+
+    private suspend fun exportSnapshotDeterministic(): DriverData {
         val driverId = settings.backendDriverId.first().ifBlank { settings.profileId.first().ifBlank { "default" } }
 
         val profileId = settings.profileId.first().ifBlank { "default" }
 
-        val stores = AppGraph.db.storeDao().listAll(profileId).map { it.toDto() }
-        val trips = AppGraph.db.tripDao().listAll(profileId).map { it.toDto() }
-        val prompts = AppGraph.db.promptDao().listAll(profileId).map { it.toDto() }
-        val runs = AppGraph.db.runDao().listAll(profileId).map { it.toDto() }
-        val attachments = AppGraph.db.attachmentDao().listAll(profileId).map { it.toDto() }
+        val stores = AppGraph.db.storeDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
+        val trips = AppGraph.db.tripDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
+        val prompts = AppGraph.db.promptDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
+        val runs = AppGraph.db.runDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
 
-        val regions = readRegionFilesBestEffort(context)
+        val regions = readRegionFilesBestEffort(context).toSortedMap()
 
-        DriverData(
+        return DriverData(
             schemaVersion = 1,
             exportedAt = Instant.now().toString(),
             driverId = driverId,
@@ -54,7 +88,8 @@ class DriverDataRepository(
             runs = runs,
             // Derived cache: intentionally not included in snapshots.
             distanceCache = emptyList(),
-            attachments = attachments,
+            // Evidence never goes to backend snapshots.
+            attachments = emptyList(),
         )
     }
 
@@ -151,6 +186,12 @@ class DriverDataRepository(
         withContext(Dispatchers.IO) {
             val profileId = settings.profileId.first().ifBlank { "default" }
 
+            // Evidence is intentionally NOT part of backend snapshots.
+            // Preserve local evidence metadata so a backend restore doesn't wipe it.
+            val preservedEvidence = runCatching {
+                AppGraph.db.attachmentDao().listAll(profileId)
+            }.getOrDefault(emptyList())
+
             // 1) Restore region files first (so store sync systems can work).
             writeRegionFilesBestEffort(context, data.regions)
 
@@ -161,7 +202,10 @@ class DriverDataRepository(
             AppGraph.db.tripDao().insertAll(data.trips.map { it.toEntity(profileId) })
             AppGraph.db.promptDao().insertAll(data.promptEvents.map { it.toEntity(profileId) })
             AppGraph.db.runDao().insertAll(data.runs.map { it.toEntity(profileId) })
-            AppGraph.db.attachmentDao().insertAll(data.attachments.map { it.toEntity(profileId) })
+
+            if (preservedEvidence.isNotEmpty()) {
+                AppGraph.db.attachmentDao().insertAll(preservedEvidence)
+            }
         }
 
         // 3) Restore settings.
@@ -203,13 +247,15 @@ class DriverDataRepository(
             odometerYearStartKm = settings.odometerYearStartKm.first(),
             odometerYearEndKm = settings.odometerYearEndKm.first(),
 
-            storeImages = settings.storeImages.first(),
-            storeBusinessHours = settings.storeBusinessHours.first(),
+            storeImages = settings.storeImages.first().toSortedMap(),
+            storeBusinessHours = settings.storeBusinessHours.first().toSortedMap(),
+            storeFetchedDetails = settings.storeFetchedDetails.first().toSortedMap(),
 
-            homeTileIconImages = settings.homeTileIconImages.first(),
+            homeTileIconImages = settings.homeTileIconImages.first().toSortedMap(),
             preferredCategories = settings.preferredCategories.first(),
             storeSyncRadiusKm = settings.storeSyncRadiusKm.first(),
             ignoredStoreIds = settings.ignoredStoreIds.first().toList().sorted(),
+            visitedHiddenStoreIds = settings.visitedHiddenStoreIds.first().toList().sorted(),
             expandedStoreCities = settings.expandedStoreCities.first().toList().sorted(),
             manualTripStoreSortMode = settings.manualTripStoreSortMode.first(),
 
@@ -226,7 +272,25 @@ class DriverDataRepository(
         val trimmed = raw.trim().ifBlank { "http://79.76.38.94/" }
         return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
     }
+
+    private fun computeFingerprint(data: DriverData): String {
+        // Ignore exportedAt for change detection; it is always "now".
+        val normalized = data.copy(exportedAt = "")
+        val payload = fingerprintJson.encodeToString(DriverData.serializer(), normalized)
+        val digest = MessageDigest.getInstance("SHA-256").digest(payload.toByteArray(Charsets.UTF_8))
+        return digest.joinToString(separator = "") { b -> "%02x".format(b) }
+    }
 }
+
+enum class DriverDataUploadOutcome {
+    UPLOADED,
+    SKIPPED_NO_CHANGES,
+}
+
+data class UploadSnapshotIfChangedResult(
+    val outcome: DriverDataUploadOutcome,
+    val fingerprint: String,
+)
 
 private fun readRegionFilesBestEffort(context: Context): Map<String, String> {
     val dir = File(context.filesDir, "regions")
