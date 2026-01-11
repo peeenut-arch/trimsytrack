@@ -2,6 +2,7 @@ package com.trimsytrack.data.dao
 
 import androidx.room.Dao
 import androidx.room.Query
+import androidx.room.Transaction
 import com.trimsytrack.data.entities.VisitedStoreEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -52,4 +53,22 @@ interface VisitedStoreDao {
         lat: Double,
         lng: Double,
     )
+
+    @Query("UPDATE visited_stores SET profileId = :profileId WHERE profileId = ''")
+    suspend fun claimUnscoped(profileId: String)
+
+    @Query(
+        "DELETE FROM visited_stores WHERE profileId = :newProfileId AND storeId IN (SELECT storeId FROM visited_stores WHERE profileId = :oldProfileId)"
+    )
+    suspend fun deleteConflictsForRekey(oldProfileId: String, newProfileId: String)
+
+    @Query("UPDATE visited_stores SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun updateProfileId(oldProfileId: String, newProfileId: String)
+
+    @Transaction
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String) {
+        if (oldProfileId.isBlank() || newProfileId.isBlank() || oldProfileId == newProfileId) return
+        deleteConflictsForRekey(oldProfileId = oldProfileId, newProfileId = newProfileId)
+        updateProfileId(oldProfileId = oldProfileId, newProfileId = newProfileId)
+    }
 }

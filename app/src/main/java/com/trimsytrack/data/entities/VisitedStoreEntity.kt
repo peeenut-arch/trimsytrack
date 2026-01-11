@@ -1,12 +1,15 @@
 package com.trimsytrack.data.entities
 
 import androidx.room.Entity
-
+import androidx.room.Index
 import java.time.Instant
 
 @Entity(
     tableName = "visited_stores",
     primaryKeys = ["profileId", "storeId"],
+    indices = [
+        Index(value = ["profileId", "lastVisitedAt"], unique = false),
+    ],
 )
 data class VisitedStoreEntity(
     /** Active profile that owns this visited-store record. */

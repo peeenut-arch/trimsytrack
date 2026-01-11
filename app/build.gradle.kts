@@ -55,6 +55,18 @@ android {
         // Backend uses this to prevent cross-app data leakage.
         val fixedAppId = (providers.gradleProperty("APP_ID").orNull ?: "trimsytrack").trim()
         buildConfigField("String", "APP_ID", "\"$fixedAppId\"")
+
+        // BACKENDTRIMSY HTTP API base (must include trailing slash).
+        // Overridable for dev via Gradle property, local.properties, or env var.
+        val backendApiBaseRaw = (
+            providers.gradleProperty("BACKEND_API_BASE").orNull
+                ?: localProperties.getProperty("BACKEND_API_BASE")
+                ?: providers.environmentVariable("BACKEND_API_BASE").orNull
+                ?: "https://us-central1-trimsy-d12de.cloudfunctions.net/apiV1/"
+            ).trim()
+
+        val backendApiBase = if (backendApiBaseRaw.endsWith("/")) backendApiBaseRaw else "$backendApiBaseRaw/"
+        buildConfigField("String", "BACKEND_API_BASE", "\"$backendApiBase\"")
     }
 
     buildTypes {
@@ -135,6 +147,7 @@ dependencies {
     // Firebase (email auth + verification/reset emails)
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.auth.ktx)
+    implementation(libs.firebase.functions.ktx)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -47,6 +48,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -60,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -78,10 +82,14 @@ import com.google.android.gms.location.Priority
 import com.google.common.util.concurrent.ListenableFuture
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.AttachmentEntity
+import com.trimsytrack.data.entities.DistanceMethod
+import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.ui.media.importDocumentToTripFiles
+import com.trimsytrack.util.Hashing
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -165,6 +173,8 @@ fun CameraScreen(
 
     val autoSaving = remember { mutableStateOf(false) }
 
+    val pendingQuickLogPurposeDialog = remember { mutableStateOf(false) }
+
     val showCaptureChooser = remember { mutableStateOf(false) }
 
     suspend fun bestEffortPlaceLabelFromLatLng(lat: Double, lng: Double): Pair<String, String> {
@@ -196,7 +206,11 @@ fun CameraScreen(
         }
     }
 
-    suspend fun createQuickLogTripForLocation(location: Location, createdAt: Instant): Long {
+    suspend fun createQuickLogTripForLocation(
+        location: Location,
+        createdAt: Instant,
+        businessPurpose: String = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+    ): Long {
         val lat = location.latitude
         val lng = location.longitude
 
@@ -266,7 +280,7 @@ fun CameraScreen(
                 )
         }
 
-        val route = runCatching {
+        val routeResult = runCatching {
             AppGraph.distanceRepository.getOrComputeDrivingRoute(
                 startLat = derivedStart.lat,
                 startLng = derivedStart.lng,
@@ -275,7 +289,8 @@ fun CameraScreen(
                 startLocationId = derivedStart.locationId,
                 endLocationId = storeId,
             )
-        }.getOrElse {
+        }
+        val route = routeResult.getOrElse {
             AppGraph.distanceRepository.estimateStraightLineRoute(
                 startLat = derivedStart.lat,
                 startLng = derivedStart.lng,
@@ -283,23 +298,40 @@ fun CameraScreen(
                 destLng = lng,
             )
         }
+        val distanceMethod = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
+
+        val tz = ZoneId.systemDefault().id
+        val endedAt = createdAt
+        val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
 
         return AppGraph.tripRepository.createTrip(
             TripEntity(
                 profileId = nowProfileId,
                 createdAt = createdAt,
                 day = day,
+                startedAt = startedAt,
+                endedAt = endedAt,
+                timeZoneId = tz,
                 storeId = storeId,
                 storeNameSnapshot = label,
                 citySnapshot = city,
                 storeLatSnapshot = lat,
                 storeLngSnapshot = lng,
+                endPlaceType = PlaceType.OTHER,
                 startLabelSnapshot = derivedStart.label,
                 startLat = derivedStart.lat,
                 startLng = derivedStart.lng,
+                startPlaceType = when {
+                    derivedStart.label.contains("home", ignoreCase = true) -> PlaceType.HOME
+                    else -> PlaceType.OTHER
+                },
                 distanceMeters = route.distanceMeters,
+                distanceMethod = distanceMethod,
                 durationMinutes = route.durationMinutes,
                 notes = "",
+                businessPurpose = businessPurpose,
+                supplierOrArea = null,
+                isBusiness = true,
                 runId = null,
                 currencyCode = null,
                 mileageRateMicros = null,
@@ -314,6 +346,7 @@ fun CameraScreen(
         if (previewUri.isNullOrBlank()) throw IllegalStateException("No capture to save")
 
         val trip = AppGraph.tripRepository.get(targetTripId) ?: throw IllegalStateException("Trip not found")
+        val deviceId = runCatching { AppGraph.settings.installId.first() }.getOrNull()
 
         val saved = if (tempFile != null) {
             saveCapturedPhotoToTrip(
@@ -323,6 +356,7 @@ fun CameraScreen(
                 tempFile = tempFile,
                 capturedAt = capturedAt,
                 location = pendingLocation.value,
+                linkedByDeviceId = deviceId,
             )
         } else {
             importDocumentToTripFiles(
@@ -344,6 +378,143 @@ fun CameraScreen(
         pendingLocation.value = null
         pendingMimeType.value = null
         pendingIsTempLocalFileProviderUri.value = null
+    }
+
+    if (pendingQuickLogPurposeDialog.value) {
+        var preset by remember { mutableStateOf(SettingsStore.DEFAULT_BUSINESS_PURPOSE) }
+        var isCustom by remember { mutableStateOf(false) }
+        var customText by remember { mutableStateOf("") }
+        val canConfirm = !isCustom || customText.trim().isNotBlank()
+
+        AlertDialog(
+            onDismissRequest = {
+                pendingQuickLogPurposeDialog.value = false
+                autoSaving.value = false
+                saveStatus.value = null
+            },
+            title = { Text("Syfte") },
+            text = {
+                Column {
+                    Text(
+                        "Välj syfte för resan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                preset = SettingsStore.DEFAULT_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                    ) {
+                        RadioButton(
+                            selected = !isCustom && preset == SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                            onClick = {
+                                preset = SettingsStore.DEFAULT_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Inköp till försäljning", modifier = Modifier.padding(top = 12.dp))
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                preset = SettingsStore.SHIPPING_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                    ) {
+                        RadioButton(
+                            selected = !isCustom && preset == SettingsStore.SHIPPING_BUSINESS_PURPOSE,
+                            onClick = {
+                                preset = SettingsStore.SHIPPING_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Frakt till postombud", modifier = Modifier.padding(top = 12.dp))
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isCustom = true },
+                    ) {
+                        RadioButton(
+                            selected = isCustom,
+                            onClick = { isCustom = true },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Eget", modifier = Modifier.padding(top = 12.dp))
+                    }
+
+                    if (isCustom) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = customText,
+                            onValueChange = { customText = it },
+                            label = { Text("Syfte") },
+                            placeholder = { Text("Skriv ditt syfte") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = canConfirm,
+                    onClick = {
+                        val purpose = if (isCustom) customText.trim() else preset
+                        pendingQuickLogPurposeDialog.value = false
+                        saveStatus.value = "Saving…"
+
+                        scope.launch {
+                            runCatching {
+                                val capturedAt = pendingCapturedAt.value ?: Instant.now()
+                                val loc = pendingLocation.value ?: runCatching {
+                                    if (hasFineLocationPermission) getCurrentLocation(context) else null
+                                }.getOrNull()
+                                requireNotNull(loc) { "Missing location permission or location not available" }
+
+                                val createdTripId = withContext(Dispatchers.IO) {
+                                    createQuickLogTripForLocation(
+                                        location = loc,
+                                        createdAt = capturedAt,
+                                        businessPurpose = purpose,
+                                    )
+                                }
+                                withContext(Dispatchers.IO) {
+                                    savePendingCaptureToTrip(createdTripId)
+                                }
+                            }.onSuccess {
+                                saveStatus.value = "Saved."
+                                onBack()
+                            }.onFailure {
+                                autoSaving.value = false
+                                saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
+                            }
+                        }
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        pendingQuickLogPurposeDialog.value = false
+                        autoSaving.value = false
+                        saveStatus.value = null
+                    },
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     val activity = context as? Activity
@@ -499,29 +670,8 @@ fun CameraScreen(
 
                     if (directTripId == null && autoSaveToTrip && quickLogTripOnAutoSave && !autoSaving.value) {
                         autoSaving.value = true
-                        saveStatus.value = "Saving…"
-                        scope.launch {
-                            runCatching {
-                                val capturedAt = pendingCapturedAt.value ?: Instant.now()
-                                val loc = pendingLocation.value ?: runCatching {
-                                    if (hasFineLocationPermission) getCurrentLocation(context) else null
-                                }.getOrNull()
-                                requireNotNull(loc) { "Missing location permission or location not available" }
-
-                                val createdTripId = withContext(Dispatchers.IO) {
-                                    createQuickLogTripForLocation(location = loc, createdAt = capturedAt)
-                                }
-                                withContext(Dispatchers.IO) {
-                                    savePendingCaptureToTrip(createdTripId)
-                                }
-                            }.onSuccess {
-                                saveStatus.value = "Saved."
-                                onBack()
-                            }.onFailure {
-                                autoSaving.value = false
-                                saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
-                            }
-                        }
+                        saveStatus.value = "Select purpose…"
+                        pendingQuickLogPurposeDialog.value = true
                     }
                 }
 
@@ -823,6 +973,7 @@ fun CameraScreen(
 
                                     scope.launch {
                                         runCatching {
+                                            val deviceId = AppGraph.settings.installId.first()
                                             withContext(Dispatchers.IO) {
                                                 val saved = if (tempFile != null) {
                                                     saveCapturedPhotoToTrip(
@@ -832,6 +983,7 @@ fun CameraScreen(
                                                         tempFile = tempFile,
                                                         capturedAt = capturedAt,
                                                         location = pendingLocation.value,
+                                                        linkedByDeviceId = deviceId,
                                                     )
                                                 } else {
                                                     importDocumentToTripFiles(
@@ -920,6 +1072,7 @@ private fun saveCapturedPhotoToTrip(
     tempFile: File,
     capturedAt: Instant,
     location: Location?,
+    linkedByDeviceId: String?,
 ): AttachmentEntity {
     val destDir = File(context.filesDir, "evidence/${trip.id}").apply { mkdirs() }
 
@@ -992,13 +1145,22 @@ private fun saveCapturedPhotoToTrip(
         destFile,
     )
 
+    val sha256 = runCatching { Hashing.sha256Hex(destFile) }.getOrNull()
+    val sizeBytes = runCatching { destFile.length() }.getOrNull()
+    val now = Instant.now()
+
     return AttachmentEntity(
         profileId = profileId,
         tripId = trip.id,
         uri = contentUri.toString(),
         mimeType = "image/jpeg",
         displayName = "${trip.day} ${trip.storeNameSnapshot} ${timeLabel}",
-        addedAt = capturedAt,
+        capturedAt = capturedAt,
+        addedAt = now,
+        sha256 = sha256,
+        sizeBytes = sizeBytes,
+        linkedAt = now,
+        linkedByDeviceId = linkedByDeviceId,
     )
 
 }

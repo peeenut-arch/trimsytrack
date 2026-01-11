@@ -14,6 +14,8 @@ import com.trimsytrack.data.TripRepository
 import kotlinx.coroutines.flow.first
 import java.io.File
 import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatterBuilder
 import java.time.format.DateTimeFormatter
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -23,6 +25,11 @@ import kotlin.math.sqrt
 
 object KorjournalExporter {
     private val dateFormatter: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+    private val timeFormatter: DateTimeFormatter = DateTimeFormatterBuilder()
+        .appendPattern("HH:mm")
+        .toFormatter()
+
+    private val utf8Bom: ByteArray = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
 
     private suspend fun buildYearCsv(
         settings: SettingsStore,
@@ -34,6 +41,8 @@ object KorjournalExporter {
 
         val tripList = trips.listTripsBetweenDays(startDay, endDay)
 
+        val profileId = settings.profileId.first().ifBlank { "default" }
+
         val vehicleRegNumber = settings.vehicleRegNumber.first()
         val driverName = settings.driverName.first()
         val businessHomeAddress = settings.businessHomeAddress.first()
@@ -42,26 +51,56 @@ object KorjournalExporter {
         val odometerYearStartKm = settings.odometerYearStartKm.first()
         val odometerYearEndKm = settings.odometerYearEndKm.first()
 
+        fun exportPlaceLabel(raw: String): String {
+            val label = raw.trim()
+            return if (label == "Business home") {
+                businessHomeAddress.ifBlank { "Verksamhetsadress" }
+            } else {
+                label
+            }
+        }
+
+        fun exportDistanceMethodLabel(method: String): String {
+            return when (method) {
+                "MAPS" -> "Karta"
+                "GPS_STRAIGHT_LINE" -> "Rak linje"
+                "MANUAL" -> "Manuell"
+                "UNKNOWN" -> "Okänd"
+                else -> method
+            }
+        }
+
+        fun exportSyfte(raw: String): String {
+            val v = raw.trim()
+            return v.ifBlank { SettingsStore.DEFAULT_BUSINESS_PURPOSE }
+        }
+
         val csv = buildString {
             // Semicolon-separated (often plays nicer with Swedish Excel locales)
             appendLine(
                 listOf(
-                    "tripId",
-                    "year",
-                    "vehicleRegNumber",
-                    "odometerYearStartKm",
-                    "odometerYearEndKm",
-                    "businessHomeAddress",
-                    "date",
-                    "tripOdometerStartKm",
-                    "tripOdometerEndKm",
-                    "tripDistanceKm",
-                    "startAddress",
-                    "endAddress",
-                    "purpose",
-                    "visitedPlace",
-                    "driver",
-                    "notes",
+                    "Rese-ID",
+                    "År",
+                    "Registreringsnummer",
+                    "Mätarställning 1 jan (km)",
+                    "Mätarställning 31 dec (km)",
+                    "Verksamhetsadress",
+                    "Datum",
+                    "Starttid",
+                    "Sluttid",
+                    "Tidszon",
+                    "Mätarställning start (km)",
+                    "Mätarställning slut (km)",
+                    "Sträcka (km)",
+                    "Beräkningsmetod",
+                    "Start",
+                    "Mål",
+                    "Syfte",
+                    "Tjänsteresa",
+                    "Underlag (antal)",
+                    "Besökt plats",
+                    "Förare",
+                    "Anteckningar",
                 ).joinToString(";") { it.csvCell() }
             )
 
@@ -74,11 +113,17 @@ object KorjournalExporter {
 
                 for (t in ordered) {
                     val distanceKm = (t.distanceMeters / 1000.0)
-                    val startAddress = if (t.startLabelSnapshot == "Business home" && businessHomeAddress.isNotBlank()) {
-                        businessHomeAddress
-                    } else {
-                        t.startLabelSnapshot
-                    }
+
+                    val tz = runCatching { ZoneId.of(t.timeZoneId) }.getOrElse { ZoneId.systemDefault() }
+                    val startTime = runCatching { t.startedAt.atZone(tz).toLocalTime().format(timeFormatter) }.getOrDefault("")
+                    val endTime = runCatching { t.endedAt.atZone(tz).toLocalTime().format(timeFormatter) }.getOrDefault("")
+                    val evidenceCount = runCatching { AppGraph.db.attachmentDao().countByTrip(profileId, t.id) }.getOrDefault(0)
+
+                    val startAddress = exportPlaceLabel(t.startLabelSnapshot)
+                    val endAddress = exportPlaceLabel(t.storeNameSnapshot)
+                    val visitedPlace = endAddress
+                    val syfte = exportSyfte(t.businessPurpose)
+                    val distanceMethodLabel = exportDistanceMethodLabel(t.distanceMethod.name)
                     appendLine(
                         listOf(
                             t.id.toString(),
@@ -88,13 +133,19 @@ object KorjournalExporter {
                             odometerYearEndKm,
                             businessHomeAddress,
                             day.format(dateFormatter),
+                            startTime,
+                            endTime,
+                            t.timeZoneId,
                             "", // tripOdometerStartKm (not captured yet)
                             "", // tripOdometerEndKm (not captured yet)
                             String.format("%.1f", distanceKm),
+                            distanceMethodLabel,
                             startAddress,
-                            t.storeNameSnapshot,
-                            t.notes, // purpose (mapped to notes for now)
-                            t.storeNameSnapshot,
+                            endAddress,
+                            syfte,
+                            if (t.isBusiness) "true" else "false",
+                            evidenceCount.toString(),
+                            visitedPlace,
                             driverName,
                             t.notes,
                         ).joinToString(";") { it.csvCell() }
@@ -106,7 +157,7 @@ object KorjournalExporter {
                 val homeLng = businessHomeLng
                 val last = ordered.lastOrNull()
                 if (homeLat != null && homeLng != null && last != null && distanceKm(last.storeLatSnapshot, last.storeLngSnapshot, homeLat, homeLng) > 0.2) {
-                    val returnRoute = runCatching {
+                    val returnRouteResult = runCatching {
                         AppGraph.distanceRepository.getOrComputeDrivingRoute(
                             startLat = last.storeLatSnapshot,
                             startLng = last.storeLngSnapshot,
@@ -115,7 +166,8 @@ object KorjournalExporter {
                             startLocationId = last.storeId,
                             endLocationId = BUSINESS_HOME_LOCATION_ID,
                         )
-                    }.getOrElse {
+                    }
+                    val returnRoute = returnRouteResult.getOrElse {
                         AppGraph.distanceRepository.estimateStraightLineRoute(
                             startLat = last.storeLatSnapshot,
                             startLng = last.storeLngSnapshot,
@@ -124,8 +176,13 @@ object KorjournalExporter {
                         )
                     }
 
-                    val endAddress = if (businessHomeAddress.isNotBlank()) businessHomeAddress else "Business home"
+                    val endAddress = businessHomeAddress.ifBlank { "Verksamhetsadress" }
                     val distanceKm = (returnRoute.distanceMeters / 1000.0)
+
+                    val tz = runCatching { ZoneId.of(last.timeZoneId) }.getOrElse { ZoneId.systemDefault() }
+                    val startTime = runCatching { last.endedAt.atZone(tz).toLocalTime().format(timeFormatter) }.getOrDefault("")
+                    val distanceMethod = if (returnRouteResult.isSuccess) "MAPS" else "GPS_STRAIGHT_LINE"
+                    val distanceMethodLabel = exportDistanceMethodLabel(distanceMethod)
                     appendLine(
                         listOf(
                             "return-home:${last.id}",
@@ -135,13 +192,19 @@ object KorjournalExporter {
                             odometerYearEndKm,
                             businessHomeAddress,
                             day.format(dateFormatter),
+                            startTime,
+                            "", // endTime (synthetic row)
+                            last.timeZoneId,
                             "", // tripOdometerStartKm (not captured yet)
                             "", // tripOdometerEndKm (not captured yet)
                             String.format("%.1f", distanceKm),
-                            last.storeNameSnapshot,
+                            distanceMethodLabel,
+                            exportPlaceLabel(last.storeNameSnapshot),
                             endAddress,
-                            "Return home",
-                            "Business home",
+                            "Återresa till verksamhetsadress",
+                            "true",
+                            "0",
+                            endAddress,
                             driverName,
                             "",
                         ).joinToString(";") { it.csvCell() }
@@ -161,9 +224,11 @@ object KorjournalExporter {
         trips: TripRepository,
         year: Int,
     ): ByteArray {
-        return buildYearCsv(settings = settings, trips = trips, year = year)
+        val bytes = buildYearCsv(settings = settings, trips = trips, year = year)
             .csv
             .toByteArray(Charsets.UTF_8)
+        // Add BOM so Swedish Excel reliably detects UTF-8 and shows å/ä/ö correctly.
+        return utf8Bom + bytes
     }
 
     suspend fun exportYearCsv(

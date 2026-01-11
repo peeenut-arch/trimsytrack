@@ -4,13 +4,14 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import com.trimsytrack.data.entities.StoreEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface StoreDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun upsertAll(stores: List<StoreEntity>)
 
     @Query("SELECT * FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
@@ -54,4 +55,19 @@ interface StoreDao {
 
     @Query("UPDATE stores SET profileId = :profileId WHERE profileId = ''")
     suspend fun claimUnscoped(profileId: String)
+
+    @Query(
+        "DELETE FROM stores WHERE profileId = :newProfileId AND id IN (SELECT id FROM stores WHERE profileId = :oldProfileId)"
+    )
+    suspend fun deleteConflictsForRekey(oldProfileId: String, newProfileId: String)
+
+    @Query("UPDATE stores SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun updateProfileId(oldProfileId: String, newProfileId: String)
+
+    @Transaction
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String) {
+        if (oldProfileId.isBlank() || newProfileId.isBlank() || oldProfileId == newProfileId) return
+        deleteConflictsForRekey(oldProfileId = oldProfileId, newProfileId = newProfileId)
+        updateProfileId(oldProfileId = oldProfileId, newProfileId = newProfileId)
+    }
 }

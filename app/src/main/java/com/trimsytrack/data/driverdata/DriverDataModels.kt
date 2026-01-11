@@ -24,6 +24,9 @@ data class DriverData(
     val runs: List<RunDto> = emptyList(),
     val distanceCache: List<DistanceCacheDto> = emptyList(),
     val attachments: List<AttachmentDto> = emptyList(),
+
+    // Parking/traffic fee receipts: metadata only (media is synced to PC separately).
+    val parkingTickets: List<ParkingTicketDto> = emptyList(),
 )
 
 @Serializable
@@ -75,7 +78,7 @@ data class DriverSettings(
     val manualTripStoreSortMode: String = "NAME",
 
     // Backend preferences
-    val backendBaseUrl: String = "http://79.76.38.94/",
+    val backendBaseUrl: String = "",
     val backendDriverId: String = "",
 )
 
@@ -95,26 +98,80 @@ data class StoreDto(
 @Serializable
 data class TripDto(
     val id: Long,
+
+    /** Stable UUID for this trip (universal TripID). */
+    val clientRef: String = "",
+
     val createdAt: String,
     val day: String,
 
+    // New (schemaVersion >= 2): explicit time boundaries + timezone.
+    val startedAt: String = "",
+    val endedAt: String = "",
+    val timeZoneId: String = "",
+
     val storeId: String,
+    val storeLocationId: String? = null,
+    val postOmbudId: String? = null,
     val storeNameSnapshot: String,
     val citySnapshot: String = "",
     val storeLatSnapshot: Double,
     val storeLngSnapshot: Double,
 
+    val endPlaceType: String = "STORE",
+    val endAddressSnapshot: String? = null,
+
     val startLabelSnapshot: String,
     val startLat: Double,
     val startLng: Double,
 
+    val startPlaceType: String = "OTHER",
+    val startAddressSnapshot: String? = null,
+
     val distanceMeters: Int,
     val durationMinutes: Int,
 
+    val distanceMethod: String = "UNKNOWN",
+
     val notes: String,
+
+    val businessPurpose: String = "",
+    val supplierOrArea: String? = null,
+    val isBusiness: Boolean = true,
     val runId: Long? = null,
     val currencyCode: String? = null,
     val mileageRateMicros: Long? = null,
+
+    // Optional receipts/fees
+    val parkingTrafficFeeMinor: Int? = null,
+
+    // Parking/traffic fee receipt metadata identifier.
+    val parkingTicketId: String? = null,
+)
+
+@Serializable
+data class ParkingTicketDto(
+    val parkingTicketId: String,
+
+    // Linkage to the owning trip.
+    val tripId: Long,
+
+    // Required metadata for cloud snapshots.
+    val costMinor: Int,
+    val currencyCode: String? = null,
+
+    // Journal-ish fields (duplicated from the trip for convenience).
+    val syfte: String,
+    val date: String,
+    val time: String,
+    val timeZoneId: String,
+    val storeLocationId: String? = null,
+    val postOmbudId: String? = null,
+    val storeNameSnapshot: String,
+    val citySnapshot: String,
+    val storeLatSnapshot: Double,
+    val storeLngSnapshot: Double,
+    val endAddressSnapshot: String? = null,
 )
 
 @Serializable
@@ -164,9 +221,23 @@ data class DistanceCacheDto(
 @Serializable
 data class AttachmentDto(
     val id: Long,
+
+    /** Stable UUID for this evidence item (universal EvidenceID). */
+    val clientRef: String = "",
+
     val tripId: Long,
+
+    /** Stable UUID for the linked trip (universal TripID). */
+    val tripClientRef: String = "",
+
     val uri: String,
     val mimeType: String,
     val displayName: String,
+    val capturedAt: String = "",
     val addedAt: String,
+
+    val sha256: String? = null,
+    val sizeBytes: Long? = null,
+    val linkedAt: String? = null,
+    val linkedByDeviceId: String? = null,
 )

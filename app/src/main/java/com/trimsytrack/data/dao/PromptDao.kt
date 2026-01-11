@@ -51,4 +51,7 @@ interface PromptDao {
 
     @Query("UPDATE prompt_events SET profileId = :profileId WHERE profileId = ''")
     suspend fun claimUnscoped(profileId: String)
+
+    @Query("UPDATE prompt_events SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
 }

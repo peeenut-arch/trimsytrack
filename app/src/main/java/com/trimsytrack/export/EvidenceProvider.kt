@@ -69,7 +69,12 @@ class EvidenceProvider : ContentProvider() {
                     "tripCitySnapshot",
                     "displayName",
                     "mimeType",
+                    "capturedAt",
                     "addedAt",
+                    "sha256",
+                    "sizeBytes",
+                    "linkedAt",
+                    "linkedByDeviceId",
                     "uri",
                 )
             ).apply {
@@ -88,7 +93,12 @@ class EvidenceProvider : ContentProvider() {
                             t?.citySnapshot,
                             a.displayName,
                             a.mimeType,
+                            a.capturedAt.toString(),
                             a.addedAt.toString(),
+                            a.sha256,
+                            a.sizeBytes,
+                            a.linkedAt?.toString(),
+                            a.linkedByDeviceId,
                             a.uri,
                         )
                     )

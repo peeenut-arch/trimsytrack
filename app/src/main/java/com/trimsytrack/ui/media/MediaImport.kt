@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import com.trimsytrack.data.entities.AttachmentEntity
+import com.trimsytrack.util.Hashing
 import java.io.File
 import java.time.Instant
 
@@ -52,6 +53,9 @@ internal fun importDocumentToTripFiles(
         }
     }
 
+    val sha256 = runCatching { Hashing.sha256Hex(destFile) }.getOrNull()
+    val sizeBytes = runCatching { destFile.length() }.getOrNull()
+
     val contentUri = FileProvider.getUriForFile(
         context,
         "${context.packageName}.fileprovider",
@@ -64,7 +68,12 @@ internal fun importDocumentToTripFiles(
         uri = contentUri.toString(),
         mimeType = mimeType,
         displayName = if (tripPrefix.isBlank()) originalName else "$tripPrefix — $originalName",
+        capturedAt = Instant.now(),
         addedAt = Instant.now(),
+        sha256 = sha256,
+        sizeBytes = sizeBytes,
+        linkedAt = Instant.now(),
+        linkedByDeviceId = null,
     )
 }
 
@@ -100,6 +109,9 @@ internal fun moveTempFileProviderUriToTripFiles(
         }
     }
 
+    val sha256 = runCatching { Hashing.sha256Hex(destFile) }.getOrNull()
+    val sizeBytes = runCatching { destFile.length() }.getOrNull()
+
     val destUri = FileProvider.getUriForFile(
         context,
         "${context.packageName}.fileprovider",
@@ -122,7 +134,12 @@ internal fun moveTempFileProviderUriToTripFiles(
             }
             append(" — photo")
         },
+        capturedAt = capturedAt,
         addedAt = Instant.now(),
+        sha256 = sha256,
+        sizeBytes = sizeBytes,
+        linkedAt = Instant.now(),
+        linkedByDeviceId = null,
     )
 }
 

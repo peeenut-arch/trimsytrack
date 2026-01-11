@@ -497,4 +497,87 @@ object Migrations {
             )
         }
     }
+
+    val MIGRATION_11_12 = object : Migration(11, 12) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Trips: add explicit start/end time, timezone, business fields, place types, distance method.
+            db.execSQL("ALTER TABLE trips ADD COLUMN startedAt INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE trips ADD COLUMN endedAt INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE trips ADD COLUMN timeZoneId TEXT NOT NULL DEFAULT 'UTC'")
+
+            db.execSQL("ALTER TABLE trips ADD COLUMN endPlaceType TEXT NOT NULL DEFAULT 'STORE'")
+            db.execSQL("ALTER TABLE trips ADD COLUMN endAddressSnapshot TEXT")
+
+            db.execSQL("ALTER TABLE trips ADD COLUMN startPlaceType TEXT NOT NULL DEFAULT 'OTHER'")
+            db.execSQL("ALTER TABLE trips ADD COLUMN startAddressSnapshot TEXT")
+
+            db.execSQL("ALTER TABLE trips ADD COLUMN distanceMethod TEXT NOT NULL DEFAULT 'UNKNOWN'")
+
+            db.execSQL("ALTER TABLE trips ADD COLUMN businessPurpose TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE trips ADD COLUMN supplierOrArea TEXT")
+            db.execSQL("ALTER TABLE trips ADD COLUMN isBusiness INTEGER NOT NULL DEFAULT 1")
+
+            // Backfill: endedAt = createdAt; startedAt = endedAt - durationMinutes.
+            db.execSQL(
+                """
+                UPDATE trips
+                SET
+                    endedAt = COALESCE(createdAt, 0),
+                    startedAt = COALESCE(createdAt, 0) - (COALESCE(durationMinutes, 0) * 60 * 1000),
+                    businessPurpose = CASE
+                        WHEN businessPurpose IS NOT NULL AND TRIM(businessPurpose) <> '' THEN businessPurpose
+                        WHEN notes IS NOT NULL AND TRIM(notes) <> '' THEN TRIM(notes)
+                        ELSE '${SettingsStore.DEFAULT_BUSINESS_PURPOSE.replace("'", "''")}'
+                    END
+                WHERE endedAt = 0 OR startedAt = 0 OR businessPurpose IS NULL OR businessPurpose = ''
+                """.trimIndent()
+            )
+
+            // Attachments: capturedAt + hash + provenance.
+            db.execSQL("ALTER TABLE attachments ADD COLUMN capturedAt INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE attachments ADD COLUMN sha256 TEXT")
+            db.execSQL("ALTER TABLE attachments ADD COLUMN sizeBytes INTEGER")
+            db.execSQL("ALTER TABLE attachments ADD COLUMN linkedAt INTEGER")
+            db.execSQL("ALTER TABLE attachments ADD COLUMN linkedByDeviceId TEXT")
+
+            db.execSQL(
+                """
+                UPDATE attachments
+                SET
+                    capturedAt = COALESCE(addedAt, 0),
+                    linkedAt = COALESCE(addedAt, 0)
+                WHERE capturedAt = 0
+                """.trimIndent()
+            )
+        }
+    }
+
+    val MIGRATION_12_13 = object : Migration(12, 13) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Remove old backend sync table - switching to new backend system
+            db.execSQL("DROP TABLE IF EXISTS sync_outbox")
+        }
+    }
+
+    val MIGRATION_13_14 = object : Migration(13, 14) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Trips: parking/traffic fee receipt metadata id.
+            db.execSQL("ALTER TABLE trips ADD COLUMN parkingTicketId TEXT")
+        }
+    }
+
+    val MIGRATION_14_15 = object : Migration(14, 15) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Trips: explicit location identifiers (stable IDs separate from human-readable names).
+            db.execSQL("ALTER TABLE trips ADD COLUMN storeLocationId TEXT")
+            db.execSQL("ALTER TABLE trips ADD COLUMN postOmbudId TEXT")
+        }
+    }
+
+    val MIGRATION_15_16 = object : Migration(15, 16) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Attachments: stable metadata id (UUID) so evidence can be referenced universally.
+            db.execSQL("ALTER TABLE attachments ADD COLUMN clientRef TEXT")
+        }
+    }
 }

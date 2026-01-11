@@ -7,7 +7,12 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import android.util.Log
+import android.location.Address
 import android.location.Geocoder
 import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -86,12 +91,13 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.IndustryProfile
 import com.trimsytrack.data.RegionPayload
 import com.trimsytrack.data.StorePayload
-import com.trimsytrack.data.driverdata.DriverDataRepository
 import com.trimsytrack.data.sync.BackendSyncMode
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.export.KorjournalExporter
@@ -144,13 +150,6 @@ fun SettingsScreen(
         onDispose { auth.removeAuthStateListener(listener) }
     }
 
-    val driverDataRepository = remember {
-        DriverDataRepository(
-            context = context.applicationContext,
-            settings = AppGraph.settings,
-        )
-    }
-
     val showSyncDialog = rememberSaveable { mutableStateOf(false) }
 
 
@@ -179,7 +178,7 @@ fun SettingsScreen(
     val businessHomeAddress by AppGraph.settings.businessHomeAddress.collectAsState(initial = "")
     val journalYear by AppGraph.settings.journalYear.collectAsState(initial = LocalDate.now().year)
 
-    val backendBaseUrl by AppGraph.settings.backendBaseUrl.collectAsState(initial = "http://79.76.38.94/")
+    val backendBaseUrl by AppGraph.settings.backendBaseUrl.collectAsState(initial = "")
     val backendDriverId by AppGraph.settings.backendDriverId.collectAsState(initial = "")
 
     val backendSyncMode by AppGraph.settings.backendSyncMode.collectAsState(initial = BackendSyncMode.INSTANT)
@@ -416,9 +415,6 @@ fun SettingsScreen(
     var clearDataBusy by rememberSaveable { mutableStateOf(false) }
     var clearDataPassword by rememberSaveable { mutableStateOf("") }
 
-    var driverDataBusy by remember { mutableStateOf(false) }
-    var driverDataStatus by remember { mutableStateOf<String?>(null) }
-
     var backendDataExpanded by remember { mutableStateOf(false) }
 
     suspend fun loadStoredDataCounts(profileId: String): StoredDataCounts = withContext(Dispatchers.IO) {
@@ -584,6 +580,22 @@ fun SettingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showHiddenPlaces by rememberSaveable { mutableStateOf(false) }
 
+    fun signOutGoogleBestEffort() {
+        val id = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        if (id == 0) return
+        val serverClientId = context.getString(id).trim()
+        if (serverClientId.isBlank()) return
+
+        val options = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestEmail()
+            .requestIdToken(serverClientId)
+            .build()
+
+        val client = GoogleSignIn.getClient(context, options)
+        runCatching { client.signOut() }
+        runCatching { client.revokeAccess() }
+    }
+
     if (showStartOverConfirm) {
         AlertDialog(
             onDismissRequest = { if (!startOverBusy) showStartOverConfirm = false },
@@ -601,10 +613,28 @@ fun SettingsScreen(
                             startOverBusy = true
                             try {
                                 withContext(Dispatchers.IO) {
+                                    val wm = WorkManager.getInstance(context)
+                                    // Full reset of old backend/profile data: cancel known legacy work.
+                                    // Do NOT cancel unknown work (e.g. contract signing workers).
+                                    wm.cancelUniqueWork("backend-sync")
+                                    wm.cancelUniqueWork("backend-sync-hourly")
+                                    wm.cancelUniqueWork("backend-sync-daily")
+                                    wm.cancelUniqueWork("geofence-sync")
+                                    wm.cancelUniqueWork("geofence-disable")
+                                    wm.cancelUniqueWork("driverdata-snapshot-upload-daily")
+                                    wm.cancelAllWorkByTag("driverdata-snapshot-upload")
+                                    wm.cancelAllWorkByTag("receipt-reminder")
+                                    wm.pruneWork()
+
                                     AppGraph.db.clearAllTables()
                                     java.io.File(context.filesDir, "regions").deleteRecursively()
+                                    java.io.File(context.filesDir, "evidence").deleteRecursively()
+                                    java.io.File(context.filesDir, "store_images").deleteRecursively()
+                                    java.io.File(context.filesDir, "home_tile_icons").deleteRecursively()
+                                    java.io.File(context.filesDir, "profiles").deleteRecursively()
                                 }
                                 AppGraph.settings.clearAll()
+                                signOutGoogleBestEffort()
                                 FirebaseAuth.getInstance().signOut()
 
                                 storedDataError = null
@@ -823,11 +853,6 @@ fun SettingsScreen(
                             Tab(
                                 selected = resehanterareTab == 1,
                                 onClick = { resehanterareTab = 1 },
-                                text = { Text("Driver Data") },
-                            )
-                            Tab(
-                                selected = resehanterareTab == 2,
-                                onClick = { resehanterareTab = 2 },
                                 text = { Text("Export") },
                             )
                         }
@@ -917,92 +942,6 @@ fun SettingsScreen(
                             }
 
                         if (resehanterareTab == 1) {
-                                Text(
-                                    "Driver Data",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                                )
-
-                                Text(
-                                    "Upload/download a full snapshot (DB + settings). Download replaces local data.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                                )
-
-                                if (!driverDataStatus.isNullOrBlank()) {
-                                    Text(
-                                        driverDataStatus ?: "",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                                    )
-                                }
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    Button(
-                                        onClick = {
-                                            scope.launch {
-                                                driverDataBusy = true
-                                                driverDataStatus = "Uploading (backend-authoritative)…"
-                                                runCatching {
-                                                    withContext(Dispatchers.IO) {
-                                                        driverDataRepository.uploadSnapshot()
-                                                    }
-                                                }.onSuccess {
-                                                    storedDataError = null
-                                                    runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
-                                                        .onSuccess { storedDataCounts = it }
-                                                        .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
-                                                    driverDataStatus = "Upload complete (local overwritten by backend)."
-                                                }.onFailure {
-                                                    driverDataStatus = "Upload failed: ${it.message ?: it.javaClass.simpleName}"
-                                                }
-                                                driverDataBusy = false
-                                            }
-                                        },
-                                        enabled = !driverDataBusy,
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("Upload")
-                                    }
-
-                                    OutlinedButton(
-                                        onClick = {
-                                            scope.launch {
-                                                driverDataBusy = true
-                                                driverDataStatus = "Downloading + restoring…"
-                                                runCatching {
-                                                    withContext(Dispatchers.IO) {
-                                                        driverDataRepository.downloadAndRestore()
-                                                    }
-                                                }.onSuccess {
-                                                    storedDataError = null
-                                                    runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
-                                                        .onSuccess { storedDataCounts = it }
-                                                        .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
-                                                    driverDataStatus = "Restore complete."
-                                                }.onFailure {
-                                                    driverDataStatus = "Restore failed: ${it.message ?: it.javaClass.simpleName}"
-                                                }
-                                                driverDataBusy = false
-                                            }
-                                        },
-                                        enabled = !driverDataBusy,
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("Download & restore")
-                                    }
-                                }
-                            }
-
-                        if (resehanterareTab == 2) {
                                 Text(
                                     "Export",
                                     style = MaterialTheme.typography.bodySmall,
@@ -1837,85 +1776,6 @@ fun SettingsScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                             Text(
-                                "Backend-synk",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            )
-
-                        OutlinedTextField(
-                            value = backendBaseUrl,
-                            onValueChange = { v ->
-                                scope.launch { AppGraph.settings.setBackendBaseUrl(v) }
-                            },
-                            label = { Text("Backend-URL") },
-                            singleLine = true,
-                            enabled = !driverDataBusy,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                        )
-
-                        OutlinedTextField(
-                            value = backendDriverId,
-                            onValueChange = { v ->
-                                scope.launch { AppGraph.settings.setBackendDriverId(v) }
-                            },
-                            label = { Text("Förar-ID") },
-                            singleLine = true,
-                            enabled = !driverDataBusy,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                        )
-
-                        ListItem(
-                            headlineContent = { Text("Synkschema") },
-                            supportingContent = { Text("Synka direkt (fast)") },
-                            modifier = Modifier
-                                .fillMaxWidth(),
-                        )
-
-                        ListItem(
-                            headlineContent = { Text("Synkstatus") },
-                            supportingContent = {
-                                val status = when {
-                                    anyRunning -> "Synkar…"
-                                    anyQueued -> "Köad / schemalagd"
-                                    else -> "Vilande"
-                                }
-
-                                val last = backendLastSyncAtMillis
-                                val lastText = if (last != null) {
-                                    val dt = java.time.Instant.ofEpochMilli(last)
-                                        .atZone(java.time.ZoneId.systemDefault())
-                                        .toLocalDateTime()
-                                    "Senast: %02d:%02d (%s)".format(dt.hour, dt.minute, backendLastSyncResult.ifBlank { "okänt" })
-                                } else {
-                                    "Senast: aldrig"
-                                }
-
-                                Text("$status · $lastText")
-                            },
-                            trailingContent = {
-                                OutlinedButton(
-                                    onClick = { AppGraph.backendSyncManager.scheduleNow("user") },
-                                    enabled = !anyRunning,
-                                ) { Text("Synka nu") }
-                            },
-                        )
-
-                        if (anyRunning) {
-                            LinearProgressIndicator(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                            )
-                        }
-
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                            Text(
                                 "Lagrad data",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
@@ -2100,89 +1960,6 @@ fun SettingsScreen(
                         ) {
                             // Odometer removed (not trackable reliably).
                         }
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Text(
-                            "Driver Data (backup)",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                        )
-                        Text(
-                            "Upload/download a full snapshot (DB + settings). Download replaces local data.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                        )
-                        if (!driverDataStatus.isNullOrBlank()) {
-                            Text(
-                                driverDataStatus ?: "",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            )
-                        }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Button(
-                                onClick = {
-                                    scope.launch {
-                                        driverDataBusy = true
-                                        driverDataStatus = "Uploading (backend-authoritative)…"
-                                        runCatching {
-                                            withContext(Dispatchers.IO) {
-                                                driverDataRepository.uploadSnapshot()
-                                            }
-                                        }.onSuccess {
-                                            storedDataError = null
-                                            runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
-                                                .onSuccess { storedDataCounts = it }
-                                                .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
-                                            driverDataStatus = "Upload complete (local overwritten by backend)."
-                                        }.onFailure {
-                                            driverDataStatus = "Upload failed: ${it.message ?: it.javaClass.simpleName}"
-                                        }
-                                        driverDataBusy = false
-                                    }
-                                },
-                                enabled = !driverDataBusy,
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("Upload")
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    scope.launch {
-                                        driverDataBusy = true
-                                        driverDataStatus = "Downloading + restoring…"
-                                        runCatching {
-                                            withContext(Dispatchers.IO) {
-                                                driverDataRepository.downloadAndRestore()
-                                            }
-                                        }.onSuccess {
-                                            storedDataError = null
-                                            runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
-                                                .onSuccess { storedDataCounts = it }
-                                                .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
-                                            driverDataStatus = "Restore complete."
-                                        }.onFailure {
-                                            driverDataStatus = "Restore failed: ${it.message ?: it.javaClass.simpleName}"
-                                        }
-                                        driverDataBusy = false
-                                    }
-                                },
-                                enabled = !driverDataBusy,
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("Download & restore")
-                            }
-                        }
-
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         Text(
                             "Export",
@@ -2648,35 +2425,6 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Backend och data") {
-                        ListItem(
-                            headlineContent = { Text("Backend och data") },
-                            supportingContent = { Text("Synk, ID och lagrad data") },
-                            trailingContent = {
-                                Icon(
-                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { backendDataExpanded = !backendDataExpanded },
-                        )
-
-                        if (backendDataExpanded) {
-                            // Keep existing detailed block by switching to classic layout.
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            Text(
-                                "Öppna detta i klassiskt läge för fler inställningar.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            )
-                        }
-                    }
-                }
-
-                item {
                     SettingsSectionCard(title = "Underlag") {
                         ListItem(
                             headlineContent = { Text("Underlag") },
@@ -2780,20 +2528,28 @@ fun SettingsScreen(
                             try {
                                 withContext(Dispatchers.IO) {
                                     val wm = WorkManager.getInstance(context)
+                                    // Full reset of old backend/profile data: cancel known legacy work.
+                                    // Do NOT cancel unknown work (e.g. contract signing workers).
                                     wm.cancelUniqueWork("backend-sync")
                                     wm.cancelUniqueWork("backend-sync-hourly")
                                     wm.cancelUniqueWork("backend-sync-daily")
                                     wm.cancelUniqueWork("geofence-sync")
                                     wm.cancelUniqueWork("geofence-disable")
+                                    wm.cancelUniqueWork("driverdata-snapshot-upload-daily")
+                                    wm.cancelAllWorkByTag("driverdata-snapshot-upload")
+                                    wm.cancelAllWorkByTag("receipt-reminder")
+                                    wm.pruneWork()
 
                                     AppGraph.db.clearAllTables()
                                     java.io.File(context.filesDir, "regions").deleteRecursively()
                                     java.io.File(context.filesDir, "evidence").deleteRecursively()
                                     java.io.File(context.filesDir, "store_images").deleteRecursively()
                                     java.io.File(context.filesDir, "home_tile_icons").deleteRecursively()
+                                    java.io.File(context.filesDir, "profiles").deleteRecursively()
                                 }
 
                                 AppGraph.settings.clearAll()
+                                signOutGoogleBestEffort()
                                 FirebaseAuth.getInstance().signOut()
                             } finally {
                                 clearDataBusy = false
@@ -2976,6 +2732,70 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
         }
     }
 
+    suspend fun geocoderGetFromLocationName(
+        geocoder: Geocoder,
+        query: String,
+        maxResults: Int,
+    ): List<Address> {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            suspendCancellableCoroutine { cont ->
+                geocoder.getFromLocationName(
+                    query,
+                    maxResults,
+                    object : Geocoder.GeocodeListener {
+                        override fun onGeocode(addresses: MutableList<Address>) {
+                            if (!cont.isCompleted) cont.resume(addresses)
+                        }
+
+                        override fun onError(errorMessage: String?) {
+                            if (!cont.isCompleted) {
+                                cont.resumeWithException(IOException(errorMessage ?: "Geocoder failed"))
+                            }
+                        }
+                    },
+                )
+            }
+        } else {
+            withContext(Dispatchers.IO) {
+                @Suppress("DEPRECATION")
+                geocoder.getFromLocationName(query, maxResults) ?: emptyList()
+            }
+        }
+    }
+
+    suspend fun geocoderGetFromLocation(
+        geocoder: Geocoder,
+        lat: Double,
+        lng: Double,
+        maxResults: Int,
+    ): List<Address> {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            suspendCancellableCoroutine { cont ->
+                geocoder.getFromLocation(
+                    lat,
+                    lng,
+                    maxResults,
+                    object : Geocoder.GeocodeListener {
+                        override fun onGeocode(addresses: MutableList<Address>) {
+                            if (!cont.isCompleted) cont.resume(addresses)
+                        }
+
+                        override fun onError(errorMessage: String?) {
+                            if (!cont.isCompleted) {
+                                cont.resumeWithException(IOException(errorMessage ?: "Geocoder failed"))
+                            }
+                        }
+                    },
+                )
+            }
+        } else {
+            withContext(Dispatchers.IO) {
+                @Suppress("DEPRECATION")
+                geocoder.getFromLocation(lat, lng, maxResults) ?: emptyList()
+            }
+        }
+    }
+
     fun doSearch(term: String, cityName: String, radiusKm: Int) {
         if (isSearching) return
         val cleanTerm = term.trim()
@@ -2999,12 +2819,14 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                 }
 
                 val geocoder = Geocoder(context)
-                val (centerLat, centerLng) = withContext(Dispatchers.IO) {
+                val center: Pair<Double, Double>? = runCatching {
                     val query = "$cleanCity, Sweden"
-                    val addresses = runCatching { geocoder.getFromLocationName(query, 1) }.getOrNull()
-                    val first = addresses?.firstOrNull()
-                    if (first == null) null else Pair(first.latitude, first.longitude)
-                } ?: run {
+                    val addresses = geocoderGetFromLocationName(geocoder, query, 1)
+                    val first = addresses.firstOrNull() ?: return@runCatching null
+                    Pair(first.latitude, first.longitude)
+                }.getOrNull()
+
+                val (centerLat, centerLng) = center ?: run {
                     error = "Could not resolve city '$cleanCity' via Geocoder. Try a different city name."
                     return@launch
                 }
@@ -3342,7 +3164,7 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                         var resolvedCityName: String?
                         var geoError: String? = null
                         val addresses = try {
-                            geocoder.getFromLocation(place.lat, place.lng, 1)
+                            geocoderGetFromLocation(geocoder, place.lat, place.lng, 1)
                         } catch (e: Exception) {
                             geoError = "Geocoder failed: ${e.message}"
                             null

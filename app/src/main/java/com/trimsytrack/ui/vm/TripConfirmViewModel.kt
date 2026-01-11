@@ -9,6 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.data.SettingsStore
+import com.trimsytrack.data.entities.DistanceMethod
+import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.PromptStatus
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.util.PlaceNameNormalizer
@@ -190,7 +193,7 @@ class TripConfirmViewModel(
             }
     }
 
-    fun confirm(notes: String, onCreated: (Long) -> Unit) {
+    fun confirm(notes: String, businessPurpose: String, onCreated: (Long) -> Unit) {
         viewModelScope.launch {
             val s = _state.value
             val destLat = s.storeLat
@@ -208,7 +211,7 @@ class TripConfirmViewModel(
             _state.update { it.copy(isConfirming = true, error = null) }
 
             try {
-                val route = runCatching {
+                val routeResult = runCatching {
                     AppGraph.distanceRepository.getOrComputeDrivingRoute(
                         startLat = startLat,
                         startLng = startLng,
@@ -217,7 +220,9 @@ class TripConfirmViewModel(
                         startLocationId = s.startStoreId,
                         endLocationId = store,
                     )
-                }.getOrElse {
+                }
+
+                val route = routeResult.getOrElse {
                     AppGraph.distanceRepository.estimateStraightLineRoute(
                         startLat = startLat,
                         startLng = startLng,
@@ -225,10 +230,14 @@ class TripConfirmViewModel(
                         destLng = destLng,
                     )
                 }
+                val distanceMethod = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
 
                 val now = Instant.now()
                 val createdAt = promptTriggeredAt ?: now
                 val day = promptDay ?: LocalDate.now()
+                val endedAt = createdAt
+                val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
+                val tz = ZoneId.systemDefault().id
                 val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
                 val citySnapshot = runCatching {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -246,32 +255,39 @@ class TripConfirmViewModel(
                         profileId = profileId,
                         createdAt = createdAt,
                         day = day,
+                        startedAt = startedAt,
+                        endedAt = endedAt,
+                        timeZoneId = tz,
                         storeId = store,
                         storeNameSnapshot = normalizedStoreNameSnapshot,
                         citySnapshot = citySnapshot,
                         storeLatSnapshot = destLat,
                         storeLngSnapshot = destLng,
+                        endPlaceType = PlaceType.STORE,
                         startLabelSnapshot = s.startLabel ?: "",
                         startLat = startLat,
                         startLng = startLng,
                         distanceMeters = route.distanceMeters,
+                        distanceMethod = distanceMethod,
                         durationMinutes = route.durationMinutes,
                         notes = notes,
+                        businessPurpose = businessPurpose,
+                        supplierOrArea = null,
+                        isBusiness = true,
                         runId = null,
                         currencyCode = null,
                         mileageRateMicros = null,
                     )
                 )
 
-                // Backend-authoritative sync: enqueue create intent + attempt immediate send.
+                // TODO: Add new backend sync call here when ready
                 runCatching {
-                    AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
-                    // Trip creation should always attempt a backend flush, regardless of the user's periodic schedule.
-                    AppGraph.backendSyncManager.scheduleNow("trip-confirm")
+                    // AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
                 }
 
                 AppGraph.promptRepository.confirmWithTrip(promptId, tripId, now)
 
+                _state.update { it.copy(isConfirming = false, error = null) }
                 onCreated(tripId)
             } catch (e: Exception) {
                 _state.update { it.copy(error = e.message ?: "Failed", isConfirming = false) }

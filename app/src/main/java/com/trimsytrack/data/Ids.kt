@@ -14,15 +14,33 @@ typealias TripID = Long
 typealias EvidenceID = Long
 
 /** Human-friendly receipt code (e.g. "djtest-000123"). */
-typealias DreciptID = String
+typealias ReceiptCode = String
+
+@Deprecated(
+    message = "Legacy misspelling. Use ReceiptCode.",
+    replaceWith = ReplaceWith("ReceiptCode"),
+)
+typealias DreciptID = ReceiptCode
 
 object IdKeys {
     // Intent extras / deep links
     const val TRIP_ID = "tripId"      // canonical
     const val TRIP_ID_ALT = "tripID"  // tolerated alias
 
-    const val DRECIPT_ID = "dreciptId"      // canonical (as requested)
-    const val DRECIPT_ID_ALT = "dreciptID"  // tolerated alias
+    /** Canonical key for passing a human-friendly receipt code. */
+    const val RECEIPT_CODE = "receiptCode"
+
+    @Deprecated(
+        message = "Legacy misspelling. Use RECEIPT_CODE.",
+        replaceWith = ReplaceWith("RECEIPT_CODE"),
+    )
+    const val DRECIPT_ID = "dreciptId"
+
+    @Deprecated(
+        message = "Legacy misspelling. Use RECEIPT_CODE.",
+        replaceWith = ReplaceWith("RECEIPT_CODE"),
+    )
+    const val DRECIPT_ID_ALT = "dreciptID"
 
     const val EVIDENCE_ID = "evidenceId"      // canonical
     const val EVIDENCE_ID_ALT = "evidenceID"  // tolerated alias

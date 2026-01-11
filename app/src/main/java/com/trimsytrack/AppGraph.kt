@@ -15,10 +15,9 @@ import com.trimsytrack.distance.RoutesApi
 import com.trimsytrack.distance.RoutesDistanceService
 import com.trimsytrack.geofence.GeofenceSyncManager
 import com.trimsytrack.data.Migrations
-import com.trimsytrack.data.sync.BackendSyncManager
-import com.trimsytrack.data.sync.BackendSyncRepository
 import com.trimsytrack.notifications.Notifications
 import com.trimsytrack.network.BackendRequestInterceptor
+import com.trimsytrack.system.SystemCallablesService
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -55,11 +54,7 @@ object AppGraph {
     lateinit var geofenceSyncManager: GeofenceSyncManager
         private set
 
-    lateinit var backendSyncRepository: BackendSyncRepository
-        private set
-
-    lateinit var backendSyncManager: BackendSyncManager
-        private set
+    // TODO: Add new backend sync repository here when ready
 
     lateinit var driverDataRepository: DriverDataRepository
         private set
@@ -70,6 +65,9 @@ object AppGraph {
     lateinit var backendHttpClient: OkHttpClient
         private set
 
+    lateinit var systemCallables: SystemCallablesService
+        private set
+
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
@@ -78,6 +76,8 @@ object AppGraph {
             appContext = context.applicationContext
 
             settings = SettingsStore(appContext)
+
+            systemCallables = SystemCallablesService(settings)
 
             backendHttpClient = buildBackendHttpClient()
 
@@ -91,6 +91,11 @@ object AppGraph {
                     Migrations.MIGRATION_8_9,
                     Migrations.MIGRATION_9_10,
                     Migrations.MIGRATION_10_11,
+                    Migrations.MIGRATION_11_12,
+                    Migrations.MIGRATION_12_13,
+                    Migrations.MIGRATION_13_14,
+                    Migrations.MIGRATION_14_15,
+                    Migrations.MIGRATION_15_16,
                 )
                 .fallbackToDestructiveMigration()
                 .build()
@@ -101,8 +106,7 @@ object AppGraph {
             tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao(), settings, appContext)
             distanceRepository = DistanceRepository(db.distanceCacheDao(), buildRoutesService(), settings)
 
-            backendSyncRepository = BackendSyncRepository(appContext, settings)
-            backendSyncManager = BackendSyncManager(appContext)
+            // TODO: Initialize new backend sync repository here when ready
 
             driverDataRepository = DriverDataRepository(appContext, settings)
             driverDataSyncManager = DriverDataSyncManager(appContext)
@@ -120,7 +124,7 @@ object AppGraph {
         }
 
         return OkHttpClient.Builder()
-            .addInterceptor(BackendRequestInterceptor(settings))
+            .addInterceptor(BackendRequestInterceptor())
             .addInterceptor(logging)
             .build()
     }

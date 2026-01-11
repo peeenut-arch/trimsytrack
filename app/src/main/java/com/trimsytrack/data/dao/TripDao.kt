@@ -78,4 +78,7 @@ interface TripDao {
 
     @Query("UPDATE trips SET profileId = :profileId WHERE profileId = ''")
     suspend fun claimUnscoped(profileId: String)
+
+    @Query("UPDATE trips SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
 }

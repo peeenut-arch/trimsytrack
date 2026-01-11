@@ -37,7 +37,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,6 +66,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun AuthScreen(
     onBack: () -> Unit,
+    onContinue: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -89,7 +92,14 @@ fun AuthScreen(
     val googleLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
         onResult = { result ->
-            if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+            if (result.resultCode != Activity.RESULT_OK) {
+                scope.launch {
+                    busy = false
+                    busyLabel = null
+                    snackbarHostState.showSnackbar("Avbruten")
+                }
+                return@rememberLauncherForActivityResult
+            }
 
             scope.launch {
                 busy = true
@@ -178,6 +188,14 @@ fun AuthScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )
+
+                    Button(
+                        onClick = onContinue,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Fortsätt")
+                    }
 
                     Button(
                         onClick = {

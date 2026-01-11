@@ -2,22 +2,16 @@ package com.trimsytrack.network
 
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.auth.FirebaseAuth
-import com.trimsytrack.BuildConfig
-import com.trimsytrack.data.SettingsStore
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.Response
 
 /**
- * Injects required backend headers for the multi-app, multi-profile contract:
- * - Authorization: Firebase ID token (identity verification only)
- * - X-App-Id: fixed app_id compiled into the app
- * - X-Profile-Id: active profile scope for all business data
+ * BackendTRIMSY compliance:
+ * - Clients must NOT send profile ownership/scope headers.
+ * - Authentication is via Firebase ID token only.
  */
 class BackendRequestInterceptor(
-    private val settings: SettingsStore,
     private val auth: FirebaseAuth = FirebaseAuth.getInstance(),
 ) : Interceptor {
 
@@ -27,15 +21,12 @@ class BackendRequestInterceptor(
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
 
-        val profileId = runCatching {
-            runBlocking { settings.profileId.first() }.ifBlank { "default" }
-        }.getOrDefault("default")
+        // If the request already provides Authorization (e.g. forced-refresh token), do not overwrite it.
+        val hasAuthorization = !original.header("Authorization").isNullOrBlank()
 
-        val token = getIdTokenBestEffort()
+        val token = if (hasAuthorization) null else getIdTokenBestEffort()
 
         val builder = original.newBuilder()
-            .header("X-App-Id", BuildConfig.APP_ID)
-            .header("X-Profile-Id", profileId)
 
         if (!token.isNullOrBlank()) {
             builder.header("Authorization", "Bearer $token")

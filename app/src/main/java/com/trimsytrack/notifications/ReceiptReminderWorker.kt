@@ -67,6 +67,7 @@ class ReceiptReminderWorker(
 
     companion object {
         private const val UNIQUE_WORK_PREFIX = "receipt-reminder"
+        private const val WORK_TAG = "receipt-reminder"
 
         private const val KEY_PROFILE_ID = "profileId"
         private const val KEY_TRIP_ID = "tripId"
@@ -108,6 +109,7 @@ class ReceiptReminderWorker(
             val req = OneTimeWorkRequestBuilder<ReceiptReminderWorker>()
                 .setInitialDelay(delay)
                 .setInputData(data)
+                .addTag(WORK_TAG)
                 .build()
 
             WorkManager.getInstance(context)

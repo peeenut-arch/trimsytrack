@@ -6,13 +6,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -20,11 +23,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.trimsytrack.ui.vm.TripConfirmViewModel
+import com.trimsytrack.data.SettingsStore
+
+private enum class ConfirmAction { AddTrip, AddTripWithMedia }
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -38,6 +47,7 @@ fun TripConfirmScreen(
     val state by vm.state.collectAsState()
     val notes = remember { mutableStateOf("") }
     val context = LocalContext.current
+    val pendingConfirmAction = remember { mutableStateOf<ConfirmAction?>(null) }
 
     fun showAddedToast() {
         runCatching {
@@ -110,13 +120,118 @@ fun TripConfirmScreen(
 
             Spacer(Modifier.height(18.dp))
 
+            val pending = pendingConfirmAction.value
+            if (pending != null) {
+                val isSaving = state.isConfirming
+                var preset by remember(pending) { mutableStateOf(SettingsStore.DEFAULT_BUSINESS_PURPOSE) }
+                var isCustom by remember(pending) { mutableStateOf(false) }
+                var customText by remember(pending) { mutableStateOf("") }
+                val canConfirmPurpose = state.canConfirm && !isSaving && (!isCustom || customText.trim().isNotBlank())
+
+                AlertDialog(
+                    onDismissRequest = { if (!isSaving) pendingConfirmAction.value = null },
+                    title = { Text("Syfte") },
+                    text = {
+                        Column {
+                            Text(
+                                "Välj syfte för resan.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                            )
+                            Spacer(Modifier.height(12.dp))
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        preset = SettingsStore.DEFAULT_BUSINESS_PURPOSE
+                                        isCustom = false
+                                    },
+                            ) {
+                                RadioButton(
+                                    selected = !isCustom && preset == SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                                    onClick = {
+                                        preset = SettingsStore.DEFAULT_BUSINESS_PURPOSE
+                                        isCustom = false
+                                    },
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Inköp till försäljning", modifier = Modifier.padding(top = 12.dp))
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        preset = SettingsStore.SHIPPING_BUSINESS_PURPOSE
+                                        isCustom = false
+                                    },
+                            ) {
+                                RadioButton(
+                                    selected = !isCustom && preset == SettingsStore.SHIPPING_BUSINESS_PURPOSE,
+                                    onClick = {
+                                        preset = SettingsStore.SHIPPING_BUSINESS_PURPOSE
+                                        isCustom = false
+                                    },
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Frakt till postombud", modifier = Modifier.padding(top = 12.dp))
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { isCustom = true },
+                            ) {
+                                RadioButton(
+                                    selected = isCustom,
+                                    onClick = { isCustom = true },
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Eget", modifier = Modifier.padding(top = 12.dp))
+                            }
+
+                            if (isCustom) {
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = customText,
+                                    onValueChange = { customText = it },
+                                    label = { Text("Syfte") },
+                                    placeholder = { Text("Skriv ditt syfte") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true,
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            enabled = canConfirmPurpose,
+                            onClick = {
+                                val purpose = if (isCustom) customText.trim() else preset
+                                vm.confirm(notes.value, businessPurpose = purpose) { tripId ->
+                                    showAddedToast()
+                                    when (pending) {
+                                        ConfirmAction.AddTrip -> onAddTrip(tripId)
+                                        ConfirmAction.AddTripWithMedia -> onAddTripWithMedia(tripId)
+                                    }
+                                }
+                                pendingConfirmAction.value = null
+                            },
+                        ) { Text("Add trip") }
+                    },
+                    dismissButton = {
+                        TextButton(enabled = !isSaving, onClick = { pendingConfirmAction.value = null }) {
+                            Text("Cancel")
+                        }
+                    },
+                )
+            }
+
             Button(
                 enabled = state.canConfirm,
                 onClick = {
-                    vm.confirm(notes.value) { tripId ->
-                        showAddedToast()
-                        onAddTrip(tripId)
-                    }
+                    pendingConfirmAction.value = ConfirmAction.AddTrip
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -128,10 +243,7 @@ fun TripConfirmScreen(
             Button(
                 enabled = state.canConfirm,
                 onClick = {
-                    vm.confirm(notes.value) { tripId ->
-                        showAddedToast()
-                        onAddTripWithMedia(tripId)
-                    }
+                    pendingConfirmAction.value = ConfirmAction.AddTripWithMedia
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {

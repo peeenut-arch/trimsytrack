@@ -30,9 +30,18 @@ interface AttachmentDao {
     @Query("SELECT * FROM attachments WHERE profileId = :profileId AND id = :id")
     suspend fun getById(profileId: String, id: Long): AttachmentEntity?
 
+    @Query("UPDATE attachments SET uri = :uri WHERE profileId = :profileId AND id = :id")
+    suspend fun updateUri(profileId: String, id: Long, uri: String)
+
+    @Query("UPDATE attachments SET clientRef = :clientRef WHERE profileId = :profileId AND id = :id")
+    suspend fun updateClientRef(profileId: String, id: Long, clientRef: String)
+
     @Query("DELETE FROM attachments WHERE profileId = :profileId AND id = :id")
     suspend fun deleteById(profileId: String, id: Long)
 
     @Query("UPDATE attachments SET profileId = :profileId WHERE profileId = ''")
     suspend fun claimUnscoped(profileId: String)
+
+    @Query("UPDATE attachments SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
 }

@@ -55,6 +55,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 import kotlinx.coroutines.flow.first
 import java.util.Locale
 
@@ -112,9 +113,12 @@ fun TripDetailScreen(
                         sourceUri = uri,
                     )
                     val feeText = formatMinorAmount(feeMinor)
-                    val entity = baseEntity.copy(displayName = "Parking/Traffic fee ${feeText} — receipt photo")
+                    val parkingTicketId = t.parkingTicketId ?: UUID.randomUUID().toString()
+                    val entity = baseEntity.copy(
+                        displayName = "Parking/Traffic fee ${feeText} — receipt (${parkingTicketId.take(8)})"
+                    )
                     AppGraph.tripRepository.addAttachment(entity)
-                    vm.updateTrip(t.copy(parkingTrafficFeeMinor = feeMinor))
+                    vm.updateTrip(t.copy(parkingTrafficFeeMinor = feeMinor, parkingTicketId = parkingTicketId))
                     importMessage.value = "Fee saved and receipt photo attached."
                 } catch (e: Exception) {
                     importMessage.value = e.message ?: "Failed to upload fee receipt photo"
@@ -500,6 +504,10 @@ private fun importReceiptToAppFiles(
         }
     }
 
+    val sha256 = runCatching { com.trimsytrack.util.Hashing.sha256Hex(destFile) }.getOrNull()
+    val sizeBytes = runCatching { destFile.length() }.getOrNull()
+    val now = Instant.now()
+
     val contentUri = FileProvider.getUriForFile(
         context,
         "${context.packageName}.fileprovider",
@@ -515,7 +523,12 @@ private fun importReceiptToAppFiles(
             tripPrefix.isBlank() -> "$receiptId — $originalName"
             else -> "$receiptId — $tripPrefix — $originalName"
         },
-        addedAt = Instant.now(),
+        capturedAt = now,
+        addedAt = now,
+        sha256 = sha256,
+        sizeBytes = sizeBytes,
+        linkedAt = now,
+        linkedByDeviceId = null,
     )
 }
 

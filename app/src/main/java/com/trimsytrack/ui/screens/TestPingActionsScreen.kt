@@ -140,6 +140,9 @@ fun TestPingActionsScreen(
         }.trimEnd()
 
         val pid = profileId.ifBlank { "default" }
+        val tz = java.time.ZoneId.systemDefault().id
+        val endedAt = createdAt
+        val startedAt = endedAt.minusSeconds((durationMinutes.toLong().coerceAtLeast(0)) * 60L)
         val entity = TripEntity(
             profileId = pid,
             clientRef = null,
@@ -147,6 +150,9 @@ fun TestPingActionsScreen(
             syncStatus = SyncStatus.LOCAL_ONLY,
             createdAt = createdAt,
             day = day,
+            startedAt = startedAt,
+            endedAt = endedAt,
+            timeZoneId = tz,
             storeId = "testping:${UUID.randomUUID()}",
             storeNameSnapshot = stopLocationName.trim(),
             citySnapshot = address.ifBlank { "Test Ping" },
@@ -156,8 +162,12 @@ fun TestPingActionsScreen(
             startLat = startLat,
             startLng = startLng,
             distanceMeters = 0,
+            distanceMethod = com.trimsytrack.data.entities.DistanceMethod.UNKNOWN,
             durationMinutes = durationMinutes,
             notes = notes,
+            businessPurpose = com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+            supplierOrArea = null,
+            isBusiness = true,
             runId = null,
             currencyCode = null,
             mileageRateMicros = null,

@@ -14,6 +14,7 @@ import java.security.MessageDigest
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -69,15 +70,51 @@ class DriverDataRepository(
 
         val profileId = settings.profileId.first().ifBlank { "default" }
 
-        val stores = AppGraph.db.storeDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
-        val trips = AppGraph.db.tripDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
+        // Stores/place knowledge is strictly local-only and must never reach the backend.
+        val stores = emptyList<StoreDto>()
+
+        // Backfill parkingTicketId for existing fee trips (stable identifier for cloud metadata).
+        val tripEntities = AppGraph.db.tripDao().listAll(profileId).toMutableList()
+        for (i in tripEntities.indices) {
+            val t = tripEntities[i]
+            val hasFee = t.parkingTrafficFeeMinor != null
+            val missingId = t.parkingTicketId.isNullOrBlank()
+            val missingClientRef = t.clientRef.isNullOrBlank()
+
+            if (hasFee && missingId) {
+                val next = t.copy(
+                    parkingTicketId = UUID.randomUUID().toString(),
+                    clientRef = if (missingClientRef) UUID.randomUUID().toString() else t.clientRef,
+                )
+                runCatching { AppGraph.db.tripDao().update(next) }
+                tripEntities[i] = next
+            } else if (missingClientRef) {
+                val next = t.copy(clientRef = UUID.randomUUID().toString())
+                runCatching { AppGraph.db.tripDao().update(next) }
+                tripEntities[i] = next
+            }
+        }
+
+        // Backfill missing evidence clientRef (universal EvidenceID).
+        val attachmentsForCloud = AppGraph.db.attachmentDao().listAll(profileId).toMutableList()
+        for (i in attachmentsForCloud.indices) {
+            val a = attachmentsForCloud[i]
+            if (!a.clientRef.isNullOrBlank()) continue
+            val next = a.copy(clientRef = UUID.randomUUID().toString())
+            runCatching { AppGraph.db.attachmentDao().updateClientRef(profileId, a.id, next.clientRef.orEmpty()) }
+            attachmentsForCloud[i] = next
+        }
+
+        val tripClientRefByLocalId = tripEntities.associate { it.id to it.clientRef.orEmpty() }
+
+        val trips = tripEntities.map { it.toDto() }.sortedBy { it.id }
         val prompts = AppGraph.db.promptDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
         val runs = AppGraph.db.runDao().listAll(profileId).map { it.toDto() }.sortedBy { it.id }
 
         val regions = readRegionFilesBestEffort(context).toSortedMap()
 
         return DriverData(
-            schemaVersion = 1,
+            schemaVersion = 2,
             exportedAt = Instant.now().toString(),
             driverId = driverId,
             settings = exportSettings(driverId = driverId),
@@ -88,8 +125,18 @@ class DriverDataRepository(
             runs = runs,
             // Derived cache: intentionally not included in snapshots.
             distanceCache = emptyList(),
-            // Evidence never goes to backend snapshots.
-            attachments = emptyList(),
+            // Evidence bytes never go to backend snapshots, but metadata (ids, hashes, linkage) does.
+            // NOTE: we intentionally omit device-local URIs.
+            attachments = attachmentsForCloud
+                .map { it.toCloudDto(tripClientRef = tripClientRefByLocalId[it.tripId].orEmpty()) }
+                .sortedBy { it.id },
+
+            parkingTickets = tripEntities
+                .asSequence()
+                .filter { it.parkingTrafficFeeMinor != null && !it.parkingTicketId.isNullOrBlank() }
+                .map { it.toParkingTicketDto() }
+                .sortedBy { it.tripId }
+                .toList(),
         )
     }
 
@@ -186,10 +233,15 @@ class DriverDataRepository(
         withContext(Dispatchers.IO) {
             val profileId = settings.profileId.first().ifBlank { "default" }
 
-            // Evidence is intentionally NOT part of backend snapshots.
-            // Preserve local evidence metadata so a backend restore doesn't wipe it.
+            // Preserve local evidence (with working device-local URIs). If there is no local evidence,
+            // restore remote evidence metadata so auditors/other clients can see counts + linkage.
             val preservedEvidence = runCatching {
                 AppGraph.db.attachmentDao().listAll(profileId)
+            }.getOrDefault(emptyList())
+
+            // Preserve local stores (store/place knowledge is local-only and not restored from backend).
+            val preservedStores = runCatching {
+                AppGraph.db.storeDao().listAll(profileId)
             }.getOrDefault(emptyList())
 
             // 1) Restore region files first (so store sync systems can work).
@@ -198,13 +250,17 @@ class DriverDataRepository(
             // 2) Reset DB and insert all entities.
             AppGraph.db.clearAllTables()
 
-            AppGraph.db.storeDao().upsertAll(data.stores.map { it.toEntity(profileId) })
+            if (preservedStores.isNotEmpty()) {
+                AppGraph.db.storeDao().upsertAll(preservedStores)
+            }
             AppGraph.db.tripDao().insertAll(data.trips.map { it.toEntity(profileId) })
             AppGraph.db.promptDao().insertAll(data.promptEvents.map { it.toEntity(profileId) })
             AppGraph.db.runDao().insertAll(data.runs.map { it.toEntity(profileId) })
 
             if (preservedEvidence.isNotEmpty()) {
                 AppGraph.db.attachmentDao().insertAll(preservedEvidence)
+            } else {
+                AppGraph.db.attachmentDao().insertAll(data.attachments.map { it.toEntity(profileId) })
             }
         }
 
@@ -247,9 +303,12 @@ class DriverDataRepository(
             odometerYearStartKm = settings.odometerYearStartKm.first(),
             odometerYearEndKm = settings.odometerYearEndKm.first(),
 
-            storeImages = settings.storeImages.first().toSortedMap(),
-            storeBusinessHours = settings.storeBusinessHours.first().toSortedMap(),
-            storeFetchedDetails = settings.storeFetchedDetails.first().toSortedMap(),
+            // Local-only cache/customizations: do NOT upload to backend snapshots.
+            // - avoids backend storage bloat
+            // - survives backend wipe without requiring refetch
+            storeImages = emptyMap(),
+            storeBusinessHours = emptyMap(),
+            storeFetchedDetails = emptyMap(),
 
             homeTileIconImages = settings.homeTileIconImages.first().toSortedMap(),
             preferredCategories = settings.preferredCategories.first(),
@@ -269,7 +328,8 @@ class DriverDataRepository(
     }
 
     private fun normalizeBaseUrl(raw: String): String {
-        val trimmed = raw.trim().ifBlank { "http://79.76.38.94/" }
+        val trimmed = raw.trim()
+        require(trimmed.isNotBlank()) { "backendBaseUrl is not configured" }
         return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
     }
 
@@ -345,44 +405,101 @@ private fun StoreDto.toEntity(profileId: String) = StoreEntity(
 
 private fun TripEntity.toDto() = TripDto(
     id = id,
+    clientRef = clientRef.orEmpty(),
     createdAt = createdAt.toString(),
     day = day.toString(),
+    startedAt = startedAt.toString(),
+    endedAt = endedAt.toString(),
+    timeZoneId = timeZoneId,
     storeId = storeId,
+    storeLocationId = storeLocationId,
+    postOmbudId = postOmbudId,
     storeNameSnapshot = storeNameSnapshot,
     citySnapshot = citySnapshot,
     storeLatSnapshot = storeLatSnapshot,
     storeLngSnapshot = storeLngSnapshot,
+    endPlaceType = endPlaceType.name,
+    endAddressSnapshot = endAddressSnapshot,
     startLabelSnapshot = startLabelSnapshot,
     startLat = startLat,
     startLng = startLng,
+    startPlaceType = startPlaceType.name,
+    startAddressSnapshot = startAddressSnapshot,
     distanceMeters = distanceMeters,
     durationMinutes = durationMinutes,
+    distanceMethod = distanceMethod.name,
     notes = notes,
+    businessPurpose = businessPurpose,
+    supplierOrArea = supplierOrArea,
+    isBusiness = isBusiness,
     runId = runId,
     currencyCode = currencyCode,
     mileageRateMicros = mileageRateMicros,
+    parkingTrafficFeeMinor = parkingTrafficFeeMinor,
+    parkingTicketId = parkingTicketId,
 )
 
 private fun TripDto.toEntity(profileId: String) = TripEntity(
     profileId = profileId,
     id = id,
+    clientRef = clientRef.ifBlank { null },
     createdAt = Instant.parse(createdAt),
     day = LocalDate.parse(day),
+    startedAt = runCatching { Instant.parse(startedAt) }.getOrElse { Instant.parse(createdAt) },
+    endedAt = runCatching { Instant.parse(endedAt) }.getOrElse { Instant.parse(createdAt) },
+    timeZoneId = timeZoneId.ifBlank { ZoneId.systemDefault().id },
     storeId = storeId,
+    storeLocationId = storeLocationId,
+    postOmbudId = postOmbudId,
     storeNameSnapshot = storeNameSnapshot,
     citySnapshot = citySnapshot,
     storeLatSnapshot = storeLatSnapshot,
     storeLngSnapshot = storeLngSnapshot,
+    endPlaceType = runCatching { com.trimsytrack.data.entities.PlaceType.valueOf(endPlaceType) }
+        .getOrDefault(com.trimsytrack.data.entities.PlaceType.STORE),
+    endAddressSnapshot = endAddressSnapshot,
     startLabelSnapshot = startLabelSnapshot,
     startLat = startLat,
     startLng = startLng,
     distanceMeters = distanceMeters,
+    distanceMethod = runCatching { com.trimsytrack.data.entities.DistanceMethod.valueOf(distanceMethod) }
+        .getOrDefault(com.trimsytrack.data.entities.DistanceMethod.UNKNOWN),
     durationMinutes = durationMinutes,
     notes = notes,
+    startPlaceType = runCatching { com.trimsytrack.data.entities.PlaceType.valueOf(startPlaceType) }
+        .getOrDefault(com.trimsytrack.data.entities.PlaceType.OTHER),
+    startAddressSnapshot = startAddressSnapshot,
+    businessPurpose = businessPurpose.ifBlank { com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE },
+    supplierOrArea = supplierOrArea,
+    isBusiness = isBusiness,
     runId = runId,
     currencyCode = currencyCode,
     mileageRateMicros = mileageRateMicros,
+    parkingTrafficFeeMinor = parkingTrafficFeeMinor,
+    parkingTicketId = parkingTicketId,
 )
+
+private fun TripEntity.toParkingTicketDto(): ParkingTicketDto {
+    val ticketId = parkingTicketId?.trim().orEmpty()
+    val amount = parkingTrafficFeeMinor ?: 0
+    return ParkingTicketDto(
+        parkingTicketId = ticketId,
+        tripId = id,
+        costMinor = amount,
+        currencyCode = currencyCode,
+        syfte = businessPurpose.ifBlank { com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE },
+        date = day.toString(),
+        time = endedAt.toString(),
+        timeZoneId = timeZoneId,
+        storeLocationId = storeLocationId,
+        postOmbudId = postOmbudId,
+        storeNameSnapshot = storeNameSnapshot,
+        citySnapshot = citySnapshot,
+        storeLatSnapshot = storeLatSnapshot,
+        storeLngSnapshot = storeLngSnapshot,
+        endAddressSnapshot = endAddressSnapshot,
+    )
+}
 
 private fun PromptEventEntity.toDto() = PromptEventDto(
     id = id,
@@ -462,21 +579,50 @@ private fun DistanceCacheDto.toEntity(profileId: String) = DistanceCacheEntity(
     createdAt = Instant.parse(createdAt),
 )
 
-private fun AttachmentEntity.toDto() = AttachmentDto(
+private fun AttachmentEntity.toDto(tripClientRef: String) = AttachmentDto(
     id = id,
     tripId = tripId,
+    clientRef = clientRef.orEmpty(),
+    tripClientRef = tripClientRef,
     uri = uri,
     mimeType = mimeType,
     displayName = displayName,
+    capturedAt = capturedAt.toString(),
     addedAt = addedAt.toString(),
+    sha256 = sha256,
+    sizeBytes = sizeBytes,
+    linkedAt = linkedAt?.toString(),
+    linkedByDeviceId = linkedByDeviceId,
+)
+
+private fun AttachmentEntity.toCloudDto(tripClientRef: String) = AttachmentDto(
+    id = id,
+    tripId = tripId,
+    clientRef = clientRef.orEmpty(),
+    tripClientRef = tripClientRef,
+    uri = "",
+    mimeType = mimeType,
+    displayName = displayName,
+    capturedAt = capturedAt.toString(),
+    addedAt = addedAt.toString(),
+    sha256 = sha256,
+    sizeBytes = sizeBytes,
+    linkedAt = linkedAt?.toString(),
+    linkedByDeviceId = linkedByDeviceId,
 )
 
 private fun AttachmentDto.toEntity(profileId: String) = AttachmentEntity(
     profileId = profileId,
     id = id,
     tripId = tripId,
+    clientRef = clientRef.ifBlank { null },
     uri = uri,
     mimeType = mimeType,
     displayName = displayName,
+    capturedAt = runCatching { Instant.parse(capturedAt) }.getOrElse { Instant.parse(addedAt) },
     addedAt = Instant.parse(addedAt),
+    sha256 = sha256,
+    sizeBytes = sizeBytes,
+    linkedAt = linkedAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
+    linkedByDeviceId = linkedByDeviceId,
 )

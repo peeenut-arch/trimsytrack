@@ -18,8 +18,20 @@ class DriverDataSnapshotUploadWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
+        // BACKENDTRIMSY compliance: legacy DriverData snapshot sync is disabled.
+        // The new backend contract requires backend-resolved profile scope + law acceptance gating.
+        return Result.success()
+
         // Ensure graph is initialized even if process was started for WorkManager.
         runCatching { AppGraph.init(applicationContext) }
+
+        // If backend is not configured, do nothing and do NOT reschedule.
+        // This prevents legacy background sync from running on existing installs.
+        val baseUrl = AppGraph.settings.backendBaseUrl.first().trim()
+        val driverId = AppGraph.settings.backendDriverId.first().trim()
+        if (baseUrl.isBlank() || driverId.isBlank()) {
+            return Result.success()
+        }
 
         val trigger = inputData.getString("trigger") ?: "scheduled"
         val reason = inputData.getString("reason") ?: "unknown"
@@ -31,6 +43,7 @@ class DriverDataSnapshotUploadWorker(
             AppGraph.driverDataRepository.uploadSnapshotIfChanged()
         }
 
+        // Only reschedule if backend is configured.
         val dailyMinutes = AppGraph.settings.backendDailySyncMinutes.first()
         AppGraph.driverDataSyncManager.scheduleNextDaily(dailyMinutes)
 

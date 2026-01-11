@@ -26,4 +26,7 @@ interface RunDao {
 
     @Query("UPDATE runs SET profileId = :profileId WHERE profileId = ''")
     suspend fun claimUnscoped(profileId: String)
+
+    @Query("UPDATE runs SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
 }

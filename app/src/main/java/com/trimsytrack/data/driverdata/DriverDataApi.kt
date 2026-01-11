@@ -7,10 +7,12 @@ import retrofit2.http.PUT
 import retrofit2.http.Path
 
 /**
- * Backend-authoritative API.
+ * Legacy snapshot API (DriverData).
+ *
+ * Note: The app is migrating to the BACKENDTRIMSY contract where profile scope is backend-resolved
+ * and requests must not include client-specified ownership/scope headers.
  *
  * Auth: Firebase ID token is sent via Authorization header by the shared OkHttp client.
- * Scope: X-App-Id and X-Profile-Id are always included for multi-app and per-profile isolation.
  */
 interface DriverDataApi {
     @GET("api/v1/driverdata/{driverId}")

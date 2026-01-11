@@ -169,7 +169,7 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
         throw IllegalStateException("Location unavailable or permission denied. Enable location and try again.")
     }
 
-    val route = runCatching {
+    val routeResult = runCatching {
         AppGraph.distanceRepository.getOrComputeDrivingRoute(
             startLat = startLat,
             startLng = startLng,
@@ -178,7 +178,9 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             startLocationId = null,
             endLocationId = store.id,
         )
-    }.getOrElse {
+    }
+
+    val route = routeResult.getOrElse {
         AppGraph.distanceRepository.estimateStraightLineRoute(
             startLat = startLat,
             startLng = startLng,
@@ -187,13 +189,25 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
         )
     }
 
+    val distanceMethod = if (routeResult.isSuccess) {
+        com.trimsytrack.data.entities.DistanceMethod.MAPS
+    } else {
+        com.trimsytrack.data.entities.DistanceMethod.GPS_STRAIGHT_LINE
+    }
+
     val now = Instant.now()
     val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+    val tz = java.time.ZoneId.systemDefault().id
+    val endedAt = now
+    val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
     val tripId = AppGraph.tripRepository.createTrip(
         TripEntity(
             profileId = profileId,
             createdAt = now,
             day = LocalDate.now(),
+            startedAt = startedAt,
+            endedAt = endedAt,
+            timeZoneId = tz,
             storeId = store.id,
             storeNameSnapshot = store.name,
             citySnapshot = store.city,
@@ -203,18 +217,21 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             startLat = startLat,
             startLng = startLng,
             distanceMeters = route.distanceMeters,
+            distanceMethod = distanceMethod,
             durationMinutes = route.durationMinutes,
             notes = "",
+            businessPurpose = com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+            supplierOrArea = null,
+            isBusiness = true,
             runId = null,
             currencyCode = null,
             mileageRateMicros = null,
         )
     )
 
+    // TODO: Add new backend sync call here when ready
     runCatching {
-        AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
-        // Trip creation should always attempt a backend flush, regardless of the user's periodic schedule.
-        AppGraph.backendSyncManager.scheduleNow("manual-trip")
+        // AppGraph.backendSyncRepository.enqueueTripCreate(tripId)
     }
 
     return tripId
@@ -542,6 +559,15 @@ fun ManualTripScreen(
     val ignoredStoreIds by AppGraph.settings.ignoredStoreIds.collectAsState(initial = emptySet())
     var error by remember { mutableStateOf<String?>(null) }
     var isSaving by remember { mutableStateOf(false) }
+
+    data class PendingTripAdd(
+        val store: StoreEntity,
+        val withMedia: Boolean,
+        val tapOffset: IntOffset?,
+        val exitSearchOnSuccess: Boolean,
+    )
+
+    var pendingTripAdd by remember { mutableStateOf<PendingTripAdd?>(null) }
 
     var storeVisitCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
 
@@ -1945,72 +1971,23 @@ fun ManualTripScreen(
                                 onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
                                 onAddTrip = { tapOffset ->
                                     addTripMenuStoreId = null
-                                    scope.launch {
-                                        val tapToastOffset = tapOffset
-                                        isSaving = true
-                                        error = null
-                                        try {
-                                            createManualTripToStore(store = polar.store)
-                                            if (tapToastOffset != null) {
-                                                showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
-                                            } else {
-                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
-                                            }
-                                            exitSearchMode()
-                                        } catch (e: CancellationException) {
-                                            throw e
-                                        } catch (e: IllegalStateException) {
-                                            val msg = e.message.orEmpty()
-                                            if (msg.contains("already added", ignoreCase = true)) {
-                                                if (tapToastOffset != null) {
-                                                    showAddedToast(tapToastOffset, "Already added")
-                                                } else {
-                                                    snackbarHostState.showSnackbar("Already added")
-                                                }
-                                            } else {
-                                                error = e.message ?: "Failed"
-                                            }
-                                        } catch (e: Exception) {
-                                            error = e.message ?: "Failed"
-                                        } finally {
-                                            isSaving = false
-                                        }
-                                    }
+                                    if (isSaving) return@StoreThumbnailButton
+                                    pendingTripAdd = PendingTripAdd(
+                                        store = polar.store,
+                                        withMedia = false,
+                                        tapOffset = tapOffset,
+                                        exitSearchOnSuccess = true,
+                                    )
                                 },
                                 onAddTripWithMedia = { tapOffset ->
                                     addTripMenuStoreId = null
-                                    scope.launch {
-                                        val tapToastOffset = tapOffset
-                                        isSaving = true
-                                        error = null
-                                        try {
-                                            val tripId = createManualTripToStore(store = polar.store)
-                                            if (tapToastOffset != null) {
-                                                showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
-                                            } else {
-                                                snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
-                                            }
-                                            onOpenTrip(tripId, true)
-                                            exitSearchMode()
-                                        } catch (e: CancellationException) {
-                                            throw e
-                                        } catch (e: IllegalStateException) {
-                                            val msg = e.message.orEmpty()
-                                            if (msg.contains("already added", ignoreCase = true)) {
-                                                if (tapToastOffset != null) {
-                                                    showAddedToast(tapToastOffset, "Already added")
-                                                } else {
-                                                    snackbarHostState.showSnackbar("Already added")
-                                                }
-                                            } else {
-                                                error = e.message ?: "Failed"
-                                            }
-                                        } catch (e: Exception) {
-                                            error = e.message ?: "Failed"
-                                        } finally {
-                                            isSaving = false
-                                        }
-                                    }
+                                    if (isSaving) return@StoreThumbnailButton
+                                    pendingTripAdd = PendingTripAdd(
+                                        store = polar.store,
+                                        withMedia = true,
+                                        tapOffset = tapOffset,
+                                        exitSearchOnSuccess = true,
+                                    )
                                 },
                                 onLongPress = { viewStoreDialog = polar.store },
                                 onClick = {
@@ -2079,70 +2056,23 @@ fun ManualTripScreen(
                                     onDismissTripActions = { if (addTripMenuStoreId == polar.store.id) addTripMenuStoreId = null },
                                     onAddTrip = { tapOffset ->
                                         addTripMenuStoreId = null
-                                        scope.launch {
-                                            val tapToastOffset = tapOffset
-                                            isSaving = true
-                                            error = null
-                                            try {
-                                                createManualTripToStore(store = polar.store)
-                                                if (tapToastOffset != null) {
-                                                    showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
-                                                } else {
-                                                    snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
-                                                }
-                                            } catch (e: CancellationException) {
-                                                throw e
-                                            } catch (e: IllegalStateException) {
-                                                val msg = e.message.orEmpty()
-                                                if (msg.contains("already added", ignoreCase = true)) {
-                                                    if (tapToastOffset != null) {
-                                                        showAddedToast(tapToastOffset, "Already added")
-                                                    } else {
-                                                        snackbarHostState.showSnackbar("Already added")
-                                                    }
-                                                } else {
-                                                    error = e.message ?: "Failed"
-                                                }
-                                            } catch (e: Exception) {
-                                                error = e.message ?: "Failed"
-                                            } finally {
-                                                isSaving = false
-                                            }
-                                        }
+                                        if (isSaving) return@StoreThumbnailButton
+                                        pendingTripAdd = PendingTripAdd(
+                                            store = polar.store,
+                                            withMedia = false,
+                                            tapOffset = tapOffset,
+                                            exitSearchOnSuccess = false,
+                                        )
                                     },
                                     onAddTripWithMedia = { tapOffset ->
                                         addTripMenuStoreId = null
-                                        scope.launch {
-                                            val tapToastOffset = tapOffset
-                                            isSaving = true
-                                            error = null
-                                            try {
-                                                val tripId = createManualTripToStore(store = polar.store)
-                                                if (tapToastOffset != null) {
-                                                    showAddedToast(tapToastOffset, formatAddedSnackbar(polar.store.name))
-                                                } else {
-                                                    snackbarHostState.showSnackbar(formatAddedSnackbar(polar.store.name))
-                                                }
-                                                onOpenTrip(tripId, true)
-                                            } catch (e: CancellationException) {
-                                                throw e
-                                            } catch (e: IllegalStateException) {
-                                                val msg = e.message.orEmpty()
-                                                if (msg.contains("already added", ignoreCase = true)) {
-                                                    if (tapToastOffset != null) {
-                                                        showAddedToast(tapToastOffset, "Already added")
-                                                    } else {
-                                                        snackbarHostState.showSnackbar("Already added")
-                                                    }
-                                                } else {
-                                                    error = e.message ?: "Failed"
-                                                }
-                                            } catch (e: Exception) {
-                                                error = e.message ?: "Failed"
-                                            } finally {
-                                                isSaving = false
-                                            }
-                                        }
+                                        if (isSaving) return@StoreThumbnailButton
+                                        pendingTripAdd = PendingTripAdd(
+                                            store = polar.store,
+                                            withMedia = true,
+                                            tapOffset = tapOffset,
+                                            exitSearchOnSuccess = false,
+                                        )
                                     },
                                     onLongPress = { viewStoreDialog = polar.store },
                                     onClick = {
@@ -2202,6 +2132,141 @@ fun ManualTripScreen(
         )
     }
 
+    val pending = pendingTripAdd
+    if (pending != null) {
+        var preset by remember(pending.store.id) { mutableStateOf(com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE) }
+        var isCustom by remember(pending.store.id) { mutableStateOf(false) }
+        var customText by remember(pending.store.id) { mutableStateOf("") }
+
+        val canConfirm = !isSaving && (!isCustom || customText.trim().isNotBlank())
+
+        AlertDialog(
+            onDismissRequest = { if (!isSaving) pendingTripAdd = null },
+            title = { Text("Syfte") },
+            text = {
+                Column {
+                    Text(
+                        "Välj syfte för resan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                preset = com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = !isCustom && preset == com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                            onClick = {
+                                preset = com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Inköp till försäljning", modifier = Modifier.padding(top = 12.dp))
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                preset = com.trimsytrack.data.SettingsStore.SHIPPING_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = !isCustom && preset == com.trimsytrack.data.SettingsStore.SHIPPING_BUSINESS_PURPOSE,
+                            onClick = {
+                                preset = com.trimsytrack.data.SettingsStore.SHIPPING_BUSINESS_PURPOSE
+                                isCustom = false
+                            },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Frakt till postombud", modifier = Modifier.padding(top = 12.dp))
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isCustom = true },
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = isCustom,
+                            onClick = { isCustom = true },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Eget", modifier = Modifier.padding(top = 12.dp))
+                    }
+
+                    if (isCustom) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = customText,
+                            onValueChange = { customText = it },
+                            label = { Text("Syfte") },
+                            placeholder = { Text("Skriv ditt syfte") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = canConfirm,
+                    onClick = {
+                        val purpose = if (isCustom) customText.trim() else preset
+                        scope.launch {
+                            val tapToastOffset = pending.tapOffset
+                            isSaving = true
+                            error = null
+                            try {
+                                val tripId = createManualTripToStore(store = pending.store, businessPurpose = purpose)
+                                if (tapToastOffset != null) {
+                                    showAddedToast(tapToastOffset, formatAddedSnackbar(pending.store.name))
+                                } else {
+                                    snackbarHostState.showSnackbar(formatAddedSnackbar(pending.store.name))
+                                }
+                                if (pending.withMedia) {
+                                    onOpenTrip(tripId, true)
+                                }
+                                if (pending.exitSearchOnSuccess) {
+                                    exitSearchMode()
+                                }
+                                pendingTripAdd = null
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: IllegalStateException) {
+                                val msg = e.message.orEmpty()
+                                if (msg.contains("already added", ignoreCase = true)) {
+                                    if (tapToastOffset != null) {
+                                        showAddedToast(tapToastOffset, "Already added")
+                                    } else {
+                                        snackbarHostState.showSnackbar("Already added")
+                                    }
+                                } else {
+                                    error = e.message ?: "Failed"
+                                }
+                            } catch (e: Exception) {
+                                error = e.message ?: "Failed"
+                            } finally {
+                                isSaving = false
+                            }
+                        }
+                    },
+                ) { Text("Add trip") }
+            },
+            dismissButton = {
+                TextButton(enabled = !isSaving, onClick = { pendingTripAdd = null }) { Text("Cancel") }
+            },
+        )
+    }
+
     val storeForView = viewStoreDialog
     if (storeForView != null) {
         val scroll = rememberScrollState()
@@ -2241,59 +2306,6 @@ fun ManualTripScreen(
                 fetchedAddress = cached.formattedAddress
                 fetchedHours = cached.weekdayDescriptions
                 fetchedCity = cached.formattedAddress?.let { bestEffortCityFromAddress(it) }
-                // If we have *any* cached details, treat as done.
-                if (!cached.formattedAddress.isNullOrBlank() || cached.weekdayDescriptions.isNotEmpty()) {
-                    return@LaunchedEffect
-                }
-            }
-
-            loading = true
-            try {
-                val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
-                val raw = placesApi.getPlaceDetailsRaw(
-                    placeId = storeIdToPlaceId(storeForView.id),
-                    apiKey = apiKey,
-                    fieldMask = "formattedAddress,regularOpeningHours.weekdayDescriptions",
-                )
-
-                val root = runCatching { placesJson.parseToJsonElement(raw).jsonObject }.getOrNull()
-                val addr = root
-                    ?.get("formattedAddress")
-                    ?.let { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
-
-                val hours = runCatching {
-                    root
-                        ?.get("regularOpeningHours")
-                        ?.jsonObject
-                        ?.get("weekdayDescriptions")
-                        ?.jsonArray
-                        ?.mapNotNull { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
-                        .orEmpty()
-                }.getOrDefault(emptyList())
-
-                fetchedAddress = addr
-                fetchedHours = hours
-                fetchedCity = addr?.let { bestEffortCityFromAddress(it) }
-
-                // Persist what we got so the app can reuse it offline.
-                runCatching {
-                    AppGraph.settings.upsertStoreFetchedDetails(
-                        storeForView.id,
-                        com.trimsytrack.data.StoreFetchedDetails(
-                            formattedAddress = addr,
-                            weekdayDescriptions = hours,
-                            fetchedAtMillis = System.currentTimeMillis(),
-                        ),
-                    )
-                }
-
-                if (addr.isNullOrBlank() && hours.isEmpty()) {
-                    fetchError = "No details found on Google for this place."
-                }
-            } catch (e: Exception) {
-                fetchError = e.message ?: "Failed to fetch details"
-            } finally {
-                loading = false
             }
         }
 
@@ -2329,6 +2341,75 @@ fun ManualTripScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                             )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
+
+                    val isGoogle = storeForView.id.startsWith("gmap_")
+                    val hasAnyCachedDetails = !fetchedAddress.isNullOrBlank() || fetchedHours.isNotEmpty()
+                    if (isGoogle && !hasAnyCachedDetails) {
+                        Text(
+                            "No cached Google details yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(
+                            enabled = !loading,
+                            onClick = {
+                                loading = true
+                                fetchError = null
+                                scope.launch {
+                                    try {
+                                        val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
+                                        val raw = placesApi.getPlaceDetailsRaw(
+                                            placeId = storeIdToPlaceId(storeForView.id),
+                                            apiKey = apiKey,
+                                            fieldMask = "formattedAddress,regularOpeningHours.weekdayDescriptions",
+                                        )
+
+                                        val root = runCatching { placesJson.parseToJsonElement(raw).jsonObject }.getOrNull()
+                                        val addr = root
+                                            ?.get("formattedAddress")
+                                            ?.let { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
+
+                                        val hours = runCatching {
+                                            root
+                                                ?.get("regularOpeningHours")
+                                                ?.jsonObject
+                                                ?.get("weekdayDescriptions")
+                                                ?.jsonArray
+                                                ?.mapNotNull { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
+                                                .orEmpty()
+                                        }.getOrDefault(emptyList())
+
+                                        fetchedAddress = addr
+                                        fetchedHours = hours
+                                        fetchedCity = addr?.let { bestEffortCityFromAddress(it) }
+
+                                        runCatching {
+                                            AppGraph.settings.upsertStoreFetchedDetails(
+                                                storeForView.id,
+                                                com.trimsytrack.data.StoreFetchedDetails(
+                                                    formattedAddress = addr,
+                                                    weekdayDescriptions = hours,
+                                                    fetchedAtMillis = System.currentTimeMillis(),
+                                                ),
+                                            )
+                                        }
+
+                                        if (addr.isNullOrBlank() && hours.isEmpty()) {
+                                            fetchError = "No details found on Google for this place."
+                                        }
+                                    } catch (e: Exception) {
+                                        fetchError = e.message ?: "Failed to fetch details"
+                                    } finally {
+                                        loading = false
+                                    }
+                                }
+                            },
+                        ) {
+                            Text("Fetch from Google")
                         }
                         Spacer(Modifier.height(12.dp))
                     }
@@ -2397,6 +2478,13 @@ fun ManualTripScreen(
         val placesApi = remember { retrofit.create(RawPlacesDetailsApi::class.java) }
         var fetchError by remember { mutableStateOf<String?>(null) }
 
+        var cachedDetails by remember(storeForDialog.id) {
+            mutableStateOf<com.trimsytrack.data.StoreFetchedDetails?>(null)
+        }
+        LaunchedEffect(storeForDialog.id) {
+            cachedDetails = runCatching { AppGraph.settings.getCachedStoreFetchedDetails(storeForDialog.id) }.getOrNull()
+        }
+
         val dayOrder = remember {
             listOf(
                 DayOfWeek.MONDAY,
@@ -2411,13 +2499,20 @@ fun ManualTripScreen(
 
         AlertDialog(
             onDismissRequest = { hoursDialogStore = null },
-            title = { Text("Set hours") },
+            title = { Text("Opening hours") },
             text = {
                 Column(modifier = Modifier.verticalScroll(scroll)) {
                     Text(
                         storeForDialog.name,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
+                        "Hours are cached locally and not editable to avoid overwriting saved store info.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                     )
                     Spacer(Modifier.height(10.dp))
 
@@ -2430,30 +2525,68 @@ fun ManualTripScreen(
                         Spacer(Modifier.height(10.dp))
                     }
 
-                    dayOrder.forEach { day ->
-                        val key = day.name
-                        val current = hoursDraft[key].orEmpty()
-                        OutlinedTextField(
-                            value = current,
-                            onValueChange = { v ->
-                                hoursDraft = hoursDraft.toMutableMap().apply {
-                                    if (v.isBlank()) remove(key) else put(key, v)
-                                }
-                            },
-                            label = { Text(dayLabelSv(day)) },
-                            placeholder = { Text("09:00-18:00 or Closed") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Spacer(Modifier.height(8.dp))
+                    val localBusinessHours = storeBusinessHours[storeForDialog.id]
+                    val linesFromLocal = remember(localBusinessHours) {
+                        dayOrder.mapNotNull { day ->
+                            val v = localBusinessHours?.byDay?.get(day.name).orEmpty().trim()
+                            if (v.isBlank()) null else "${dayLabelSv(day)}: $v"
+                        }
+                    }
+                    val linesFromGoogle = remember(cachedDetails) {
+                        cachedDetails?.weekdayDescriptions.orEmpty()
+                    }
+
+                    when {
+                        linesFromLocal.isNotEmpty() -> {
+                            linesFromLocal.forEach { line ->
+                                Text(
+                                    line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                )
+                                Spacer(Modifier.height(6.dp))
+                            }
+                        }
+
+                        linesFromGoogle.isNotEmpty() -> {
+                            linesFromGoogle.forEach { line ->
+                                Text(
+                                    line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                )
+                                Spacer(Modifier.height(6.dp))
+                            }
+                        }
+
+                        else -> {
+                            Text(
+                                if (storeForDialog.id.startsWith("gmap_")) {
+                                    "No cached hours yet. You can fetch them once from Google."
+                                } else {
+                                    "No cached hours available for this store."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
                     }
 
                     Row(modifier = Modifier.fillMaxWidth()) {
                         TextButton(
+                            enabled = storeForDialog.id.startsWith("gmap_") && cachedDetails?.weekdayDescriptions.orEmpty().isEmpty(),
                             onClick = {
                                 fetchError = null
                                 scope.launch {
                                     try {
+                                        val prior = AppGraph.settings.getCachedStoreFetchedDetails(storeForDialog.id)
+                                        if (!prior?.weekdayDescriptions.isNullOrEmpty()) {
+                                            fetchError = "Already cached."
+                                            cachedDetails = prior
+                                            return@launch
+                                        }
+
                                         val apiKey = MapsKeyProvider.getKey(AppGraph.appContext)
 
                                         val raw = placesApi.getPlaceDetailsRaw(
@@ -2480,34 +2613,20 @@ fun ManualTripScreen(
                                             return@launch
                                         }
 
-                                        runCatching {
-                                            val prior = AppGraph.settings.getCachedStoreFetchedDetails(storeForDialog.id)
-                                            AppGraph.settings.upsertStoreFetchedDetails(
-                                                storeForDialog.id,
-                                                com.trimsytrack.data.StoreFetchedDetails(
-                                                    formattedAddress = prior?.formattedAddress,
-                                                    weekdayDescriptions = desc,
-                                                    fetchedAtMillis = System.currentTimeMillis(),
-                                                ),
-                                            )
-                                        }
+                                        AppGraph.settings.upsertStoreFetchedDetails(
+                                            storeForDialog.id,
+                                            com.trimsytrack.data.StoreFetchedDetails(
+                                                formattedAddress = prior?.formattedAddress,
+                                                weekdayDescriptions = desc,
+                                                fetchedAtMillis = System.currentTimeMillis(),
+                                            ),
+                                        )
 
-                                        val mapped: Map<String, String> = desc.mapNotNull { line: String ->
-                                            val parts = line.split(":", limit = 2)
-                                            if (parts.size < 2) return@mapNotNull null
-                                            val dayKey = weekdayKeyFromLabel(parts[0].trim()) ?: return@mapNotNull null
-                                            dayKey to parts[1].trim()
-                                        }.toMap()
-
-                                        if (mapped.isEmpty()) {
-                                            fetchError = "Could not parse Google hours."
-                                        } else {
-                                            hoursDraft = hoursDraft.toMutableMap().apply {
-                                                mapped.forEach { (k, v) ->
-                                                    if (v.isBlank()) remove(k) else put(k, v)
-                                                }
-                                            }
-                                        }
+                                        cachedDetails = com.trimsytrack.data.StoreFetchedDetails(
+                                            formattedAddress = prior?.formattedAddress,
+                                            weekdayDescriptions = desc,
+                                            fetchedAtMillis = System.currentTimeMillis(),
+                                        )
                                     } catch (e: Exception) {
                                         fetchError = "Fetch failed: ${e.message ?: e.javaClass.simpleName}"
                                     }
@@ -2535,32 +2654,10 @@ fun ManualTripScreen(
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        scope.launch {
-                            AppGraph.settings.setStoreBusinessHours(
-                                storeForDialog.id,
-                                BusinessHours(byDay = hoursDraft.filterValues { it.isNotBlank() }),
-                            )
-                            hoursDialogStore = null
-                        }
-                    },
-                ) { Text("Save") }
+                TextButton(onClick = { hoursDialogStore = null }) { Text("Close") }
             },
             dismissButton = {
-                Row {
-                    TextButton(
-                        onClick = {
-                            scope.launch {
-                                AppGraph.settings.clearStoreBusinessHours(storeForDialog.id)
-                                hoursDraft = emptyMap()
-                                hoursDialogStore = null
-                            }
-                        },
-                    ) { Text("Clear") }
-
-                    TextButton(onClick = { hoursDialogStore = null }) { Text("Cancel") }
-                }
+                Unit
             },
         )
     }
@@ -2736,7 +2833,10 @@ private fun cleanPostOmbudNameForCity(name: String, city: String): String {
 }
 
 @SuppressLint("MissingPermission")
-private suspend fun createManualTripToStore(store: StoreEntity): Long {
+private suspend fun createManualTripToStore(
+    store: StoreEntity,
+    businessPurpose: String = com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+): Long {
     val day = LocalDate.now()
     val homeLat = AppGraph.settings.businessHomeLat.first()
     val homeLng = AppGraph.settings.businessHomeLng.first()
@@ -2780,7 +2880,7 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
         }
     }
 
-    val route = runCatching {
+    val routeResult = runCatching {
         AppGraph.distanceRepository.getOrComputeDrivingRoute(
             startLat = derivedStart.lat,
             startLng = derivedStart.lng,
@@ -2789,7 +2889,9 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             startLocationId = derivedStart.locationId,
             endLocationId = store.id,
         )
-    }.getOrElse {
+    }
+
+    val route = routeResult.getOrElse {
         AppGraph.distanceRepository.estimateStraightLineRoute(
             startLat = derivedStart.lat,
             startLng = derivedStart.lng,
@@ -2798,8 +2900,17 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
         )
     }
 
+    val distanceMethod = if (routeResult.isSuccess) {
+        com.trimsytrack.data.entities.DistanceMethod.MAPS
+    } else {
+        com.trimsytrack.data.entities.DistanceMethod.GPS_STRAIGHT_LINE
+    }
+
     val now = Instant.now()
     val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+    val tz = java.time.ZoneId.systemDefault().id
+    val endedAt = now
+    val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
 
     val normalizedStoreNameSnapshot = if (PlaceNameNormalizer.isPostOmbudName(store.name)) {
         PlaceNameNormalizer.formatPostOmbudDisplayName(name = store.name, city = store.city)
@@ -2811,6 +2922,9 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             profileId = profileId,
             createdAt = now,
             day = LocalDate.now(),
+            startedAt = startedAt,
+            endedAt = endedAt,
+            timeZoneId = tz,
             storeId = store.id,
             storeNameSnapshot = normalizedStoreNameSnapshot,
             citySnapshot = store.city,
@@ -2820,8 +2934,12 @@ private suspend fun createManualTripToStore(store: StoreEntity): Long {
             startLat = derivedStart.lat,
             startLng = derivedStart.lng,
             distanceMeters = route.distanceMeters,
+            distanceMethod = distanceMethod,
             durationMinutes = route.durationMinutes,
             notes = "",
+            businessPurpose = businessPurpose,
+            supplierOrArea = null,
+            isBusiness = true,
             runId = null,
             currencyCode = null,
             mileageRateMicros = null,

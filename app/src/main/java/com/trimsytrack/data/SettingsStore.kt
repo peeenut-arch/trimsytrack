@@ -150,13 +150,28 @@ class SettingsStore(private val context: Context) {
     companion object {
         const val RECEIPT_ID_PREFIX = "djtest"
 
-        fun formatReceiptId(sequence: Long): String {
+        /** Default per-trip business purpose (prefilled, editable). */
+        const val DEFAULT_BUSINESS_PURPOSE: String = "Inköp till försäljning"
+
+        /** Common business purpose preset for post/shipping runs. */
+        const val SHIPPING_BUSINESS_PURPOSE: String = "Frakt till postombud"
+
+        fun formatReceiptCode(sequence: Long): String {
             val safeSeq = if (sequence < 0) 0 else sequence
             return "$RECEIPT_ID_PREFIX-${safeSeq.toString().padStart(6, '0')}"
         }
 
-        // Preferred naming (matches the system ID convention doc).
-        fun formatDreciptID(sequence: Long): String = formatReceiptId(sequence)
+        @Deprecated(
+            message = "Use formatReceiptCode (this is a human-friendly receipt code, not a DB id).",
+            replaceWith = ReplaceWith("formatReceiptCode(sequence)"),
+        )
+        fun formatReceiptId(sequence: Long): String = formatReceiptCode(sequence)
+
+        @Deprecated(
+            message = "Legacy misspelling. Use formatReceiptCode.",
+            replaceWith = ReplaceWith("formatReceiptCode(sequence)"),
+        )
+        fun formatDreciptID(sequence: Long): String = formatReceiptCode(sequence)
     }
 
     private object Keys {
@@ -164,6 +179,9 @@ class SettingsStore(private val context: Context) {
         val profileId = stringPreferencesKey("profileId")
         val profileName = stringPreferencesKey("profileName")
         val onboardingCompleted = booleanPreferencesKey("onboardingCompleted")
+
+        // Stable per-install identifier (UUID). Used for provenance; not a hardware id.
+        val installId = stringPreferencesKey("installId")
 
         // Onboarding preset ("subprofile")
         val subProfileId = stringPreferencesKey("subProfileId")
@@ -266,6 +284,19 @@ class SettingsStore(private val context: Context) {
         // Backend sync
         val backendBaseUrl = stringPreferencesKey("backendBaseUrl")
         val backendDriverId = stringPreferencesKey("backendDriverId")
+        
+        // BACKENDTRIMSY startup handshake
+        // - protocolVersion must be included on all subsequent backend request bodies.
+        val backendProtocolVersion = intPreferencesKey("backendProtocolVersion")
+        val backendIdentityEmail = stringPreferencesKey("backendIdentityEmail")
+        
+        // Cached universal profile (backend authoritative).
+        val backendProfileJson = stringPreferencesKey("backendProfileJson")
+        val backendProfileMediaJson = stringPreferencesKey("backendProfileMediaJson")
+        
+        // Document rendering defaults (branding)
+        val useLogosInDocuments = booleanPreferencesKey("useLogosInDocuments")
+        val documentLogoOptOutJson = stringPreferencesKey("documentLogoOptOutJson")
 
         // Backend sync scheduling (device behavior)
         val backendSyncMode = stringPreferencesKey("backendSyncMode")
@@ -290,6 +321,20 @@ class SettingsStore(private val context: Context) {
     val profileId: Flow<String> = context.dataStore.data.map { it[Keys.profileId].orEmpty() }
     val profileName: Flow<String> = context.dataStore.data.map { it[Keys.profileName].orEmpty() }
     val onboardingCompleted: Flow<Boolean> = context.dataStore.data.map { it[Keys.onboardingCompleted] ?: false }
+
+    /**
+     * Stable per-install UUID. Used for provenance fields like `linkedByDeviceId`.
+     * Generated lazily and persisted in DataStore.
+     */
+    val installId: Flow<String> = context.dataStore.data
+        .map { it[Keys.installId].orEmpty() }
+        .onStart {
+            val existing = runCatching { context.dataStore.data.first()[Keys.installId].orEmpty() }.getOrDefault("")
+            if (existing.isBlank()) {
+                context.dataStore.edit { it[Keys.installId] = UUID.randomUUID().toString() }
+            }
+        }
+        .distinctUntilChanged()
 
     val receiptReminderMinutes: Flow<Int> = context.dataStore.data
         .map { it[Keys.receiptReminderMinutes] ?: (17 * 60) }
@@ -743,11 +788,42 @@ class SettingsStore(private val context: Context) {
     }
 
     val backendBaseUrl: Flow<String> = context.dataStore.data.map {
-        it[Keys.backendBaseUrl] ?: "http://79.76.38.94/"
+        it[Keys.backendBaseUrl].orEmpty()
     }
 
     val backendDriverId: Flow<String> = context.dataStore.data.map {
         it[Keys.backendDriverId].orEmpty()
+    }
+    
+    /** BACKENDTRIMSY protocol version from handshakeGet (null until handshake succeeds). */
+    val backendProtocolVersion: Flow<Int?> = context.dataStore.data.map {
+        it[Keys.backendProtocolVersion]?.takeIf { v -> v > 0 }
+    }
+    
+    /** Normalized email returned by handshakeGet (best-effort cache). */
+    val backendIdentityEmail: Flow<String> = context.dataStore.data.map {
+        it[Keys.backendIdentityEmail].orEmpty()
+    }
+    
+    /** Cached profile JSON (backend authoritative). */
+    val backendProfileJson: Flow<String> = context.dataStore.data.map {
+        it[Keys.backendProfileJson].orEmpty()
+    }
+    
+    /** Cached profile media JSON (backend authoritative). */
+    val backendProfileMediaJson: Flow<String> = context.dataStore.data.map {
+        it[Keys.backendProfileMediaJson].orEmpty()
+    }
+    
+    /** Document rendering: use logos by default (never blocks if logos are missing). */
+    val useLogosInDocuments: Flow<Boolean> = context.dataStore.data.map {
+        it[Keys.useLogosInDocuments] ?: true
+    }
+    
+    /** Document rendering: per-document opt-out list (stored as JSON string list). */
+    val documentLogoOptOut: Flow<List<String>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.documentLogoOptOutJson].orEmpty()
+        if (raw.isBlank()) emptyList() else runCatching { json.decodeFromString<List<String>>(raw) }.getOrDefault(emptyList())
     }
 
     /**
@@ -779,6 +855,71 @@ class SettingsStore(private val context: Context) {
 
             prefs[Keys.profilesJson] = json.encodeToString(migrated)
         }
+    }
+
+    /**
+     * Enforces "one profile per signed-in account".
+     *
+     * We treat the Firebase UID as the canonical profileId. If the device previously used a different
+     * active profileId, we rename the active profile in settings to the UID and prune the profile list
+     * to exactly one entry.
+     *
+     * Returns the previous active profileId if callers should re-key Room tables.
+     */
+    suspend fun enforceSingleProfileForAccount(
+        accountUid: String,
+        displayNameHint: String? = null,
+        photoUriHint: String? = null,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): String? {
+        val desiredId = accountUid.trim()
+        if (desiredId.isBlank()) return null
+
+        var previousId: String? = null
+        context.dataStore.edit { prefs ->
+            val oldId = prefs[Keys.profileId].orEmpty().trim()
+            val oldName = prefs[Keys.profileName].orEmpty().trim()
+            val oldOnboarding = prefs[Keys.onboardingCompleted] ?: false
+
+            if (oldId.isNotBlank() && oldId != desiredId) {
+                previousId = oldId
+            }
+
+            val profilesList = decodeProfiles(prefs[Keys.profilesJson].orEmpty())
+            val oldMeta = profilesList.firstOrNull { it.id == oldId }
+
+            val desiredName = displayNameHint?.trim().takeIf { !it.isNullOrBlank() }
+                ?: oldMeta?.name?.trim().takeIf { !it.isNullOrBlank() }
+                ?: oldName.ifBlank { desiredId }
+
+            val desiredPhoto = photoUriHint?.trim().takeIf { !it.isNullOrBlank() }
+                ?: oldMeta?.photoUri
+
+            val desiredMeta = ProfileMeta(
+                id = desiredId,
+                name = desiredName,
+                photoUri = desiredPhoto,
+                createdAtMillis = oldMeta?.createdAtMillis ?: nowMillis,
+                onboardingCompleted = oldMeta?.onboardingCompleted ?: oldOnboarding,
+            )
+
+            // Update active keys to the canonical id (keep all other live settings as-is).
+            prefs[Keys.profileId] = desiredId
+            prefs[Keys.profileName] = desiredMeta.name
+            prefs[Keys.onboardingCompleted] = desiredMeta.onboardingCompleted
+
+            // Prune multi-profile metadata.
+            prefs[Keys.profilesJson] = json.encodeToString(listOf(desiredMeta))
+
+            // Prune snapshots to exactly the current state under the canonical id.
+            val currentSnapshot = buildSnapshotFromPrefs(prefs).copy(
+                profileId = desiredId,
+                profileName = desiredMeta.name,
+                onboardingCompleted = desiredMeta.onboardingCompleted,
+            )
+            prefs[Keys.profileSnapshotsJson] = json.encodeToString(mapOf(desiredId to currentSnapshot))
+        }
+        return previousId
     }
 
     suspend fun createProfile(
@@ -1002,6 +1143,32 @@ class SettingsStore(private val context: Context) {
         val v = value.trim()
         context.dataStore.edit { it[Keys.backendDriverId] = v }
     }
+    
+    suspend fun setBackendProtocolVersion(value: Int) {
+        context.dataStore.edit { it[Keys.backendProtocolVersion] = value.coerceAtLeast(0) }
+    }
+    
+    suspend fun setBackendIdentityEmail(value: String) {
+        val v = value.trim()
+        context.dataStore.edit { it[Keys.backendIdentityEmail] = v }
+    }
+    
+    suspend fun setBackendProfileJson(value: String) {
+        context.dataStore.edit { it[Keys.backendProfileJson] = value }
+    }
+    
+    suspend fun setBackendProfileMediaJson(value: String) {
+        context.dataStore.edit { it[Keys.backendProfileMediaJson] = value }
+    }
+    
+    suspend fun setUseLogosInDocuments(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.useLogosInDocuments] = enabled }
+    }
+    
+    suspend fun setDocumentLogoOptOut(documentIds: List<String>) {
+        val cleaned = documentIds.map { it.trim() }.filter { it.isNotBlank() }.distinct().sorted()
+        context.dataStore.edit { it[Keys.documentLogoOptOutJson] = json.encodeToString(cleaned) }
+    }
 
     suspend fun setBackendSyncMode(value: BackendSyncMode) {
         // Locked to INSTANT: ignore requests to set other modes.
@@ -1074,9 +1241,9 @@ class SettingsStore(private val context: Context) {
             prefs[Keys.odometerYearStartKm] = s.odometerYearStartKm
             prefs[Keys.odometerYearEndKm] = s.odometerYearEndKm
 
-            prefs[Keys.storeImagesJson] = json.encodeToString(s.storeImages)
-            prefs[Keys.storeBusinessHoursJson] = json.encodeToString(s.storeBusinessHours)
-            prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(s.storeFetchedDetails)
+            // Local-only cache/customizations: intentionally NOT imported from backend snapshots.
+            // This preserves locally cached Places details and store UI customizations even after
+            // a backend wipe / restore.
             prefs[Keys.homeTileIconImagesJson] = json.encodeToString(s.homeTileIconImages)
             prefs[Keys.preferredCategoriesJson] = json.encodeToString(s.preferredCategories)
             prefs[Keys.storeSyncRadiusKm] = s.storeSyncRadiusKm
@@ -1429,21 +1596,16 @@ class SettingsStore(private val context: Context) {
                 json.decodeFromString<Map<String, BusinessHours>>(current)
             }.getOrDefault(emptyMap())
 
+            if (map.containsKey(storeId)) return@edit
+
             val updated = map.toMutableMap().apply { put(storeId, hours) }
             prefs[Keys.storeBusinessHoursJson] = json.encodeToString(updated)
         }
     }
 
     suspend fun clearStoreBusinessHours(storeId: String) {
-        context.dataStore.edit { prefs ->
-            val current = prefs[Keys.storeBusinessHoursJson].orEmpty()
-            val map = if (current.isBlank()) emptyMap() else runCatching {
-                json.decodeFromString<Map<String, BusinessHours>>(current)
-            }.getOrDefault(emptyMap())
-
-            val updated = map.toMutableMap().apply { remove(storeId) }
-            prefs[Keys.storeBusinessHoursJson] = json.encodeToString(updated)
-        }
+        // Intentionally disabled: once saved, we don't allow clearing/overwriting store hours.
+        return
     }
 
     suspend fun getCachedStoreFetchedDetails(storeId: String): StoreFetchedDetails? {
@@ -1462,6 +1624,8 @@ class SettingsStore(private val context: Context) {
                 json.decodeFromString<Map<String, StoreFetchedDetails>>(current)
             }.getOrDefault(emptyMap())
 
+            if (map.containsKey(key)) return@edit
+
             val updated = map.toMutableMap().apply { put(key, details) }
             prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(updated)
         }
@@ -1471,15 +1635,8 @@ class SettingsStore(private val context: Context) {
         val key = storeId.trim()
         if (key.isBlank()) return
 
-        context.dataStore.edit { prefs ->
-            val current = prefs[Keys.storeFetchedDetailsJson].orEmpty()
-            val map = if (current.isBlank()) emptyMap() else runCatching {
-                json.decodeFromString<Map<String, StoreFetchedDetails>>(current)
-            }.getOrDefault(emptyMap())
-
-            val updated = map.toMutableMap().apply { remove(key) }
-            prefs[Keys.storeFetchedDetailsJson] = json.encodeToString(updated)
-        }
+        // Intentionally disabled: once saved, we don't allow clearing/overwriting fetched details.
+        return
     }
 
     suspend fun setHomeTileIconImageUri(tileId: String, uri: String) {

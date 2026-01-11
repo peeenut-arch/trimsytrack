@@ -3,6 +3,8 @@ package com.trimsytrack.data
 import androidx.room.TypeConverter
 import com.trimsytrack.data.entities.PromptStatus
 import com.trimsytrack.data.entities.SyncStatus
+import com.trimsytrack.data.entities.DistanceMethod
+import com.trimsytrack.data.entities.PlaceType
 import java.time.Instant
 import java.time.LocalDate
 
@@ -30,4 +32,16 @@ class RoomConverters {
 
     @TypeConverter
     fun stringToSyncStatus(value: String?): SyncStatus? = value?.let { SyncStatus.valueOf(it) }
+
+    @TypeConverter
+    fun distanceMethodToString(value: DistanceMethod?): String? = value?.name
+
+    @TypeConverter
+    fun stringToDistanceMethod(value: String?): DistanceMethod? = value?.let { runCatching { DistanceMethod.valueOf(it) }.getOrNull() }
+
+    @TypeConverter
+    fun placeTypeToString(value: PlaceType?): String? = value?.name
+
+    @TypeConverter
+    fun stringToPlaceType(value: String?): PlaceType? = value?.let { runCatching { PlaceType.valueOf(it) }.getOrNull() }
 }

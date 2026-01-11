@@ -44,4 +44,10 @@ interface DistanceCacheDao {
 
     @Query("UPDATE distance_cache SET profileId = :profileId WHERE profileId = ''")
     suspend fun claimUnscoped(profileId: String)
+
+    @Query("DELETE FROM distance_cache WHERE profileId = :profileId")
+    suspend fun deleteAllForProfile(profileId: String)
+
+    @Query("UPDATE distance_cache SET profileId = :newProfileId WHERE profileId = :oldProfileId")
+    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
 }

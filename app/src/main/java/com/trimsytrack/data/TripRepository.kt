@@ -3,8 +3,10 @@ package com.trimsytrack.data
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Geocoder
+import android.net.Uri
 import android.os.Build
 import android.util.Log
+import androidx.core.content.FileProvider
 import com.trimsytrack.distance.MapsKeyProvider
 import com.trimsytrack.data.dao.AttachmentDao
 import com.trimsytrack.data.dao.RunDao
@@ -38,6 +40,9 @@ import java.time.LocalDate
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.Locale
+import java.io.File
+import com.trimsytrack.util.EvidenceNaming
+import com.trimsytrack.util.PlaceNameNormalizer
 
 class TripRepository(
     private val tripDao: TripDao,
@@ -139,10 +144,18 @@ class TripRepository(
 
     suspend fun createTrip(entity: TripEntity): Long {
         // Insert immediately; don't block trip creation on reverse-geocoding.
+        val trimmedStoreId = entity.storeId.trim()
+        val isPostOmbud = PlaceNameNormalizer.isPostOmbudName(entity.storeNameSnapshot)
+        val derivedStoreLocationId = if (trimmedStoreId.isNotBlank()) "storelocation:$trimmedStoreId" else null
+        val derivedPostOmbudId =
+            if (isPostOmbud && trimmedStoreId.isNotBlank()) "postombud:$trimmedStoreId" else null
+
         val ensured = entity.copy(
             profileId = entity.profileId.ifBlank { "default" },
             clientRef = entity.clientRef ?: UUID.randomUUID().toString(),
             syncStatus = if (entity.syncStatus == SyncStatus.LOCAL_ONLY) SyncStatus.PENDING else entity.syncStatus,
+            storeLocationId = entity.storeLocationId ?: derivedStoreLocationId,
+            postOmbudId = entity.postOmbudId ?: derivedPostOmbudId,
         )
 
         // Guard: prevent accidental rapid double-taps creating multiple trips for the same store.
@@ -176,8 +189,8 @@ class TripRepository(
     /**
      * Repairs city snapshots for recent trips by recomputing the city from coordinates.
      *
-     * This is intentionally more aggressive than [backfillMissingCitySnapshots] and will
-     * overwrite existing snapshots when the geocoder yields a different (non-blank) city.
+     * This is intentionally more aggressive than [backfillMissingCitySnapshots] in terms of
+     * attempting lookups, but it must not overwrite an already-valid snapshot.
      */
     suspend fun repairRecentCitySnapshots(limit: Int = 250) {
         val profileId = settings.profileId.first().ifBlank { "default" }
@@ -198,16 +211,17 @@ class TripRepository(
                 if (city.isBlank()) continue
 
                 val current = normalizeCityCandidate(trip.citySnapshot)
+                val currentLooksInvalid = current.isBlank() ||
+                    looksLikeCounty(current) ||
+                    looksLikeStreet(current) ||
+                    looksLikeLandmarkNotCity(current)
+
+                if (!currentLooksInvalid) continue
+
                 val next = normalizeCityCandidate(city)
                 if (next.isBlank()) continue
 
-                // Case/whitespace-insensitive compare.
-                val currentKey = current.trim().replace(Regex("\\s+"), " ").lowercase(Locale.getDefault())
-                val nextKey = next.trim().replace(Regex("\\s+"), " ").lowercase(Locale.getDefault())
-
-                if (currentKey != nextKey) {
-                    tripDao.update(trip.copy(citySnapshot = next))
-                }
+                tripDao.update(trip.copy(citySnapshot = next))
             }
         }
     }
@@ -249,6 +263,13 @@ class TripRepository(
             if (city.isBlank()) return@launch
 
             val current = normalizeCityCandidate(entity.citySnapshot)
+            val currentLooksInvalid = current.isBlank() ||
+                looksLikeCounty(current) ||
+                looksLikeStreet(current) ||
+                looksLikeLandmarkNotCity(current)
+
+            if (!currentLooksInvalid) return@launch
+
             val next = normalizeCityCandidate(city)
             if (next.isBlank()) return@launch
 
@@ -431,7 +452,95 @@ class TripRepository(
             .flatMapLatest { pid -> attachmentDao.observeAll(pid) }
     }
 
-    suspend fun addAttachment(entity: AttachmentEntity): Long = attachmentDao.insert(entity)
+    suspend fun addAttachment(entity: AttachmentEntity): Long {
+        val deviceId = runCatching { settings.installId.first() }.getOrNull()
+        val now = Instant.now()
+        val ensured = entity.copy(
+            clientRef = entity.clientRef ?: UUID.randomUUID().toString(),
+            linkedAt = entity.linkedAt ?: now,
+            linkedByDeviceId = entity.linkedByDeviceId ?: deviceId,
+        )
+
+        val profileId = ensured.profileId.ifBlank { settings.profileId.first().ifBlank { "default" } }
+        val insertedId = attachmentDao.insert(ensured.copy(profileId = profileId))
+
+        val newUri = runCatching {
+            ensureCanonicalEvidenceFileName(
+                profileId = profileId,
+                tripId = ensured.tripId,
+                evidenceId = insertedId,
+                capturedAt = ensured.capturedAt,
+                mimeType = ensured.mimeType,
+                displayName = ensured.displayName,
+                uriString = ensured.uri,
+            )
+        }.getOrNull()
+
+        if (newUri != null && newUri != ensured.uri) {
+            runCatching { attachmentDao.updateUri(profileId = profileId, id = insertedId, uri = newUri) }
+        }
+
+        return insertedId
+    }
+
+    private fun ensureCanonicalEvidenceFileName(
+        profileId: String,
+        tripId: Long,
+        evidenceId: Long,
+        capturedAt: Instant,
+        mimeType: String,
+        displayName: String,
+        uriString: String,
+    ): String {
+        val rel = extractRelativeEvidencePathFromFileProviderUri(uriString) ?: return uriString
+        val evidenceRoot = File(appContext.filesDir, "evidence")
+        val currentFile = File(evidenceRoot, rel)
+        if (!currentFile.exists()) return uriString
+
+        val canonicalName = EvidenceNaming.canonicalFileName(
+            tripId = tripId,
+            evidenceId = evidenceId,
+            capturedAt = capturedAt,
+            mimeType = mimeType,
+            originalDisplayName = displayName,
+        )
+
+        val tripDir = File(evidenceRoot, tripId.toString()).apply { mkdirs() }
+        val targetFile = File(tripDir, canonicalName)
+        if (targetFile.absolutePath == currentFile.absolutePath) return uriString
+
+        if (!targetFile.exists()) {
+            val renamed = runCatching { currentFile.renameTo(targetFile) }.getOrDefault(false)
+            if (!renamed) {
+                currentFile.inputStream().use { input ->
+                    targetFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                runCatching { currentFile.delete() }
+            }
+        }
+
+        val contentUri = FileProvider.getUriForFile(
+            appContext,
+            "${appContext.packageName}.fileprovider",
+            targetFile,
+        )
+        return contentUri.toString()
+    }
+
+    private fun extractRelativeEvidencePathFromFileProviderUri(uriString: String): String? {
+        // Expected: content://<pkg>.fileprovider/files/evidence/<tripId>/<file>
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return null
+        val segments = uri.pathSegments ?: return null
+        if (segments.size < 4) return null
+        if (segments[0] != "files") return null
+        if (segments[1] != "evidence") return null
+        val tripId = segments[2]
+        val fileName = segments.drop(3).joinToString("/")
+        if (tripId.isBlank() || fileName.isBlank()) return null
+        return "$tripId/$fileName"
+    }
 
     suspend fun deleteAttachment(id: Long) {
         val profileId = settings.profileId.first().ifBlank { "default" }
