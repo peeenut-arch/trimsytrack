@@ -33,11 +33,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -50,7 +48,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.LocationOn
-import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -62,18 +59,13 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.ActiveHoursPreset
-import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.DwellPreset
-import com.trimsytrack.data.IndustryProfile
-import com.trimsytrack.data.ProfileCategoryGroup
-import com.trimsytrack.data.ProfileDefaults
+import com.trimsytrack.data.PresetDefaults
 import com.trimsytrack.data.RadiusPreset
 import com.trimsytrack.data.RegionPayload
-import com.trimsytrack.data.StorePayload
 import com.trimsytrack.ui.components.LargeActionTile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -100,14 +92,11 @@ fun OnboardingScreen(
 
     var step by rememberSaveable { mutableStateOf(OnboardingStep.Profile) }
 
-    var selectedProfileId by rememberSaveable { mutableStateOf(IndustryProfile.ELECTRICIAN.id) }
-    var selectedRadiusId by rememberSaveable { mutableStateOf(ProfileDefaults.radiusPresets[1].id) }
+    var selectedRadiusId by rememberSaveable { mutableStateOf(PresetDefaults.radiusPresets[1].id) }
     var selectedDwellMinutes by rememberSaveable { mutableStateOf(5) }
-    var selectedActiveHoursId by rememberSaveable { mutableStateOf(ProfileDefaults.activeHoursPresets[0].id) }
+    var selectedActiveHoursId by rememberSaveable { mutableStateOf(PresetDefaults.activeHoursPresets[0].id) }
 
     var vehicleRegNumber by rememberSaveable { mutableStateOf("") }
-
-    var selectedPlaceCategories by rememberSaveable { mutableStateOf(ProfileDefaults.profileById(selectedProfileId)?.defaultCategories ?: IndustryProfile.ELECTRICIAN.defaultCategories) }
 
     var gpsGranted by rememberSaveable { mutableStateOf(false) }
     var homeLat by rememberSaveable { mutableStateOf<Double?>(null) }
@@ -146,11 +135,6 @@ fun OnboardingScreen(
                 step = OnboardingStep.HomeAddress
             }
         }
-    }
-
-    LaunchedEffect(selectedProfileId) {
-        val profile = ProfileDefaults.profileById(selectedProfileId) ?: IndustryProfile.ELECTRICIAN
-        selectedPlaceCategories = profile.defaultCategories
     }
 
     LaunchedEffect(step, gpsGranted) {
@@ -212,12 +196,10 @@ fun OnboardingScreen(
         ) {
             when (step) {
                 OnboardingStep.Profile -> {
-                    var expandProfile by rememberSaveable { mutableStateOf(true) }
                     var expandRadius by rememberSaveable { mutableStateOf(false) }
                     var expandTrigger by rememberSaveable { mutableStateOf(false) }
                     var expandActive by rememberSaveable { mutableStateOf(false) }
                     var expandVehicle by rememberSaveable { mutableStateOf(false) }
-                    var expandPlaces by rememberSaveable { mutableStateOf(false) }
 
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
@@ -226,29 +208,10 @@ fun OnboardingScreen(
                         item {
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                "Välj subprofil och standardinställningar. Nästa steg är att godkänna GPS.",
+                                "Välj standardinställningar. Nästa steg är att godkänna GPS.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.78f),
                             )
-                        }
-
-                        item {
-                            CollapsibleHeader(
-                                title = "Subprofil",
-                                expanded = expandProfile,
-                                onToggle = { expandProfile = !expandProfile },
-                            )
-                        }
-
-                        if (expandProfile) {
-                            items(IndustryProfile.entries, key = { it.id }) { profile ->
-                                SelectRow(
-                                    title = profile.displayName,
-                                    supporting = "${profile.defaultCategories.size} förvalda platser",
-                                    selected = selectedProfileId == profile.id,
-                                    onSelect = { selectedProfileId = profile.id },
-                                )
-                            }
                         }
 
                         item {
@@ -273,38 +236,6 @@ fun OnboardingScreen(
 
                         item {
                             CollapsibleHeader(
-                                title = "Platser (första synk)",
-                                expanded = expandPlaces,
-                                onToggle = { expandPlaces = !expandPlaces },
-                            )
-                        }
-
-                        if (expandPlaces) {
-                            val profile = ProfileDefaults.profileById(selectedProfileId) ?: IndustryProfile.ELECTRICIAN
-                            val groups: List<ProfileCategoryGroup> = ProfileDefaults.categoryGroupsFor(profile)
-                            groups.forEach { group ->
-                                item(key = "cat_group_${group.title}") {
-                                    SectionTitle(group.title)
-                                }
-                                items(group.categories, key = { "cat_${group.title}_$it" }) { cat ->
-                                    val checked = selectedPlaceCategories.contains(cat)
-                                    MultiSelectRow(
-                                        title = cat,
-                                        checked = checked,
-                                        onToggle = {
-                                            selectedPlaceCategories = if (checked) {
-                                                selectedPlaceCategories.filterNot { it == cat }
-                                            } else {
-                                                (selectedPlaceCategories + cat).distinct()
-                                            }
-                                        },
-                                    )
-                                }
-                            }
-                        }
-
-                        item {
-                            CollapsibleHeader(
                                 title = "Arbetsradie",
                                 expanded = expandRadius,
                                 onToggle = { expandRadius = !expandRadius },
@@ -312,7 +243,7 @@ fun OnboardingScreen(
                         }
 
                         if (expandRadius) {
-                            items(ProfileDefaults.radiusPresets, key = { it.id }) { preset: RadiusPreset ->
+                            items(PresetDefaults.radiusPresets, key = { it.id }) { preset: RadiusPreset ->
                                 SelectRow(
                                     title = preset.label,
                                     supporting = "${preset.radiusKm} km",
@@ -331,7 +262,7 @@ fun OnboardingScreen(
                         }
 
                         if (expandTrigger) {
-                            items(ProfileDefaults.dwellPresets, key = { it.minutes }) { preset: DwellPreset ->
+                            items(PresetDefaults.dwellPresets, key = { it.minutes }) { preset: DwellPreset ->
                                 SelectRow(
                                     title = "Stillastående",
                                     supporting = "Fråga efter ${preset.label}",
@@ -350,7 +281,7 @@ fun OnboardingScreen(
                         }
 
                         if (expandActive) {
-                            items(ProfileDefaults.activeHoursPresets, key = { it.id }) { preset: ActiveHoursPreset ->
+                            items(PresetDefaults.activeHoursPresets, key = { it.id }) { preset: ActiveHoursPreset ->
                                 SelectRow(
                                     title = preset.label,
                                     supporting = "Automation är alltid bekräftelsebaserad",
@@ -367,45 +298,44 @@ fun OnboardingScreen(
                                 baseColor = MaterialTheme.colorScheme.primary,
                                 icon = Icons.Rounded.LocationOn,
                                 onClick = {
-                                    val profile = ProfileDefaults.profileById(selectedProfileId) ?: IndustryProfile.ELECTRICIAN
-                                    val radiusPreset = ProfileDefaults.radiusPresets.firstOrNull { it.id == selectedRadiusId }
-                                        ?: ProfileDefaults.radiusPresets[1]
-                                    val activePreset = ProfileDefaults.activeHoursPresets.firstOrNull { it.id == selectedActiveHoursId }
-                                        ?: ProfileDefaults.activeHoursPresets[0]
-
-                                    val chosenCategories = selectedPlaceCategories.filter { it.isNotBlank() }.distinct()
-                                    if (chosenCategories.isEmpty()) {
-                                        // Keep it simple: user must select at least one category for first sync.
-                                        expandPlaces = true
-                                        return@LargeActionTile
-                                    }
+                                    val radiusPreset = PresetDefaults.radiusPresets.firstOrNull { it.id == selectedRadiusId }
+                                        ?: PresetDefaults.radiusPresets[1]
+                                    val activePreset = PresetDefaults.activeHoursPresets.firstOrNull { it.id == selectedActiveHoursId }
+                                        ?: PresetDefaults.activeHoursPresets[0]
 
                                     scope.launch {
-                                        // Apply preset + defaults to the active profile before GPS step
-                                        // (so the flow survives process death).
-                                        val activeId = AppGraph.settings.profileId.first().trim()
-                                        if (activeId.isBlank()) {
-                                            val createdId = AppGraph.settings.createProfile(name = profile.displayName)
-                                            AppGraph.settings.activateProfile(createdId)
-                                        }
-
-                                        AppGraph.settings.setSubProfileId(profile.id)
-                                        AppGraph.settings.setPreferredCategories(chosenCategories)
+                                        // Onboarding no longer auto-seeds categories/places.
+                                        AppGraph.settings.setPreferredCategories(emptyList())
+                                        runCatching { AppGraph.trackEventEmitter.emitProfilePreferredCategoriesSet(emptyList(), reason = "onboarding_init") }
                                         if (vehicleRegNumber.isNotBlank()) {
                                             AppGraph.settings.setVehicleRegNumber(vehicleRegNumber.trim())
                                         }
                                         AppGraph.settings.setStoreSyncRadiusKm(radiusPreset.radiusKm)
+                                        runCatching { AppGraph.trackEventEmitter.emitAutosyncStoreRadiusKmSet(radiusPreset.radiusKm, reason = "onboarding_init") }
                                         AppGraph.settings.setDwellMinutes(selectedDwellMinutes)
+                                        runCatching { AppGraph.trackEventEmitter.emitProfileDwellMinutesSet(selectedDwellMinutes, reason = "onboarding_init") }
                                         AppGraph.settings.setActiveHours(
                                             startMinutes = activePreset.startMinutes,
                                             endMinutes = activePreset.endMinutes,
                                             days = activePreset.enabledDays,
                                         )
+                                        runCatching {
+                                            AppGraph.trackEventEmitter.emitProfileActiveHoursSet(
+                                                startMinutes = activePreset.startMinutes,
+                                                endMinutes = activePreset.endMinutes,
+                                                days = activePreset.enabledDays,
+                                                reason = "onboarding_init",
+                                            )
+                                        }
 
                                         // Rules from spec
                                         AppGraph.settings.setDailyPromptLimit(20)
                                         AppGraph.settings.setSuppressionMinutes(240)
                                         AppGraph.settings.setPerStorePerDay(true)
+
+                                        runCatching { AppGraph.trackEventEmitter.emitProfileDailyPromptLimitSet(20, reason = "onboarding_init") }
+                                        runCatching { AppGraph.trackEventEmitter.emitProfileSuppressionMinutesSet(240, reason = "onboarding_init") }
+                                        runCatching { AppGraph.trackEventEmitter.emitProfilePerStorePerDaySet(true, reason = "onboarding_init") }
 
                                         step = OnboardingStep.GpsPermission
                                     }
@@ -719,177 +649,6 @@ fun OnboardingScreen(
                 }
 
                 OnboardingStep.Sync -> {
-                    val httpClient = remember { OkHttpClient.Builder().build() }
-                    val retrofit = remember {
-                        Retrofit.Builder()
-                            .baseUrl("https://places.googleapis.com/")
-                            .client(httpClient)
-                            .addConverterFactory(ScalarsConverterFactory.create())
-                            .build()
-                    }
-                    val placesApi = remember { retrofit.create(PlacesTextSearchApi::class.java) }
-                    val json = remember { Json { ignoreUnknownKeys = true } }
-
-                    val preferredCategories by AppGraph.settings.preferredCategories.collectAsState(initial = emptyList())
-
-                    // Initial sync scope: always 25km from home (per spec).
-                    val fixedRadiusKm = 25
-                    val radiusMeters = (fixedRadiusKm * 1000).toDouble()
-
-                    fun isForbiddenCategory(category: String): Boolean = category.contains("lager", ignoreCase = true)
-
-                    fun isForbiddenPlaceName(name: String): Boolean = name.contains("lager", ignoreCase = true)
-
-                    val profile = remember(selectedProfileId) {
-                        ProfileDefaults.profileById(selectedProfileId) ?: IndustryProfile.ELECTRICIAN
-                    }
-
-                    val categoriesToSync = remember(profile, preferredCategories) {
-                        val raw = preferredCategories.filter { it.isNotBlank() }.distinct().ifEmpty { profile.defaultCategories }
-                        raw
-                            .filter { it.isNotBlank() }
-                            .filterNot(::isForbiddenCategory)
-                            .distinct()
-                    }
-
-                    val categoryEnabled = remember { mutableStateMapOf<String, Boolean>() }
-                    val categoryExpanded = remember { mutableStateMapOf<String, Boolean>() }
-                    val categoryLoading = remember { mutableStateMapOf<String, Boolean>() }
-                    val categoryError = remember { mutableStateMapOf<String, String?>() }
-                    val categoryResults = remember { mutableStateMapOf<String, List<PlaceResult>>() }
-                    val categorySelected = remember { mutableStateMapOf<String, Set<String>>() }
-
-                    LaunchedEffect(categoriesToSync) {
-                        categoriesToSync.forEach { c ->
-                            if (categoryEnabled[c] == null) categoryEnabled[c] = true
-                            if (categoryExpanded[c] == null) categoryExpanded[c] = false
-                            if (categoryLoading[c] == null) categoryLoading[c] = false
-                            if (categoryError[c] == null) categoryError[c] = null
-                            if (categoryResults[c] == null) categoryResults[c] = emptyList()
-                            if (categorySelected[c] == null) categorySelected[c] = emptySet()
-                        }
-                    }
-
-                    suspend fun fetchCategory(category: String, lat: Double, lng: Double, apiKey: String): List<PlaceResult> {
-                        val body = buildJsonObject {
-                            put("textQuery", category)
-                            put(
-                                "locationBias",
-                                buildJsonObject {
-                                    put(
-                                        "circle",
-                                        buildJsonObject {
-                                            put(
-                                                "center",
-                                                buildJsonObject {
-                                                    put("latitude", lat)
-                                                    put("longitude", lng)
-                                                }
-                                            )
-                                            put("radius", radiusMeters)
-                                        }
-                                    )
-                                }
-                            )
-                        }
-
-                        val raw = withContext(Dispatchers.IO) {
-                            placesApi.searchPlacesRaw(
-                                apiKey = apiKey,
-                                fieldMask = "places.id,places.displayName,places.location",
-                                body = body.toString(),
-                            )
-                        }
-
-                        val root = json.parseToJsonElement(raw).jsonObject
-                        val apiError = root["error"]?.jsonObject
-                        if (apiError != null) {
-                            val apiStatus = apiError["status"]?.jsonPrimitive?.content
-                            val apiMessage = apiError["message"]?.jsonPrimitive?.content
-                            throw IllegalStateException(
-                                buildString {
-                                    append("Places error: ")
-                                    append(apiStatus ?: "ERROR")
-                                    if (!apiMessage.isNullOrBlank()) {
-                                        append("\n")
-                                        append(apiMessage)
-                                    }
-                                }
-                            )
-                        }
-
-                        val places = root["places"]?.jsonArray ?: emptyList()
-                        val results = mutableListOf<PlaceResult>()
-
-                        places.forEach { el ->
-                            val obj = el.jsonObject
-                            val placeId = obj["id"]?.jsonPrimitive?.content ?: return@forEach
-                            val displayNameObj = obj["displayName"]?.jsonObject
-                            val name = displayNameObj?.get("text")?.jsonPrimitive?.content ?: return@forEach
-                            if (isForbiddenPlaceName(name)) return@forEach
-
-                            val locObj = obj["location"]?.jsonObject ?: return@forEach
-                            val pLat = locObj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@forEach
-                            val pLng = locObj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@forEach
-
-                            // Enforce 25km from home (even if API returns edge cases).
-                            val distMeters = haversineMeters(lat, lng, pLat, pLng)
-                            if (distMeters > radiusMeters) return@forEach
-
-                            results.add(PlaceResult(placeId = placeId, name = name, lat = pLat, lng = pLng))
-                        }
-
-                        return results
-                    }
-
-                    var didAutoFetch by remember(categoriesToSync, homeLat, homeLng) { mutableStateOf(false) }
-                    LaunchedEffect(homeLat, homeLng, categoriesToSync) {
-                        val lat = homeLat
-                        val lng = homeLng
-                        if (didAutoFetch) return@LaunchedEffect
-                        if (lat == null || lng == null) return@LaunchedEffect
-                        if (categoriesToSync.isEmpty()) return@LaunchedEffect
-
-                        // Auto-load candidates so the user can deselect before syncing.
-                        didAutoFetch = true
-                        try {
-                            val apiKey = context.packageManager
-                                .getApplicationInfo(context.packageName, android.content.pm.PackageManager.GET_META_DATA)
-                                .metaData
-                                ?.getString("com.google.android.geo.API_KEY")
-                                .orEmpty()
-
-                            if (apiKey.isBlank()) {
-                                throw IllegalStateException("Missing MAPS_API_KEY. Check local.properties and rebuild.")
-                            }
-
-                            for (category in categoriesToSync) {
-                                categoryLoading[category] = true
-                                categoryError[category] = null
-                                try {
-                                    val results = fetchCategory(category, lat, lng, apiKey)
-                                    // Dedupe within category.
-                                    val deduped = results.distinctBy { it.placeId }
-                                    categoryResults[category] = deduped
-                                    categorySelected[category] = deduped.map { it.placeId }.toSet()
-                                } catch (e: CancellationException) {
-                                    throw e
-                                } catch (t: Throwable) {
-                                    categoryResults[category] = emptyList()
-                                    categorySelected[category] = emptySet()
-                                    categoryError[category] = t.message ?: t.javaClass.simpleName
-                                } finally {
-                                    categoryLoading[category] = false
-                                }
-                            }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (t: Throwable) {
-                            Log.e("TrimsyTrack", "Onboarding prefetch failed", t)
-                            syncStatus = t.message ?: t.javaClass.simpleName
-                        }
-                    }
-
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -897,7 +656,7 @@ fun OnboardingScreen(
                         item {
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                "Välj kategorier och platser att synka runt hemadressen. (Alltid ${fixedRadiusKm}km)",
+                                "Onboarding skapar inte längre platser automatiskt. Lägg till platser i appen senare (sök + spara).",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.78f),
                             )
@@ -915,58 +674,37 @@ fun OnboardingScreen(
 
                         item {
                             LargeActionTile(
-                                label = if (isSyncing) "Synkar…" else "Synka valda platser",
+                                label = if (isSyncing) "Sparar…" else "Klart",
                                 baseColor = MaterialTheme.colorScheme.primary,
-                                icon = Icons.Rounded.Sync,
+                                icon = Icons.Rounded.Check,
                                 onClick = {
                                     if (isSyncing) return@LargeActionTile
 
-                                    val lat = homeLat
-                                    val lng = homeLng
-                                    if (lat == null || lng == null) {
-                                        syncStatus = "Hemadress saknar koordinater. Gå tillbaka och välj igen."
-                                        return@LargeActionTile
-                                    }
-
                                     scope.launch {
                                         isSyncing = true
-                                        syncStatus = "Startar sync…"
+                                        syncStatus = null
                                         try {
-                                            val selectedResultsByPlaceId = linkedMapOf<String, PlaceResult>()
-
-                                            categoriesToSync.forEach { category ->
-                                                if (categoryEnabled[category] == false) return@forEach
-                                                val selectedIds = categorySelected[category].orEmpty()
-                                                categoryResults[category].orEmpty().forEach { p ->
-                                                    if (p.placeId in selectedIds) {
-                                                        selectedResultsByPlaceId.putIfAbsent(p.placeId, p)
-                                                    }
-                                                }
+                                            val lat = homeLat
+                                            val lng = homeLng
+                                            if (lat == null || lng == null) {
+                                                syncStatus = "Hemadress saknas. Gå tillbaka och välj adress igen."
+                                                return@launch
                                             }
 
-                                            if (selectedResultsByPlaceId.isEmpty()) {
-                                                throw IllegalStateException("Inga platser valda. Slå på en kategori och välj minst en plats.")
-                                            }
-
-                                            // Lock initial sync radius to 25km.
-                                            runCatching { AppGraph.settings.setStoreSyncRadiusKm(fixedRadiusKm) }
-
-                                            syncStatus = "Sparar ${selectedResultsByPlaceId.size} platser…"
+                                            // Clear any legacy auto-sync categories.
+                                            runCatching { AppGraph.settings.setPreferredCategories(emptyList()) }
+                                            runCatching { AppGraph.trackEventEmitter.emitProfilePreferredCategoriesSet(emptyList(), reason = "onboarding_finish") }
 
                                             val regionCode = "user_home"
                                             val regionName = homeCity.ifBlank { "Home" }
-                                            val stores = selectedResultsByPlaceId.values.map { p ->
-                                                StorePayload(
-                                                    id = "gmap_${p.placeId}",
-                                                    name = p.name,
-                                                    lat = p.lat,
-                                                    lng = p.lng,
-                                                    radiusMeters = 120,
-                                                    city = regionName,
-                                                )
-                                            }
 
-                                            val region = RegionPayload(regionCode = regionCode, regionName = regionName, stores = stores)
+                                            val region = RegionPayload(
+                                                regionCode = regionCode,
+                                                regionName = regionName,
+                                                stores = emptyList(),
+                                            )
+
+                                            syncStatus = "Sparar region…"
                                             withContext(Dispatchers.IO) {
                                                 val file = java.io.File(context.filesDir, "regions/$regionCode.json")
                                                 file.parentFile?.mkdirs()
@@ -976,33 +714,16 @@ fun OnboardingScreen(
                                             AppGraph.settings.setRegionCode(regionCode)
                                             AppGraph.storeRepository.ensureRegionLoaded(regionCode)
                                             AppGraph.settings.setTrackingEnabled(true)
-                                            AppGraph.geofenceSyncManager.scheduleSync("onboarding_sync")
+                                            runCatching { AppGraph.trackEventEmitter.emitProfileTrackingEnabledSet(true, reason = "onboarding_finish") }
 
-                                            // Save the actual Google driving distance once: Home -> Store.
-                                            syncStatus = "Beräknar avstånd (hem → butik)…"
-                                            withContext(Dispatchers.IO) {
-                                                stores.forEach { s ->
-                                                    runCatching {
-                                                        AppGraph.distanceRepository.getOrComputeDrivingDistanceMeters(
-                                                            startLat = lat,
-                                                            startLng = lng,
-                                                            destLat = s.lat,
-                                                            destLng = s.lng,
-                                                            startLocationId = BUSINESS_HOME_LOCATION_ID,
-                                                            endLocationId = s.id,
-                                                        )
-                                                    }
-                                                }
-                                            }
-
+                                            AppGraph.geofenceSyncManager.scheduleSync("onboarding_finish")
                                             AppGraph.settings.setOnboardingCompleted(true)
-                                            AppGraph.settings.setProfileOnboardingCompleted(selectedProfileId, true)
                                             syncStatus = "Klart!"
                                             onDone()
                                         } catch (e: CancellationException) {
                                             throw e
                                         } catch (t: Throwable) {
-                                            Log.e("TrimsyTrack", "Onboarding sync failed", t)
+                                            Log.e("TrimsyTrack", "Onboarding finish failed", t)
                                             syncStatus = t.message ?: t.javaClass.simpleName
                                         } finally {
                                             isSyncing = false
@@ -1013,116 +734,6 @@ fun OnboardingScreen(
                                 iconSize = 64.dp,
                                 modifier = Modifier.fillMaxWidth(),
                             )
-                        }
-
-                        if (categoriesToSync.isEmpty()) {
-                            item {
-                                Text(
-                                    "Inga kategorier valda. Gå tillbaka och välj minst en kategori.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.78f),
-                                )
-                            }
-                        } else {
-                            items(categoriesToSync, key = { it }) { category ->
-                                val enabled = categoryEnabled[category] != false
-                                val expanded = categoryExpanded[category] == true
-                                val loading = categoryLoading[category] == true
-                                val err = categoryError[category]
-                                val results = categoryResults[category].orEmpty()
-                                val selectedIds = categorySelected[category].orEmpty()
-
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 6.dp),
-                                ) {
-                                    Box(modifier = Modifier.fillMaxWidth()) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { categoryExpanded[category] = !expanded }
-                                                .padding(horizontal = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Checkbox(
-                                                checked = enabled,
-                                                onCheckedChange = { v -> categoryEnabled[category] = v },
-                                                enabled = !isSyncing,
-                                            )
-                                            Spacer(Modifier.width(10.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(category, style = MaterialTheme.typography.bodyLarge)
-                                                val countText = when {
-                                                    loading -> "Söker…"
-                                                    !err.isNullOrBlank() -> "Fel: ${err}"
-                                                    results.isEmpty() -> "0"
-                                                    else -> "${selectedIds.size}/${results.size} valda"
-                                                }
-                                                Text(
-                                                    countText,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.72f),
-                                                )
-                                            }
-                                            Icon(
-                                                imageVector = if (expanded) Icons.Rounded.ExpandMore else Icons.Rounded.ChevronRight,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                                            )
-                                        }
-                                    }
-
-                                    if (expanded) {
-                                        if (!err.isNullOrBlank()) {
-                                            Text(
-                                                err,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.error,
-                                                modifier = Modifier.padding(start = 56.dp, end = 6.dp, top = 6.dp),
-                                            )
-                                        }
-
-                                        if (!loading && results.isEmpty() && err.isNullOrBlank()) {
-                                            Text(
-                                                "Inga platser hittades.",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.72f),
-                                                modifier = Modifier.padding(start = 56.dp, end = 6.dp, top = 6.dp),
-                                            )
-                                        }
-
-                                        results.forEach { place ->
-                                            val checked = place.placeId in selectedIds
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(start = 44.dp, end = 6.dp, top = 4.dp)
-                                                    .clickable(enabled = !isSyncing && enabled) {
-                                                        val cur = categorySelected[category].orEmpty()
-                                                        categorySelected[category] = if (place.placeId in cur) cur - place.placeId else cur + place.placeId
-                                                    },
-                                                verticalAlignment = Alignment.CenterVertically,
-                                            ) {
-                                                Checkbox(
-                                                    checked = checked,
-                                                    onCheckedChange = { v ->
-                                                        val cur = categorySelected[category].orEmpty()
-                                                        categorySelected[category] = if (v) (cur + place.placeId) else (cur - place.placeId)
-                                                    },
-                                                    enabled = !isSyncing && enabled,
-                                                )
-                                                Spacer(Modifier.width(10.dp))
-                                                Text(
-                                                    place.name,
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    color = if (enabled) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         item {
@@ -1149,25 +760,6 @@ private data class AddressCandidate(
     val lng: Double,
     val city: String,
 )
-
-private data class PlaceResult(
-    val placeId: String,
-    val name: String,
-    val lat: Double,
-    val lng: Double,
-)
-
-private fun haversineMeters(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
-    val r = 6371000.0
-    val dLat = Math.toRadians(lat2 - lat1)
-    val dLng = Math.toRadians(lng2 - lng1)
-    val a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
-            Math.sin(dLng / 2) * Math.sin(dLng / 2)
-    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    return r * c
-}
 
 private interface PlacesTextSearchApi {
     @retrofit2.http.Headers("Content-Type: application/json")

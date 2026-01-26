@@ -1,6 +1,9 @@
 package com.trimsytrack.ui.screens
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -55,7 +58,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.google.firebase.auth.AuthCredential
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.auth.FirebaseUser
 import com.trimsytrack.auth.FirebaseEmailService
 import com.trimsytrack.auth.GoogleAuthCollision
@@ -66,10 +71,13 @@ import kotlinx.coroutines.launch
 @Composable
 fun AuthScreen(
     onBack: () -> Unit,
+    initialEmailLink: String?,
     onContinue: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    val logTag = "AuthPasswordless"
 
     val emailService = remember { FirebaseEmailService() }
     val googleService = remember { GoogleSignInService() }
@@ -77,6 +85,8 @@ fun AuthScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     val currentUser = rememberFirebaseUser()
+
+    var didAutoContinue by remember { mutableStateOf(false) }
 
     var step by remember { mutableStateOf<AuthStep>(AuthStep.Email) }
     var email by remember { mutableStateOf("") }
@@ -86,7 +96,11 @@ fun AuthScreen(
     var busy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf<String?>(null) }
 
-    var pendingGoogleCollision by remember { mutableStateOf<GoogleAuthCollision?>(null) }
+    var emailLink by remember { mutableStateOf("") }
+    var didConsumeInitialLink by remember { mutableStateOf(false) }
+
+    var pendingLinkCredential by remember { mutableStateOf<AuthCredential?>(null) }
+    var pendingLinkProviderLabel by remember { mutableStateOf<String?>(null) }
     var showLinkDialog by remember { mutableStateOf(false) }
 
     val googleLauncher = rememberLauncherForActivityResult(
@@ -109,7 +123,9 @@ fun AuthScreen(
                     snackbarHostState.showSnackbar("Klart!")
                 } catch (t: Throwable) {
                     if (t is GoogleAuthCollision) {
-                        pendingGoogleCollision = t
+                        email = t.email
+                        pendingLinkCredential = t.pendingCredential
+                        pendingLinkProviderLabel = "Google"
                         showLinkDialog = true
                     } else {
                         snackbarHostState.showSnackbar("Något gick fel")
@@ -164,6 +180,40 @@ fun AuthScreen(
                 }
             }
         }
+
+        fun debugError(t: Throwable): String {
+            val code = (t as? FirebaseAuthException)?.errorCode
+            val msg = t.message?.takeIf { it.isNotBlank() }
+            return buildString {
+                append("Misslyckades")
+                if (!code.isNullOrBlank()) append(" ($code)")
+                if (!msg.isNullOrBlank()) append(": $msg")
+            }
+        }
+
+        LaunchedEffect(initialEmailLink) {
+            if (didConsumeInitialLink) return@LaunchedEffect
+            val link = initialEmailLink?.trim().orEmpty()
+            if (link.isBlank()) return@LaunchedEffect
+
+            // Only prefill if it looks like a Firebase email-link.
+            if (emailService.isSignInWithEmailLink(link)) {
+                emailLink = link
+                didConsumeInitialLink = true
+                Log.i(logTag, "Prefilled email link from intent")
+                snackbarHostState.showSnackbar("Länk mottagen. Ange e‑post och slutför.")
+            }
+        }
+
+        // If already signed in, jump straight into the app.
+        LaunchedEffect(currentUser?.uid) {
+            if (currentUser == null) return@LaunchedEffect
+            if (busy) return@LaunchedEffect
+            if (didAutoContinue) return@LaunchedEffect
+            didAutoContinue = true
+            onContinue()
+        }
+
 
         Box(
             modifier = Modifier
@@ -263,6 +313,90 @@ fun AuthScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                // Passwordless email-link (magic link) flow
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            val e = emailTrimmed(email)
+                            if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                snackbarHostState.showSnackbar("Ange en giltig e‑post")
+                                return@launch
+                            }
+
+                            busy = true
+                            busyLabel = "Skickar länk…"
+                            try {
+                                val continueUrl = context.getString(com.trimsytrack.R.string.email_link_continue_url)
+                                Log.i(logTag, "Sending passwordless link email=$e continueUrl=$continueUrl")
+                                emailService.sendPasswordlessSignInLink(
+                                    email = e,
+                                    continueUrl = continueUrl,
+                                    androidPackageName = context.packageName,
+                                )
+                                snackbarHostState.showSnackbar("Länk skickad. Kolla din e‑post.")
+                            } catch (t: Throwable) {
+                                Log.w(logTag, "Failed to send passwordless link", t)
+                                snackbarHostState.showSnackbar(debugError(t))
+                            } finally {
+                                busy = false
+                                busyLabel = null
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Skicka inloggningslänk (utan lösenord)")
+                }
+
+                OutlinedTextField(
+                    value = emailLink,
+                    onValueChange = { emailLink = it },
+                    label = { Text("Klistra in länken här (om den inte öppnar appen)") },
+                    singleLine = false,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Button(
+                    onClick = {
+                        scope.launch {
+                            val e = emailTrimmed(email)
+                            val link = emailLink.trim()
+                            if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                snackbarHostState.showSnackbar("Ange samma e‑post som du skickade länken till")
+                                return@launch
+                            }
+                            if (link.isBlank()) {
+                                snackbarHostState.showSnackbar("Ingen länk")
+                                return@launch
+                            }
+                            if (!emailService.isSignInWithEmailLink(link)) {
+                                snackbarHostState.showSnackbar("Länken ser inte ut som en giltig inloggningslänk")
+                                return@launch
+                            }
+
+                            busy = true
+                            busyLabel = "Loggar in…"
+                            try {
+                                Log.i(logTag, "Completing passwordless sign-in email=$e")
+                                emailService.signInWithPasswordlessEmailLink(e, link)
+                                snackbarHostState.showSnackbar("Klart!")
+                            } catch (t: Throwable) {
+                                Log.w(logTag, "Failed to complete passwordless sign-in", t)
+                                snackbarHostState.showSnackbar(debugError(t))
+                            } finally {
+                                busy = false
+                                busyLabel = null
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Slutför med länk")
+                }
 
                 if (step is AuthStep.Password) {
                     OutlinedTextField(
@@ -398,16 +532,28 @@ fun AuthScreen(
         }
 
         if (showLinkDialog) {
-            val collision = pendingGoogleCollision
+            val providerLabel = pendingLinkProviderLabel
+            val linkCredential = pendingLinkCredential
             AlertDialog(
-                onDismissRequest = { if (!busy) showLinkDialog = false },
+                onDismissRequest = {
+                    if (!busy) {
+                        showLinkDialog = false
+                        pendingLinkCredential = null
+                        pendingLinkProviderLabel = null
+                    }
+                },
                 title = { Text("Fortsätt") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
-                            "Ange lösenord för ${collision?.email.orEmpty()} för att länka Google.",
+                            if (!email.trim().isNullOrBlank()) {
+                                "Ange lösenord för ${email.trim()} för att länka ${providerLabel ?: "konto"}."
+                            } else {
+                                "Ange lösenord för att länka ${providerLabel ?: "konto"}."
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                         )
+
                         OutlinedTextField(
                             value = password,
                             onValueChange = {
@@ -430,8 +576,21 @@ fun AuthScreen(
                 confirmButton = {
                     Button(
                         onClick = {
-                            val c = collision ?: return@Button
                             scope.launch {
+                                val credential = linkCredential
+                                if (credential == null) {
+                                    snackbarHostState.showSnackbar("Något gick fel")
+                                    return@launch
+                                }
+
+                                val e = emailTrimmed(email)
+                                if (e.isBlank() || !isProbablyValidEmail(e)) {
+                                    snackbarHostState.showSnackbar(
+                                        "Kan inte länka utan e-post. Logga in med ditt befintliga sätt först."
+                                    )
+                                    return@launch
+                                }
+
                                 if (password.length < 8) {
                                     passwordError = "Minst 8 tecken"
                                     return@launch
@@ -439,11 +598,12 @@ fun AuthScreen(
                                 busy = true
                                 busyLabel = "Loggar in…"
                                 try {
-                                    emailService.signInWithEmailPassword(c.email, password)
-                                    emailService.linkCurrentUserWithCredential(c.pendingCredential)
+                                    emailService.signInWithEmailPassword(e, password)
+                                    emailService.linkCurrentUserWithCredential(credential)
                                     snackbarHostState.showSnackbar("Klart!")
                                     showLinkDialog = false
-                                    pendingGoogleCollision = null
+                                    pendingLinkCredential = null
+                                    pendingLinkProviderLabel = null
                                     password = ""
                                     passwordError = null
                                 } catch (_: Throwable) {
@@ -461,7 +621,13 @@ fun AuthScreen(
                 },
                 dismissButton = {
                     TextButton(
-                        onClick = { if (!busy) showLinkDialog = false },
+                        onClick = {
+                            if (!busy) {
+                                showLinkDialog = false
+                                pendingLinkCredential = null
+                                pendingLinkProviderLabel = null
+                            }
+                        },
                         enabled = !busy,
                     ) {
                         Text("Avbryt")
@@ -491,4 +657,13 @@ private fun rememberFirebaseUser(): FirebaseUser? {
     }
 
     return user
+}
+
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }

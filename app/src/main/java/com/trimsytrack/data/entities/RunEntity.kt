@@ -9,8 +9,8 @@ import java.time.LocalDate
 data class RunEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
 
-    /** Active profile that owns this run. */
-    val profileId: String,
+    /** Auth UID that owns this run. */
+    val uid: String,
 
     // Backend-authoritative sync fields
     val clientRef: String? = null,

@@ -40,17 +40,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Used by AndroidManifest.xml: ${MAPS_API_KEY}
-        // Gradle does NOT automatically expose local.properties entries via project.findProperty.
-        val mapsApiKey = (
-            providers.gradleProperty("MAPS_API_KEY").orNull
-                ?: localProperties.getProperty("MAPS_API_KEY")
-                ?: providers.environmentVariable("MAPS_API_KEY").orNull
-                ?: ""
-            ).trim()
-
-        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
-
         // Multi-app isolation: a stable app_id (compiled into the APK).
         // Backend uses this to prevent cross-app data leakage.
         val fixedAppId = (providers.gradleProperty("APP_ID").orNull ?: "trimsytrack").trim()
@@ -62,14 +51,42 @@ android {
             providers.gradleProperty("BACKEND_API_BASE").orNull
                 ?: localProperties.getProperty("BACKEND_API_BASE")
                 ?: providers.environmentVariable("BACKEND_API_BASE").orNull
-                ?: "https://us-central1-trimsy-d12de.cloudfunctions.net/apiV1/"
+                ?: "https://europe-north1-trimsy-d12de.cloudfunctions.net/apiV1/"
             ).trim()
 
         val backendApiBase = if (backendApiBaseRaw.endsWith("/")) backendApiBaseRaw else "$backendApiBaseRaw/"
         buildConfigField("String", "BACKEND_API_BASE", "\"$backendApiBase\"")
+
+        // BACKENDTRIMSY Firebase Functions region (used for Callable functions).
+        // Overridable for dev via Gradle property, local.properties, or env var.
+        val backendFunctionsRegion = (
+            providers.gradleProperty("BACKEND_FUNCTIONS_REGION").orNull
+                ?: localProperties.getProperty("BACKEND_FUNCTIONS_REGION")
+                ?: providers.environmentVariable("BACKEND_FUNCTIONS_REGION").orNull
+                ?: "europe-north1"
+            ).trim()
+
+        buildConfigField("String", "BACKEND_FUNCTIONS_REGION", "\"$backendFunctionsRegion\"")
+
+        // Google Maps / Places API key (used via AndroidManifest meta-data).
+        // Provide via Gradle property, local.properties, or env var.
+        val mapsApiKey = (
+            providers.gradleProperty("MAPS_API_KEY").orNull
+                ?: localProperties.getProperty("MAPS_API_KEY")
+                ?: providers.environmentVariable("MAPS_API_KEY").orNull
+                ?: ""
+            ).trim()
+
+        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
     }
 
     buildTypes {
+        debug {
+            // Defensive: debug should never be minified/shrunk; a stripped Application class crashes on launch.
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
+
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -107,6 +124,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.google.material)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

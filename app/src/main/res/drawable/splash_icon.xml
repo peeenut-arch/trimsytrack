@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Solid background (avoid any white "plate"/flash) -->
+    <item android:drawable="@android:color/black" />
+
+    <!--
+      Wrap splash.png in a ScaleDrawable so Android's splash screen doesn't stretch it.
+      scaleWidth/scaleHeight use the same percentage => uniform scaling (no distortion).
+    -->
+    <item android:gravity="center">
+        <scale
+            android:drawable="@drawable/splash"
+            android:gravity="center"
+            android:scaleWidth="70%"
+            android:scaleHeight="70%" />
+    </item>
+
+</layer-list>

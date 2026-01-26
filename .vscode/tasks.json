@@ -5,6 +5,9 @@
 			"label": "Build Android app (Gradle)",
 			"type": "shell",
 			"command": "./gradlew assembleDebug",
+			"windows": {
+				"command": ".\\gradlew.bat assembleDebug"
+			},
 			"isBackground": false,
 			"problemMatcher": [
 				"$javac"
@@ -15,6 +18,9 @@
 			"label": "Install app on device (Gradle)",
 			"type": "shell",
 			"command": "./gradlew installDebug",
+			"windows": {
+				"command": ".\\gradlew.bat installDebug"
+			},
 			"isBackground": false,
 			"problemMatcher": [
 				"$javac"
@@ -24,12 +30,45 @@
 		{
 			"label": "Build + Install + Launch (device)",
 			"type": "shell",
-			"command": "./gradlew installDebug; & \"$env:LOCALAPPDATA\\Android\\Sdk\\platform-tools\\adb.exe\" shell am start -n com.trimsytrack/.ui.MainActivity",
+			"command": "powershell -ExecutionPolicy Bypass -File ./tools/build_install_launch.ps1",
+			"windows": {
+				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\build_install_launch.ps1"
+			},
 			"isBackground": false,
 			"group": {
 				"kind": "build",
 				"isDefault": true
 			}
+		},
+		{
+			"label": "Verify installed APK is TrimsyTRACK (com.trimsytrack)",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File ./tools/verify_installed_apk.ps1",
+			"windows": {
+				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\verify_installed_apk.ps1"
+			},
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Sync smoke test (interactive)",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File ./tools/smoke_sync_check.ps1 -DoRestart",
+			"windows": {
+				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\smoke_sync_check.ps1 -DoRestart"
+			},
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Sync smoke test (restart + reinstall + relogin)",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File ./tools/smoke_sync_check.ps1 -DoRestart -DoReinstall -AssumeYesForReinstall -NonInteractiveWaitAfterActionSeconds 60 -NonInteractiveWaitAfterReloginSeconds 90",
+			"windows": {
+				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\smoke_sync_check.ps1 -DoRestart -DoReinstall -AssumeYesForReinstall -NonInteractiveWaitAfterActionSeconds 60 -NonInteractiveWaitAfterReloginSeconds 90"
+			},
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

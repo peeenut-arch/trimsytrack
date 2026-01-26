@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.content.FileProvider
+import com.trimsytrack.AppGraph
 import com.trimsytrack.distance.MapsKeyProvider
 import com.trimsytrack.data.dao.AttachmentDao
 import com.trimsytrack.data.dao.RunDao
@@ -15,12 +16,14 @@ import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.RunEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.data.canonical.CanonicalWriteEnqueuer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -43,6 +46,7 @@ import java.util.Locale
 import java.io.File
 import com.trimsytrack.util.EvidenceNaming
 import com.trimsytrack.util.PlaceNameNormalizer
+import com.trimsytrack.data.entities.PlaceType
 
 class TripRepository(
     private val tripDao: TripDao,
@@ -50,9 +54,12 @@ class TripRepository(
     private val runDao: RunDao,
     private val settings: SettingsStore,
     private val appContext: Context,
+    private val trackEventEmitter: com.trimsytrack.data.trackevents.TrackEventEmitter,
+    private val canonicalWriteEnqueuer: CanonicalWriteEnqueuer,
 ) {
     private val logTag = "TripRepository"
-    private val duplicateStoreLockWindow: Duration = Duration.ofMinutes(10)
+    // Disabled: allow creating multiple trips for the same store without a cooldown.
+    private val duplicateStoreLockWindow: Duration = Duration.ZERO
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val googleJson = Json { ignoreUnknownKeys = true }
@@ -120,29 +127,42 @@ class TripRepository(
     }
 
     fun observeToday(day: LocalDate): Flow<List<TripEntity>> {
-        return settings.profileId
-            .map { it.ifBlank { "default" } }
-            .flatMapLatest { pid -> tripDao.observeByDay(pid, day) }
+        return settings.uid
+            .flatMapLatest { uid ->
+                if (uid.isBlank()) flowOf(emptyList()) else tripDao.observeByDay(uid, day)
+            }
     }
 
     fun observeRecent(limit: Int = 200): Flow<List<TripEntity>> {
-        return settings.profileId
-            .map { it.ifBlank { "default" } }
-            .flatMapLatest { pid -> tripDao.observeRecent(pid, limit) }
+        return settings.uid
+            .flatMapLatest { uid ->
+                if (uid.isBlank()) flowOf(emptyList()) else tripDao.observeRecent(uid, limit)
+            }
     }
 
     fun observeAllTrips(): Flow<List<TripEntity>> {
-        return settings.profileId
-            .map { it.ifBlank { "default" } }
-            .flatMapLatest { pid -> tripDao.observeAll(pid) }
+        return settings.uid
+            .flatMapLatest { uid ->
+                if (uid.isBlank()) flowOf(emptyList()) else tripDao.observeAll(uid)
+            }
     }
 
     suspend fun get(id: Long): TripEntity? {
-        val profileId = settings.profileId.first().ifBlank { "default" }
-        return tripDao.getById(profileId, id)
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return null
+        return tripDao.getById(uid, id)
+    }
+
+    fun observeTrip(id: Long): Flow<TripEntity?> {
+        return settings.uid
+            .flatMapLatest { uid ->
+                if (uid.isBlank()) flowOf(null) else tripDao.observeById(uid, id)
+            }
     }
 
     suspend fun createTrip(entity: TripEntity): Long {
+        val uid = settings.requireUid()
+
         // Insert immediately; don't block trip creation on reverse-geocoding.
         val trimmedStoreId = entity.storeId.trim()
         val isPostOmbud = PlaceNameNormalizer.isPostOmbudName(entity.storeNameSnapshot)
@@ -150,17 +170,23 @@ class TripRepository(
         val derivedPostOmbudId =
             if (isPostOmbud && trimmedStoreId.isNotBlank()) "postombud:$trimmedStoreId" else null
 
-        val ensured = entity.copy(
-            profileId = entity.profileId.ifBlank { "default" },
+        val ensuredBase = entity.copy(
+            uid = entity.uid.ifBlank { uid },
             clientRef = entity.clientRef ?: UUID.randomUUID().toString(),
             syncStatus = if (entity.syncStatus == SyncStatus.LOCAL_ONLY) SyncStatus.PENDING else entity.syncStatus,
+            businessPurpose = SettingsStore.normalizeBusinessPurpose(entity.businessPurpose)
+                .ifBlank { SettingsStore.DEFAULT_BUSINESS_PURPOSE },
             storeLocationId = entity.storeLocationId ?: derivedStoreLocationId,
             postOmbudId = entity.postOmbudId ?: derivedPostOmbudId,
         )
 
+        val ensured = ensuredBase.run {
+            if (runId != null) this else copy(runId = ensureRunIdForNewTrip(this))
+        }
+
         // Guard: prevent accidental rapid double-taps creating multiple trips for the same store.
         val lastForStore = runCatching {
-            tripDao.getLatestForStore(ensured.profileId, ensured.storeId)
+            tripDao.getLatestForStore(ensured.uid, ensured.storeId)
         }.getOrNull()
         if (lastForStore != null) {
             val now = Instant.now()
@@ -180,10 +206,107 @@ class TripRepository(
 
         val tripId = tripDao.insert(ensured)
 
+        // Canonical truth write (outbox): every completed trip must be written via drivingTripCreate.
+        runCatching {
+            canonicalWriteEnqueuer.enqueueDrivingTripCreate(ensured.copy(id = tripId))
+        }.onFailure { t ->
+            Log.w(logTag, "Failed to enqueue canonical drivingTripCreate: ${t.message}")
+        }
+
         // Fill city snapshot in the background (once) if missing / clearly wrong.
         scheduleCitySnapshotUpdate(tripId, ensured)
 
+        // Major milestone: a HOME trip closes the current run.
+        if (ensured.endPlaceType == PlaceType.HOME && ensured.endedAt != null) {
+            runCatching {
+                trackEventEmitter.emitRunCompleted(
+                    runId = ensured.runId,
+                    tripId = tripId,
+                    endedAt = ensured.endedAt,
+                    reason = "home_trip_created",
+                )
+            }
+
+            // Snapshot checkpoint: completed run should be snapshotted to backend.
+            // This is intentionally best-effort; the upload worker will gate on handshake/protocol and
+            // ensure canonical truth writes are flushed before uploading the snapshot.
+            runCatching {
+                AppGraph.driverDataSyncManager.enqueueImmediate(
+                    reason = "run_completed_local",
+                    trigger = "run",
+                )
+            }
+        }
+
         return tripId
+    }
+
+    private suspend fun ensureRunIdForNewTrip(entity: TripEntity): Long? {
+        // Runs are the “completed trip” concept: Home→…stops…→Home.
+        // We assign a runId automatically so all stops within the same run share the same counter.
+        if (entity.runId != null) return entity.runId
+
+        val uid = entity.uid
+        if (uid.isBlank()) return null
+
+        val day = entity.day
+        val dayTrips = runCatching { tripDao.listByDay(uid, day) }.getOrElse { emptyList() }
+
+        val last = dayTrips.lastOrNull()
+        val lastIsHome = last?.endPlaceType == PlaceType.HOME
+
+        // Trips after the last HOME are considered the current open run (if any).
+        val lastHomeIdx = dayTrips.indexOfLast { it.endPlaceType == PlaceType.HOME }
+        val openRunTrips = if (lastHomeIdx >= 0) dayTrips.drop(lastHomeIdx + 1) else dayTrips
+
+        val openRunExistingId = openRunTrips.lastOrNull()?.runId
+
+        val needsNewRun = (last == null) || lastIsHome
+        if (needsNewRun) {
+            // Starting a new run (first stop after Home, or first entry of the day).
+            return createRun(day = day, label = "Trip")
+        }
+
+        if (openRunExistingId != null) return openRunExistingId
+
+        // We have an open run, but legacy trips didn't have runId. Create a run and backfill.
+        val newRunId = createRun(day = day, label = "Trip")
+        val idsToUpdate = openRunTrips.map { it.id }.filter { it > 0L }
+        if (idsToUpdate.isNotEmpty()) {
+            runCatching { tripDao.setRunIdForTrips(uid = uid, runId = newRunId, ids = idsToUpdate) }
+        }
+        return newRunId
+    }
+
+    private fun completedTripSequenceNumberByKey(trips: List<TripEntity>): Map<Long, Int> {
+        return trips
+            .groupBy { it.runId ?: -it.id }
+            .mapNotNull { (key, group) ->
+                val last = group.maxWithOrNull(compareBy<TripEntity> { it.endedAt }.thenBy { it.createdAt }.thenBy { it.id })
+                    ?: return@mapNotNull null
+                if (last.endPlaceType != PlaceType.HOME) return@mapNotNull null
+                key to last.endedAt
+            }
+            .sortedWith(compareBy<Pair<Long, java.time.Instant>> { it.second }.thenBy { it.first })
+            .mapIndexed { idx, e -> e.first to (idx + 1) }
+            .toMap()
+    }
+
+    suspend fun completedTripNumberForTrip(tripId: Long): Int? {
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank() || tripId <= 0L) return null
+
+        val trip = tripDao.getById(uid, tripId) ?: return null
+        val key = trip.runId ?: -trip.id
+        val all = tripDao.listAll(uid)
+        val map = completedTripSequenceNumberByKey(all)
+        return map[key]
+    }
+
+    suspend fun completedTripCount(): Int {
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return 0
+        return tripDao.countCompletedRuns(uid)
     }
 
     /**
@@ -193,9 +316,10 @@ class TripRepository(
      * attempting lookups, but it must not overwrite an already-valid snapshot.
      */
     suspend fun repairRecentCitySnapshots(limit: Int = 250) {
-        val profileId = settings.profileId.first().ifBlank { "default" }
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return
         withContext(Dispatchers.IO) {
-            val recent = tripDao.listRecent(profileId, limit)
+            val recent = tripDao.listRecent(uid, limit)
             if (recent.isEmpty()) return@withContext
 
             val cache = HashMap<Long, String>()
@@ -227,13 +351,14 @@ class TripRepository(
     }
 
     /**
-     * One-time helper to fill missing city snapshots for the current profile.
+     * One-time helper to fill missing city snapshots for the current account (uid).
      * This keeps Journal grouping stable even when stores are missing/out-of-sync.
      */
     suspend fun backfillMissingCitySnapshots(limit: Int = 80) {
-        val profileId = settings.profileId.first().ifBlank { "default" }
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return
         withContext(Dispatchers.IO) {
-            val missing = tripDao.listRecentMissingCitySnapshot(profileId, limit)
+            val missing = tripDao.listRecentMissingCitySnapshot(uid, limit)
             if (missing.isEmpty()) return@withContext
 
             // Cache by rounded coordinate to avoid repeated lookups.
@@ -433,40 +558,45 @@ class TripRepository(
     suspend fun updateTrip(entity: TripEntity) = tripDao.update(entity)
 
     suspend fun deleteTrip(id: Long) {
-        val profileId = settings.profileId.first().ifBlank { "default" }
-        tripDao.deleteById(profileId, id)
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return
+        tripDao.deleteById(uid, id)
     }
 
     suspend fun listTripsBetweenDays(startDay: LocalDate, endDay: LocalDate): List<TripEntity> =
-        tripDao.listBetweenDays(settings.profileId.first().ifBlank { "default" }, startDay, endDay)
+        settings.uidOrEmpty().let { uid ->
+            if (uid.isBlank()) emptyList() else tripDao.listBetweenDays(uid, startDay, endDay)
+        }
 
     fun observeAttachments(tripId: Long): Flow<List<AttachmentEntity>> {
-        return settings.profileId
-            .map { it.ifBlank { "default" } }
-            .flatMapLatest { pid -> attachmentDao.observeByTrip(pid, tripId) }
+        return settings.uid
+            .flatMapLatest { uid ->
+                if (uid.isBlank()) flowOf(emptyList()) else attachmentDao.observeByTrip(uid, tripId)
+            }
     }
 
     fun observeAllAttachments(): Flow<List<AttachmentEntity>> {
-        return settings.profileId
-            .map { it.ifBlank { "default" } }
-            .flatMapLatest { pid -> attachmentDao.observeAll(pid) }
+        return settings.uid
+            .flatMapLatest { uid ->
+                if (uid.isBlank()) flowOf(emptyList()) else attachmentDao.observeAll(uid)
+            }
     }
 
     suspend fun addAttachment(entity: AttachmentEntity): Long {
+        val uid = settings.requireUid()
         val deviceId = runCatching { settings.installId.first() }.getOrNull()
         val now = Instant.now()
         val ensured = entity.copy(
+            uid = entity.uid.ifBlank { uid },
             clientRef = entity.clientRef ?: UUID.randomUUID().toString(),
             linkedAt = entity.linkedAt ?: now,
             linkedByDeviceId = entity.linkedByDeviceId ?: deviceId,
         )
 
-        val profileId = ensured.profileId.ifBlank { settings.profileId.first().ifBlank { "default" } }
-        val insertedId = attachmentDao.insert(ensured.copy(profileId = profileId))
+        val insertedId = attachmentDao.insert(ensured)
 
         val newUri = runCatching {
             ensureCanonicalEvidenceFileName(
-                profileId = profileId,
                 tripId = ensured.tripId,
                 evidenceId = insertedId,
                 capturedAt = ensured.capturedAt,
@@ -477,14 +607,13 @@ class TripRepository(
         }.getOrNull()
 
         if (newUri != null && newUri != ensured.uri) {
-            runCatching { attachmentDao.updateUri(profileId = profileId, id = insertedId, uri = newUri) }
+            runCatching { attachmentDao.updateUri(uid = uid, id = insertedId, uri = newUri) }
         }
 
         return insertedId
     }
 
     private fun ensureCanonicalEvidenceFileName(
-        profileId: String,
         tripId: Long,
         evidenceId: Long,
         capturedAt: Instant,
@@ -543,15 +672,16 @@ class TripRepository(
     }
 
     suspend fun deleteAttachment(id: Long) {
-        val profileId = settings.profileId.first().ifBlank { "default" }
-        attachmentDao.deleteById(profileId, id)
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return
+        attachmentDao.deleteById(uid, id)
     }
 
     suspend fun createRun(day: LocalDate, label: String): Long {
-        val profileId = settings.profileId.first().ifBlank { "default" }
+        val uid = settings.requireUid()
         return runDao.insert(
             RunEntity(
-                profileId = profileId,
+                uid = uid,
                 clientRef = UUID.randomUUID().toString(),
                 syncStatus = SyncStatus.PENDING,
                 day = day,
@@ -561,8 +691,21 @@ class TripRepository(
         )
     }
 
+    suspend fun deleteRun(runId: Long) {
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank() || runId <= 0L) return
+        runCatching { runDao.deleteById(uid = uid, id = runId) }
+    }
+
     suspend fun latestTripForDay(day: LocalDate): TripEntity? {
-        val profileId = settings.profileId.first().ifBlank { "default" }
-        return tripDao.getLatestForDay(profileId, day)
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return null
+        return tripDao.getLatestForDay(uid, day)
+    }
+
+    suspend fun latestTripEndingAtOrBefore(at: Instant): TripEntity? {
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return null
+        return tripDao.getLatestEndingAtOrBefore(uid, at)
     }
 }

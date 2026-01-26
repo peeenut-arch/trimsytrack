@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.pings.PingRetentionWorker
+import com.trimsytrack.notifications.RunCompletionReminderWorker
 
 class BootReceiver : BroadcastReceiver() {
 
@@ -15,6 +17,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         Log.i(TAG, "BootReceiver.onReceive action=${intent?.action}")
         AppGraph.init(context)
-        AppGraph.geofenceSyncManager.scheduleSync("boot")
+        runCatching { RunCompletionReminderWorker.scheduleDaily(context.applicationContext) }
+        runCatching { PingRetentionWorker.schedulePeriodic(context.applicationContext) }
     }
 }

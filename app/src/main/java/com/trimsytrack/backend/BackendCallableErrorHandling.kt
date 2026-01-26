@@ -17,6 +17,8 @@ internal object BackendCallableErrorHandling {
 
         val httpStatus = when (e.code) {
             FirebaseFunctionsException.Code.UNAUTHENTICATED -> 401
+            FirebaseFunctionsException.Code.PERMISSION_DENIED -> 403
+            FirebaseFunctionsException.Code.NOT_FOUND -> 404
             FirebaseFunctionsException.Code.FAILED_PRECONDITION -> 412
             FirebaseFunctionsException.Code.RESOURCE_EXHAUSTED -> 429
             FirebaseFunctionsException.Code.INVALID_ARGUMENT -> 400
@@ -56,6 +58,8 @@ internal object BackendCallableErrorHandling {
         if (details !is Map<*, *>) return Triple(null, fallbackMessage, null)
 
         fun mapString(map: Map<*, *>, key: String): String? = map[key]?.toString()?.takeIf { it.isNotBlank() }
+        fun mapMachine(map: Map<*, *>): String? =
+            mapString(map, "machineCode") ?: mapString(map, "machine")
         fun mapLong(map: Map<*, *>, key: String): Long? {
             val v = map[key] ?: return null
             return when (v) {
@@ -65,12 +69,12 @@ internal object BackendCallableErrorHandling {
             }
         }
 
-        val topMachine = mapString(details, "machineCode")
+        val topMachine = mapMachine(details)
         val topMessage = mapString(details, "message")
         val topRetry = mapLong(details, "retryAfterSeconds")
 
         val errorMap = (details["error"] as? Map<*, *>)
-        val errMachine = errorMap?.let { mapString(it, "machineCode") }
+        val errMachine = errorMap?.let { mapMachine(it) }
         val errMessage = errorMap?.let { mapString(it, "message") }
 
         val detailsMap = errorMap?.get("details") as? Map<*, *>

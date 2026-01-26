@@ -15,33 +15,39 @@ interface AttachmentDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(entities: List<AttachmentEntity>): List<Long>
 
-    @Query("SELECT * FROM attachments WHERE profileId = :profileId AND tripId = :tripId ORDER BY addedAt DESC")
-    fun observeByTrip(profileId: String, tripId: Long): Flow<List<AttachmentEntity>>
+    @Query("SELECT * FROM attachments WHERE uid = :uid AND tripId = :tripId ORDER BY addedAt DESC")
+    fun observeByTrip(uid: String, tripId: Long): Flow<List<AttachmentEntity>>
 
-    @Query("SELECT * FROM attachments WHERE profileId = :profileId ORDER BY addedAt DESC")
-    fun observeAll(profileId: String): Flow<List<AttachmentEntity>>
+    @Query("SELECT * FROM attachments WHERE uid = :uid ORDER BY addedAt DESC")
+    fun observeAll(uid: String): Flow<List<AttachmentEntity>>
 
-    @Query("SELECT * FROM attachments WHERE profileId = :profileId")
-    suspend fun listAll(profileId: String): List<AttachmentEntity>
+    @Query("SELECT * FROM attachments WHERE uid = :uid")
+    suspend fun listAll(uid: String): List<AttachmentEntity>
 
-    @Query("SELECT COUNT(*) FROM attachments WHERE profileId = :profileId AND tripId = :tripId")
-    suspend fun countByTrip(profileId: String, tripId: Long): Int
+    @Query("SELECT * FROM attachments WHERE uid = :uid AND tripId = :tripId ORDER BY addedAt DESC")
+    suspend fun listByTrip(uid: String, tripId: Long): List<AttachmentEntity>
 
-    @Query("SELECT * FROM attachments WHERE profileId = :profileId AND id = :id")
-    suspend fun getById(profileId: String, id: Long): AttachmentEntity?
+    @Query("SELECT COUNT(*) FROM attachments WHERE uid = :uid")
+    suspend fun countAll(uid: String): Int
 
-    @Query("UPDATE attachments SET uri = :uri WHERE profileId = :profileId AND id = :id")
-    suspend fun updateUri(profileId: String, id: Long, uri: String)
+    @Query("SELECT COUNT(*) FROM attachments WHERE uid = :uid AND tripId = :tripId")
+    suspend fun countByTrip(uid: String, tripId: Long): Int
 
-    @Query("UPDATE attachments SET clientRef = :clientRef WHERE profileId = :profileId AND id = :id")
-    suspend fun updateClientRef(profileId: String, id: Long, clientRef: String)
+    @Query("SELECT * FROM attachments WHERE uid = :uid AND id = :id")
+    suspend fun getById(uid: String, id: Long): AttachmentEntity?
 
-    @Query("DELETE FROM attachments WHERE profileId = :profileId AND id = :id")
-    suspend fun deleteById(profileId: String, id: Long)
+    @Query("UPDATE attachments SET uri = :uri WHERE uid = :uid AND id = :id")
+    suspend fun updateUri(uid: String, id: Long, uri: String)
 
-    @Query("UPDATE attachments SET profileId = :profileId WHERE profileId = ''")
-    suspend fun claimUnscoped(profileId: String)
+    @Query("UPDATE attachments SET clientRef = :clientRef WHERE uid = :uid AND id = :id")
+    suspend fun updateClientRef(uid: String, id: Long, clientRef: String)
 
-    @Query("UPDATE attachments SET profileId = :newProfileId WHERE profileId = :oldProfileId")
-    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
+    @Query("DELETE FROM attachments WHERE uid = :uid AND id = :id")
+    suspend fun deleteById(uid: String, id: Long)
+
+    @Query("UPDATE attachments SET uid = :uid WHERE uid = ''")
+    suspend fun claimUnscoped(uid: String)
+
+    @Query("UPDATE attachments SET uid = :newUid WHERE uid = :oldUid")
+    suspend fun rekeyUid(oldUid: String, newUid: String)
 }

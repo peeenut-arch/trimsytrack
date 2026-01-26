@@ -85,10 +85,10 @@ fun SavedStoresScreen(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val profileId by AppGraph.settings.profileId.collectAsState(initial = "")
-    val effectiveProfileId = profileId.ifBlank { "default" }
-    val stores by AppGraph.db.storeDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
-    val visitedStores by AppGraph.db.visitedStoreDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
+    val uid by AppGraph.settings.uid.collectAsState(initial = "")
+    val effectiveUid = uid.ifBlank { "default" }
+    val stores by AppGraph.db.storeDao().observeAll(effectiveUid).collectAsState(initial = emptyList())
+    val visitedStores by AppGraph.db.visitedStoreDao().observeAll(effectiveUid).collectAsState(initial = emptyList())
 
     fun canonicalizeStoreId(storeId: String): String {
         return when {
@@ -229,7 +229,7 @@ fun SavedStoresScreen(
             AppGraph.db.storeDao().upsertAll(
                 listOf(
                     StoreEntity(
-                        profileId = effectiveProfileId,
+                        uid = effectiveUid,
                         id = storeId,
                         name = normalizedName,
                         lat = place.lat,
@@ -245,7 +245,7 @@ fun SavedStoresScreen(
 
             // Preserve existing UX: manually adding a store to this screen implies it's "visited".
             AppGraph.db.visitedStoreDao().markVisitedOnce(
-                profileId = effectiveProfileId,
+                uid = effectiveUid,
                 storeId = canonicalStoreId,
                 visitedAt = System.currentTimeMillis(),
                 name = normalizedName,
@@ -414,14 +414,14 @@ fun SavedStoresScreen(
                                 val newValue = !(existing?.isFavorite ?: false)
                                 if (existing != null) {
                                     scope.launch {
-                                        AppGraph.db.storeDao().setFavorite(effectiveProfileId, row.storeId, newValue)
+                                        AppGraph.db.storeDao().setFavorite(effectiveUid, row.storeId, newValue)
                                     }
                                 } else if (newValue) {
                                     scope.launch {
                                         AppGraph.db.storeDao().upsertAll(
                                             listOf(
                                                 StoreEntity(
-                                                    profileId = effectiveProfileId,
+                                                    uid = effectiveUid,
                                                     id = row.storeId,
                                                     name = row.name,
                                                     lat = row.lat,
@@ -546,7 +546,7 @@ fun SavedStoresScreen(
                             AppGraph.db.storeDao().upsertAll(
                                 listOf(
                                     StoreEntity(
-                                        profileId = effectiveProfileId,
+                                        uid = effectiveUid,
                                         id = storeId,
                                         name = name,
                                         lat = lat,

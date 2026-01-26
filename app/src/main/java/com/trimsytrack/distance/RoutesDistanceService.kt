@@ -1,6 +1,7 @@
 package com.trimsytrack.distance
 
 import android.content.Context
+import android.util.Log
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -10,12 +11,14 @@ class RoutesDistanceService(
     private val api: RoutesApi,
     private val context: Context,
 ) {
+    private val tag = "RoutesDistanceService"
     private val json = Json { ignoreUnknownKeys = true }
 
     data class RouteResult(
         val distanceMeters: Int,
         val durationSeconds: Long,
         val routePolyline: String?,
+        val source: String,
     )
 
     suspend fun computeDrivingDistanceMeters(
@@ -33,7 +36,16 @@ class RoutesDistanceService(
         destLat: Double,
         destLng: Double,
     ): RouteResult {
-        val key = MapsKeyProvider.getKey(context)
+        val key = MapsKeyProvider.getKey(context).trim()
+        if (key.isBlank()) {
+            // Privacy/compat fallback: no external API calls.
+            return RouteResult(
+                distanceMeters = haversineMeters(startLat, startLng, destLat, destLng),
+                durationSeconds = 0L,
+                routePolyline = null,
+                source = "STRAIGHT_LINE_NO_KEY",
+            )
+        }
 
         val body = """
           {
@@ -44,29 +56,81 @@ class RoutesDistanceService(
           }
         """.trimIndent()
 
-        val response = api.computeRoutes(
-            apiKey = key,
-            fieldMask = "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline",
-            body = body,
-        )
+        val fallbackDistanceMeters = haversineMeters(startLat, startLng, destLat, destLng)
 
-        val root = json.parseToJsonElement(response).jsonObject
-        val routes = root["routes"]?.jsonArray ?: error("Routes API: no routes")
-        val first = routes.firstOrNull()?.jsonObject ?: error("Routes API: empty routes")
+        return try {
+            val response = api.computeRoutes(
+                apiKey = key,
+                fieldMask = "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline",
+                body = body,
+            )
 
-        val distanceRaw = first["distanceMeters"]?.jsonPrimitive?.content ?: error("Routes API: missing distanceMeters")
-        val distanceMeters = distanceRaw.toIntOrNull() ?: error("Routes API: invalid distanceMeters")
+            val root = json.parseToJsonElement(response).jsonObject
+            val routes = root["routes"]?.jsonArray
+            val first = routes?.firstOrNull()?.jsonObject
 
-        // duration is typically a string like "123s"
-        val durationRaw = first["duration"]?.jsonPrimitive?.content ?: "0s"
-        val durationSeconds = durationRaw.removeSuffix("s").toLongOrNull() ?: 0L
+            if (routes == null || first == null) {
+                Log.w(tag, "Routes API: no/empty routes; falling back to straight-line")
+                return RouteResult(
+                    distanceMeters = fallbackDistanceMeters,
+                    durationSeconds = 0L,
+                    routePolyline = null,
+                    source = "STRAIGHT_LINE_NO_ROUTES",
+                )
+            }
 
-        val polyline = first["polyline"]?.jsonObject?.get("encodedPolyline")?.jsonPrimitive?.content
+            val distanceMeters = first["distanceMeters"]
+                ?.jsonPrimitive
+                ?.content
+                ?.toIntOrNull()
 
-        return RouteResult(
-            distanceMeters = distanceMeters,
-            durationSeconds = durationSeconds,
-            routePolyline = polyline,
-        )
+            // duration is typically a string like "123s"
+            val durationRaw = first["duration"]?.jsonPrimitive?.content
+            val durationSeconds = durationRaw?.removeSuffix("s")?.toLongOrNull() ?: 0L
+
+            val polyline = first["polyline"]?.jsonObject?.get("encodedPolyline")?.jsonPrimitive?.content
+
+            if (distanceMeters == null) {
+                Log.w(tag, "Routes API: missing distanceMeters; falling back to straight-line")
+                return RouteResult(
+                    distanceMeters = fallbackDistanceMeters,
+                    durationSeconds = durationSeconds,
+                    routePolyline = null,
+                    source = "STRAIGHT_LINE_MISSING_DISTANCE_METERS",
+                )
+            }
+
+            RouteResult(
+                distanceMeters = distanceMeters.coerceAtLeast(0),
+                durationSeconds = durationSeconds.coerceAtLeast(0L),
+                routePolyline = polyline,
+                source = "GOOGLE",
+            )
+        } catch (t: Throwable) {
+            Log.w(tag, "Routes API: compute failed; falling back to straight-line", t)
+            RouteResult(
+                distanceMeters = fallbackDistanceMeters,
+                durationSeconds = 0L,
+                routePolyline = null,
+                source = "STRAIGHT_LINE_API_ERROR",
+            )
+        }
+    }
+
+    private fun haversineMeters(
+        lat1: Double,
+        lon1: Double,
+        lat2: Double,
+        lon2: Double,
+    ): Int {
+        val r = 6_371_000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return (r * c).toInt().coerceAtLeast(0)
     }
 }

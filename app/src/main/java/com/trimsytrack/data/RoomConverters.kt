@@ -1,6 +1,8 @@
 package com.trimsytrack.data
 
 import androidx.room.TypeConverter
+import com.trimsytrack.data.entities.PingSource
+import com.trimsytrack.data.entities.PingTransition
 import com.trimsytrack.data.entities.PromptStatus
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.DistanceMethod
@@ -44,4 +46,16 @@ class RoomConverters {
 
     @TypeConverter
     fun stringToPlaceType(value: String?): PlaceType? = value?.let { runCatching { PlaceType.valueOf(it) }.getOrNull() }
+
+    @TypeConverter
+    fun pingTransitionToString(value: PingTransition?): String? = value?.name
+
+    @TypeConverter
+    fun stringToPingTransition(value: String?): PingTransition? = value?.let { runCatching { PingTransition.valueOf(it) }.getOrNull() }
+
+    @TypeConverter
+    fun pingSourceToString(value: PingSource?): String? = value?.name
+
+    @TypeConverter
+    fun stringToPingSource(value: String?): PingSource? = value?.let { runCatching { PingSource.valueOf(it) }.getOrNull() }
 }

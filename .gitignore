@@ -10,3 +10,9 @@ local.properties
 Thumbs.db
 
 *.log
+
+# Local evidence / scratch
+tmp/
+
+# Nested backend repo lives separately
+BACKENDTRIMSY/

@@ -1,18 +1,9 @@
 package com.trimsytrack.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -30,7 +21,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -48,8 +41,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Palette
 import coil.compose.AsyncImage
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -74,31 +65,26 @@ fun HomeScreen(
     onJournal: () -> Unit,
     onCamera: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenProfiles: () -> Unit,
-    onOpenOnboarding: () -> Unit,
-    onOpenProfileLocation: () -> Unit,
-    onOpenSavedStores: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
-    val darkModeEnabled by AppGraph.settings.darkModeEnabled.collectAsState(initial = false)
 
-    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
-    val profileName by AppGraph.settings.profileName.collectAsState(initial = "")
-    val profiles by AppGraph.settings.profiles.collectAsState(initial = emptyList())
-    val activeProfilePhotoUri = remember(activeProfileId, profiles) {
-        profiles.firstOrNull { it.id == activeProfileId }?.photoUri
+    val accountEmail by AppGraph.settings.backendIdentityEmail.collectAsState(initial = "")
+    val uid by AppGraph.settings.uid.collectAsState(initial = "")
+    val accountPictureUri by AppGraph.settings.accountPictureUri.collectAsState(initial = null)
+
+    val accountLabel = remember(accountEmail, uid) {
+        accountEmail.trim().ifBlank { uid.trim() }
     }
+
+    // Home completion button is on the Current trip card.
 
     val menuExpanded = remember { mutableStateOf(false) }
 
-    var showEditProfileDialog by rememberSaveable { mutableStateOf(false) }
-    var showEditProfileNameDialog by rememberSaveable { mutableStateOf(false) }
-    var editedProfileName by rememberSaveable { mutableStateOf("") }
-
     var tileMenuForId by remember { mutableStateOf<String?>(null) }
     var pendingTileIdForImage by remember { mutableStateOf<String?>(null) }
+    var showAddTrip by remember { mutableStateOf(false) }
 
     val homeTilePhotoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -121,102 +107,6 @@ fun HomeScreen(
         },
     )
 
-    val changeProfilePhotoLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-        onResult = { uri: Uri? ->
-            if (uri != null && activeProfileId.isNotBlank()) {
-                runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                    )
-                }
-                scope.launch { AppGraph.settings.updateProfilePhoto(activeProfileId, uri.toString()) }
-            }
-        },
-    )
-
-    if (showEditProfileNameDialog) {
-        AlertDialog(
-            onDismissRequest = { showEditProfileNameDialog = false },
-            title = { Text("Edit profile name") },
-            text = {
-                OutlinedTextField(
-                    value = editedProfileName,
-                    onValueChange = { editedProfileName = it },
-                    label = { Text("Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = editedProfileName.trim().isNotBlank() && activeProfileId.isNotBlank(),
-                    onClick = {
-                        val newName = editedProfileName.trim()
-                        showEditProfileNameDialog = false
-                        scope.launch { AppGraph.settings.updateProfileName(activeProfileId, newName) }
-                    },
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showEditProfileNameDialog = false }) {
-                    Text("Cancel")
-                }
-            },
-        )
-    }
-
-    if (showEditProfileDialog) {
-        AlertDialog(
-            onDismissRequest = { showEditProfileDialog = false },
-            title = { Text("Edit") },
-            text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    TextButton(
-                        enabled = activeProfileId.isNotBlank(),
-                        onClick = {
-                            editedProfileName = profileName
-                            showEditProfileDialog = false
-                            showEditProfileNameDialog = true
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Name")
-                    }
-
-                    TextButton(
-                        enabled = activeProfileId.isNotBlank(),
-                        onClick = {
-                            showEditProfileDialog = false
-                            changeProfilePhotoLauncher.launch(arrayOf("image/*"))
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Profile picture")
-                    }
-
-                    TextButton(
-                        onClick = {
-                            showEditProfileDialog = false
-                            onOpenOnboarding()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Subprofile setup")
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showEditProfileDialog = false }) {
-                    Text("Close")
-                }
-            },
-        )
-    }
-    
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
     fun HomeIconButton(
@@ -309,10 +199,10 @@ fun HomeScreen(
                 onClick = { menuExpanded.value = true },
                 modifier = Modifier.size(44.dp),
             ) {
-                if (!activeProfilePhotoUri.isNullOrBlank()) {
+                if (!accountPictureUri.isNullOrBlank()) {
                     AsyncImage(
-                        model = activeProfilePhotoUri,
-                        contentDescription = "Profile",
+                        model = accountPictureUri,
+                        contentDescription = "Account",
                         modifier = Modifier
                             .size(38.dp)
                             .clip(CircleShape),
@@ -327,7 +217,7 @@ fun HomeScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            profileName.trim().take(1).ifBlank { "?" }.uppercase(),
+                            accountLabel.take(1).ifBlank { "?" }.uppercase(),
                             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
                         )
                     }
@@ -349,18 +239,10 @@ fun HomeScreen(
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
-                        Text(profileName.ifBlank { "Not set" })
+                        Text(accountLabel.ifBlank { "Not signed in" })
                     }
 
                     Divider()
-
-                    DropdownMenuItem(
-                        text = { Text("Edit") },
-                        onClick = {
-                            menuExpanded.value = false
-                            showEditProfileDialog = true
-                        },
-                    )
 
                     DropdownMenuItem(
                         text = { Text("Settings") },
@@ -391,7 +273,7 @@ fun HomeScreen(
                 tileId = HomeTileIds.ManualTrip,
                 iconResId = R.drawable.trip,
                 iconImageUri = homeTileIconImages[HomeTileIds.ManualTrip],
-                onClick = { onAddTrip(false) },
+                onClick = { showAddTrip = true },
                 onLongClick = onAddTripQuickLogWithPhoto,
             )
 
@@ -414,6 +296,13 @@ fun HomeScreen(
                 iconResId = R.drawable.camera,
                 iconImageUri = homeTileIconImages[HomeTileIds.Camera],
                 onClick = onCamera,
+            )
+        }
+
+        if (showAddTrip) {
+            CreateTripModal(
+                onDismiss = { showAddTrip = false },
+                onSaved = { /* handled inside modal */ },
             )
         }
     }

@@ -2,97 +2,6 @@ package com.trimsytrack.data
 
 import java.time.DayOfWeek
 
-enum class IndustryProfile(
-    val id: String,
-    val displayName: String,
-    val defaultCategories: List<String>,
-) {
-    ELECTRICIAN(
-        id = "electrician",
-        displayName = "Elektriker",
-        defaultCategories = listOf(
-            "Elgrossist",
-            "Byggvaruhus",
-            "Postombud",
-            "Paketutlämning",
-            "Förråd",
-            "Verkstad",
-            "Företagsadress",
-        ),
-    ),
-    CARPENTER_BUILD(
-        id = "carpenter_build",
-        displayName = "Snickare / Bygg",
-        defaultCategories = listOf(
-            "Byggvaruhus",
-            "Trähandel",
-            "Byggmaterialgrossist",
-            "Postombud",
-            "Förråd",
-            "Verkstad",
-            "Företagsadress",
-        ),
-    ),
-    PLUMBER_HVAC(
-        id = "plumber_hvac",
-        displayName = "Rörmokare / VVS",
-        defaultCategories = listOf(
-            "VVS-grossist",
-            "Byggvaruhus",
-            "Postombud",
-            "Förråd",
-            "Verkstad",
-            "Företagsadress",
-        ),
-    ),
-    ANTIQUE_DEALER(
-        id = "antique_dealer",
-        displayName = "Antikhandlare",
-        defaultCategories = listOf(
-            "Antikaffär",
-            "Auktionshus",
-            "Loppis",
-            "Second hand-butik",
-            "Postombud",
-            "Speditör",
-            "Återvinningscentral",
-            "Butik",
-            "Företagsadress",
-        ),
-    ),
-    RESELLER(
-        id = "reseller",
-        displayName = "Reseller",
-        defaultCategories = listOf(
-            "Second hand-butik",
-            "Loppis",
-            "Auktionshus",
-            "Postombud",
-            "Speditör",
-            "Packplats",
-            "Företagsadress",
-        ),
-    ),
-    CONSULTANT(
-        id = "consultant",
-        displayName = "Konsult",
-        defaultCategories = listOf(
-            "Kontor",
-            "Kontorshotell",
-            "Coworking space",
-            "Tågstation",
-            "Flygplats",
-            "Hotell",
-            "Företagsadress",
-        ),
-    ),
-}
-
-data class ProfileCategoryGroup(
-    val title: String,
-    val categories: List<String>,
-)
-
 data class RadiusPreset(
     val id: String,
     val label: String,
@@ -112,7 +21,7 @@ data class ActiveHoursPreset(
     val enabledDays: Set<DayOfWeek>,
 )
 
-object ProfileDefaults {
+object PresetDefaults {
     val radiusPresets: List<RadiusPreset> = listOf(
         RadiusPreset(id = "city", label = "Stad", radiusKm = 10),
         RadiusPreset(id = "standard", label = "Standard", radiusKm = 25),
@@ -174,48 +83,4 @@ object ProfileDefaults {
             enabledDays = DayOfWeek.entries.toSet(),
         ),
     )
-
-    fun profileById(id: String): IndustryProfile? = IndustryProfile.entries.firstOrNull { it.id == id }
-
-    fun categoryGroupsFor(profile: IndustryProfile): List<ProfileCategoryGroup> {
-        // Simple, readable grouping for the UI. The actual search terms remain the category strings.
-        return when (profile) {
-            IndustryProfile.ELECTRICIAN -> listOf(
-                ProfileCategoryGroup("Material", listOf("Elgrossist", "Byggvaruhus")),
-                ProfileCategoryGroup("Logistik", listOf("Postombud", "Paketutlämning")),
-                ProfileCategoryGroup("Bas", listOf("Förråd", "Verkstad", "Företagsadress")),
-            )
-
-            IndustryProfile.CARPENTER_BUILD -> listOf(
-                ProfileCategoryGroup("Material", listOf("Byggvaruhus", "Trähandel", "Byggmaterialgrossist")),
-                ProfileCategoryGroup("Logistik", listOf("Postombud")),
-                ProfileCategoryGroup("Bas", listOf("Förråd", "Verkstad", "Företagsadress")),
-            )
-
-            IndustryProfile.PLUMBER_HVAC -> listOf(
-                ProfileCategoryGroup("Material", listOf("VVS-grossist", "Byggvaruhus")),
-                ProfileCategoryGroup("Logistik", listOf("Postombud")),
-                ProfileCategoryGroup("Bas", listOf("Förråd", "Verkstad", "Företagsadress")),
-            )
-
-            IndustryProfile.ANTIQUE_DEALER -> listOf(
-                ProfileCategoryGroup("Inköp", listOf("Antikaffär", "Auktionshus", "Loppis", "Second hand-butik")),
-                ProfileCategoryGroup("Logistik", listOf("Postombud", "Speditör")),
-                ProfileCategoryGroup("Avfall", listOf("Återvinningscentral")),
-                ProfileCategoryGroup("Bas", listOf("Butik", "Företagsadress")),
-            )
-
-            IndustryProfile.RESELLER -> listOf(
-                ProfileCategoryGroup("Inköp", listOf("Second hand-butik", "Loppis", "Auktionshus")),
-                ProfileCategoryGroup("Logistik", listOf("Postombud", "Speditör")),
-                ProfileCategoryGroup("Bas", listOf("Packplats", "Företagsadress")),
-            )
-
-            IndustryProfile.CONSULTANT -> listOf(
-                ProfileCategoryGroup("Arbetsplats", listOf("Kontor", "Kontorshotell", "Coworking space")),
-                ProfileCategoryGroup("Resa", listOf("Tågstation", "Flygplats", "Hotell")),
-                ProfileCategoryGroup("Bas", listOf("Företagsadress")),
-            )
-        }
-    }
 }

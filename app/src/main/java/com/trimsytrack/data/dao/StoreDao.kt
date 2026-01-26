@@ -14,60 +14,60 @@ interface StoreDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun upsertAll(stores: List<StoreEntity>)
 
-    @Query("SELECT * FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
-    suspend fun getByRegion(profileId: String, regionCode: String): List<StoreEntity>
+    @Query("SELECT * FROM stores WHERE uid = :uid AND regionCode = :regionCode")
+    suspend fun getByRegion(uid: String, regionCode: String): List<StoreEntity>
 
-    @Query("SELECT * FROM stores WHERE profileId = :profileId AND isActive = 1")
-    suspend fun getActive(profileId: String): List<StoreEntity>
+    @Query("SELECT * FROM stores WHERE uid = :uid AND isActive = 1")
+    suspend fun getActive(uid: String): List<StoreEntity>
 
-    @Query("UPDATE stores SET isActive = 0 WHERE profileId = :profileId")
-    suspend fun deactivateAll(profileId: String)
+    @Query("UPDATE stores SET isActive = 0 WHERE uid = :uid")
+    suspend fun deactivateAll(uid: String)
 
-    @Query("UPDATE stores SET isActive = 1 WHERE profileId = :profileId AND id IN (:storeIds)")
-    suspend fun activateByIds(profileId: String, storeIds: List<String>)
+    @Query("UPDATE stores SET isActive = 1 WHERE uid = :uid AND id IN (:storeIds)")
+    suspend fun activateByIds(uid: String, storeIds: List<String>)
 
-    @Query("SELECT * FROM stores WHERE profileId = :profileId AND id = :id")
-    suspend fun getById(profileId: String, id: String): StoreEntity?
+    @Query("SELECT * FROM stores WHERE uid = :uid AND id = :id")
+    suspend fun getById(uid: String, id: String): StoreEntity?
 
-    @Query("SELECT COUNT(*) FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
-    suspend fun countByRegion(profileId: String, regionCode: String): Int
+    @Query("SELECT COUNT(*) FROM stores WHERE uid = :uid AND regionCode = :regionCode")
+    suspend fun countByRegion(uid: String, regionCode: String): Int
 
-    @Query("DELETE FROM stores WHERE profileId = :profileId AND regionCode = :regionCode")
-    suspend fun deleteByRegion(profileId: String, regionCode: String)
+    @Query("DELETE FROM stores WHERE uid = :uid AND regionCode = :regionCode")
+    suspend fun deleteByRegion(uid: String, regionCode: String)
 
-    @Query("DELETE FROM stores WHERE profileId = :profileId AND id IN (:storeIds)")
-    suspend fun deleteByIds(profileId: String, storeIds: List<String>)
+    @Query("DELETE FROM stores WHERE uid = :uid AND id IN (:storeIds)")
+    suspend fun deleteByIds(uid: String, storeIds: List<String>)
 
-    @Query("SELECT * FROM stores WHERE profileId = :profileId AND regionCode = :regionCode ORDER BY name")
-    fun observeRegion(profileId: String, regionCode: String): Flow<List<StoreEntity>>
+    @Query("SELECT * FROM stores WHERE uid = :uid AND regionCode = :regionCode ORDER BY name")
+    fun observeRegion(uid: String, regionCode: String): Flow<List<StoreEntity>>
 
-    @Query("SELECT * FROM stores WHERE profileId = :profileId ORDER BY city, name")
-    fun observeAll(profileId: String): Flow<List<StoreEntity>>
+    @Query("SELECT * FROM stores WHERE uid = :uid ORDER BY city, name")
+    fun observeAll(uid: String): Flow<List<StoreEntity>>
 
-    @Query("SELECT * FROM stores WHERE profileId = :profileId")
-    suspend fun listAll(profileId: String): List<StoreEntity>
+    @Query("SELECT * FROM stores WHERE uid = :uid")
+    suspend fun listAll(uid: String): List<StoreEntity>
 
-    @Query("SELECT COUNT(*) FROM stores WHERE profileId = :profileId")
-    suspend fun countAll(profileId: String): Int
+    @Query("SELECT COUNT(*) FROM stores WHERE uid = :uid")
+    suspend fun countAll(uid: String): Int
 
-    @Query("UPDATE stores SET isFavorite = :isFavorite WHERE profileId = :profileId AND id = :storeId")
-    suspend fun setFavorite(profileId: String, storeId: String, isFavorite: Boolean)
+    @Query("UPDATE stores SET isFavorite = :isFavorite WHERE uid = :uid AND id = :storeId")
+    suspend fun setFavorite(uid: String, storeId: String, isFavorite: Boolean)
 
-    @Query("UPDATE stores SET profileId = :profileId WHERE profileId = ''")
-    suspend fun claimUnscoped(profileId: String)
+    @Query("UPDATE stores SET uid = :uid WHERE uid = ''")
+    suspend fun claimUnscoped(uid: String)
 
     @Query(
-        "DELETE FROM stores WHERE profileId = :newProfileId AND id IN (SELECT id FROM stores WHERE profileId = :oldProfileId)"
+        "DELETE FROM stores WHERE uid = :newUid AND id IN (SELECT id FROM stores WHERE uid = :oldUid)"
     )
-    suspend fun deleteConflictsForRekey(oldProfileId: String, newProfileId: String)
+    suspend fun deleteConflictsForRekey(oldUid: String, newUid: String)
 
-    @Query("UPDATE stores SET profileId = :newProfileId WHERE profileId = :oldProfileId")
-    suspend fun updateProfileId(oldProfileId: String, newProfileId: String)
+    @Query("UPDATE stores SET uid = :newUid WHERE uid = :oldUid")
+    suspend fun updateUid(oldUid: String, newUid: String)
 
     @Transaction
-    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String) {
-        if (oldProfileId.isBlank() || newProfileId.isBlank() || oldProfileId == newProfileId) return
-        deleteConflictsForRekey(oldProfileId = oldProfileId, newProfileId = newProfileId)
-        updateProfileId(oldProfileId = oldProfileId, newProfileId = newProfileId)
+    suspend fun rekeyUid(oldUid: String, newUid: String) {
+        if (oldUid.isBlank() || newUid.isBlank() || oldUid == newUid) return
+        deleteConflictsForRekey(oldUid = oldUid, newUid = newUid)
+        updateUid(oldUid = oldUid, newUid = newUid)
     }
 }

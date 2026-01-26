@@ -27,6 +27,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.entities.PingEventEntity
+import com.trimsytrack.data.entities.PingSource
+import com.trimsytrack.data.entities.PingTransition
+import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.data.entities.SyncStatus
 import java.time.Instant
@@ -35,6 +39,8 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,7 +54,7 @@ fun TestPingActionsScreen(
 ) {
     val scope = rememberCoroutineScope()
 
-    val profileId by AppGraph.settings.profileId.collectAsState(initial = "")
+    val uid by AppGraph.settings.uid.collectAsState(initial = "")
     val settingsVehicle by AppGraph.settings.vehicleRegNumber.collectAsState(initial = "")
     val settingsDriver by AppGraph.settings.driverName.collectAsState(initial = "")
     val settingsHomeAddress by AppGraph.settings.businessHomeAddress.collectAsState(initial = "")
@@ -66,6 +72,8 @@ fun TestPingActionsScreen(
 
     val errorMessage = remember { mutableStateOf<String?>(null) }
     val isSaving = remember { mutableStateOf(false) }
+
+    val allStores by AppGraph.storeRepository.observeAllStores().collectAsState(initial = emptyList())
 
     LaunchedEffect(settingsVehicle) {
         if (vehicleNumber.isBlank() && settingsVehicle.isNotBlank()) vehicleNumber = settingsVehicle
@@ -139,12 +147,12 @@ fun TestPingActionsScreen(
             if (lat.isNotBlank() || lng.isNotBlank()) appendLine("Coords: ${lat.ifBlank { "?" }}, ${lng.ifBlank { "?" }}")
         }.trimEnd()
 
-        val pid = profileId.ifBlank { "default" }
+        val effectiveUid = uid.trim()
         val tz = java.time.ZoneId.systemDefault().id
         val endedAt = createdAt
         val startedAt = endedAt.minusSeconds((durationMinutes.toLong().coerceAtLeast(0)) * 60L)
         val entity = TripEntity(
-            profileId = pid,
+            uid = effectiveUid,
             clientRef = null,
             backendId = null,
             syncStatus = SyncStatus.LOCAL_ONLY,
@@ -186,6 +194,72 @@ fun TestPingActionsScreen(
         }
     }
 
+    fun seed4FakePings() {
+        if (isSaving.value) return
+        errorMessage.value = null
+
+        val effectiveUid = uid.trim()
+        if (effectiveUid.isBlank()) {
+            errorMessage.value = "No active UID. Sign in first."
+            return
+        }
+
+        val pool: List<StoreEntity> = allStores
+            .let { stores -> stores.filter { it.isActive }.ifEmpty { stores } }
+
+        val selected = pool.take(4)
+        if (selected.size < 4) {
+            errorMessage.value = "Need at least 4 saved locations to generate pings (have ${pool.size})."
+            return
+        }
+
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now(zone)
+
+        val schedule = listOf(
+            Triple(today, LocalTime.of(9, 10), PingTransition.ENTER),
+            Triple(today, LocalTime.of(11, 35), PingTransition.DWELL),
+            Triple(today.minusDays(1), LocalTime.of(14, 20), PingTransition.ENTER),
+            Triple(today.minusDays(2), LocalTime.of(16, 50), PingTransition.EXIT),
+        )
+
+        val entities = selected.zip(schedule).mapIndexed { index, (store, slot) ->
+            val (day, time, transition) = slot
+            val occurredAt = LocalDateTime.of(day, time).atZone(zone).toInstant()
+
+            PingEventEntity(
+                uid = effectiveUid,
+                storeId = store.id,
+                storeNameSnapshot = store.name,
+                storeLatSnapshot = store.lat,
+                storeLngSnapshot = store.lng,
+                day = day,
+                occurredAt = occurredAt,
+                transition = transition,
+                source = PingSource.GEOFENCE,
+                // Add a small snapshot on a couple of rows so you can test the UI string formatting.
+                routeDistanceFromPrevMeters = if (index % 2 == 0) 12_300 else null,
+                routeDurationFromPrevMinutes = if (index % 2 == 0) 18 else null,
+                routeSource = if (index % 2 == 0) "test" else null,
+                routeComputedAt = if (index % 2 == 0) Instant.now() else null,
+                routeAnchorTripId = null,
+            )
+        }
+
+        isSaving.value = true
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    AppGraph.db.pingDao().insertAll(entities)
+                }
+            } catch (e: Exception) {
+                errorMessage.value = e.message ?: "Failed to insert fake pings"
+            } finally {
+                isSaving.value = false
+            }
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
@@ -204,6 +278,18 @@ fun TestPingActionsScreen(
                 .padding(padding)
                 .padding(16.dp),
         ) {
+            Text("Debug helpers", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = { seed4FakePings() },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isSaving.value,
+            ) {
+                Text(if (isSaving.value) "Working…" else "Insert 4 fake pings")
+            }
+
+            Spacer(Modifier.height(18.dp))
+
             Text("Create one trip", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(10.dp))
 

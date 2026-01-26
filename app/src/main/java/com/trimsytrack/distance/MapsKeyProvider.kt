@@ -4,10 +4,14 @@ import android.content.Context
 import android.content.pm.PackageManager
 
 object MapsKeyProvider {
-    fun getKey(context: Context): String {
+    fun getKeyOrNull(context: Context): String? {
         val ai = context.packageManager.getApplicationInfo(context.packageName, PackageManager.GET_META_DATA)
-        val key = ai.metaData?.getString("com.google.android.geo.API_KEY")
-        require(!key.isNullOrBlank()) { "Missing MAPS_API_KEY (set MAPS_API_KEY in local.properties)" }
-        return key
+        return ai.metaData?.getString("com.google.android.geo.API_KEY")?.trim()?.takeIf { it.isNotBlank() }
     }
+
+    /**
+     * Kept for backward compatibility with existing call sites.
+     * Returns an empty string when no key is configured.
+     */
+    fun getKey(context: Context): String = getKeyOrNull(context).orEmpty()
 }

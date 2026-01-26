@@ -51,12 +51,12 @@ class VisitedStoresProvider : ContentProvider() {
     }
 
     private fun queryMeta(): Cursor {
-        val profileId = runBlocking { AppGraph.settings.profileId.first().ifBlank { "default" } }
+        val uid = runBlocking { AppGraph.settings.uid.first().ifBlank { "default" } }
 
         // Keep meta deterministic and lightweight: one DB statement for max+count.
         val db = AppGraph.db.openHelper.readableDatabase
         val sql = "SELECT COUNT(*) AS c, COALESCE(MAX(lastVisitedAt), 0) AS maxLast FROM visited_stores WHERE profileId = ?"
-        val raw = db.query(sql, arrayOf(profileId))
+        val raw = db.query(sql, arrayOf(uid))
 
         var count = 0
         var maxLast = 0L
@@ -78,7 +78,7 @@ class VisitedStoresProvider : ContentProvider() {
     }
 
     private fun queryStores(uri: Uri): Cursor {
-        val profileId = runBlocking { AppGraph.settings.profileId.first().ifBlank { "default" } }
+        val uid = runBlocking { AppGraph.settings.uid.first().ifBlank { "default" } }
         val sinceMillis = uri.getQueryParameter("since")?.toLongOrNull() ?: 0L
 
         val db = AppGraph.db.openHelper.readableDatabase
@@ -106,7 +106,7 @@ class VisitedStoresProvider : ContentProvider() {
             append(" ORDER BY v.storeId COLLATE NOCASE ASC")
         }
 
-        val args = if (sinceMillis > 0L) arrayOf(profileId, sinceMillis.toString()) else arrayOf(profileId)
+        val args = if (sinceMillis > 0L) arrayOf(uid, sinceMillis.toString()) else arrayOf(uid)
 
         val raw = db.query(sql, args)
 
@@ -138,12 +138,12 @@ class VisitedStoresProvider : ContentProvider() {
                 val version = computeMonotonicVersion(lastVisitedAtMillis = lastVisitedAt, visitCount = visitCount)
 
                 cursor.addRow(
-                    arrayOf(
+                    listOf<Any?>(
                         storeId,
                         version,
                         lastVisitedAt,
                         storeName,
-                        profileId,
+                        uid,
                     )
                 )
             }

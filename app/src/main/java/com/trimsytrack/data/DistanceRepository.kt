@@ -52,59 +52,69 @@ class DistanceRepository(
         endLocationId: String? = null,
     ): RouteMetrics {
         return withContext(Dispatchers.IO) {
-            val profileId = settings.profileId.first().ifBlank { "default" }
+            // Scope cache by backend identity uid.
+            // If uid isn't available yet (handshake not completed), compute but don't persist under a placeholder.
+            val uid = settings.uid.first().trim()
             // 1) Prefer stable location IDs when present.
             if (!startLocationId.isNullOrBlank() && !endLocationId.isNullOrBlank()) {
-                val cachedById = dao.findByLocationIds(profileId, startLocationId, endLocationId, "DRIVE")
-                if (cachedById != null) {
-                    return@withContext RouteMetrics(
-                        distanceMeters = cachedById.distanceMeters,
-                        durationMinutes = cachedById.durationMinutes,
-                        routePolyline = cachedById.routePolyline,
-                        source = cachedById.source,
-                    )
+                if (uid.isNotBlank()) {
+                    val cachedById = dao.findByLocationIds(uid, startLocationId, endLocationId, "DRIVE")
+                    if (cachedById != null) {
+                        return@withContext RouteMetrics(
+                            distanceMeters = cachedById.distanceMeters,
+                            durationMinutes = cachedById.durationMinutes,
+                            routePolyline = cachedById.routePolyline,
+                            source = cachedById.source,
+                        )
+                    }
                 }
             }
 
             // 2) Fallback to coordinate quantization for cases without stable IDs.
             val key = QuantizedLatLngPair(startLat, startLng, destLat, destLng)
-            val cached = dao.find(profileId, key.startLatE5, key.startLngE5, key.destLatE5, key.destLngE5, "DRIVE")
-            if (cached != null) {
-                return@withContext RouteMetrics(
-                    distanceMeters = cached.distanceMeters,
-                    durationMinutes = cached.durationMinutes,
-                    routePolyline = cached.routePolyline,
-                    source = cached.source,
-                )
+            if (uid.isNotBlank()) {
+                val cached = dao.find(uid, key.startLatE5, key.startLngE5, key.destLatE5, key.destLngE5, "DRIVE")
+                if (cached != null) {
+                    return@withContext RouteMetrics(
+                        distanceMeters = cached.distanceMeters,
+                        durationMinutes = cached.durationMinutes,
+                        routePolyline = cached.routePolyline,
+                        source = cached.source,
+                    )
+                }
             }
 
             // 3) Cache miss => compute externally ONCE and persist.
             val computed = routes.computeDrivingRoute(startLat, startLng, destLat, destLng)
             val minutes = ceil(computed.durationSeconds / 60.0).toInt().coerceAtLeast(0)
 
-            dao.upsert(
-                DistanceCacheEntity(
-                    profileId = profileId,
-                    startLocationId = startLocationId,
-                    endLocationId = endLocationId,
-                    startLatE5 = key.startLatE5,
-                    startLngE5 = key.startLngE5,
-                    destLatE5 = key.destLatE5,
-                    destLngE5 = key.destLngE5,
-                    travelMode = "DRIVE",
-                    distanceMeters = computed.distanceMeters,
-                    durationMinutes = minutes,
-                    routePolyline = computed.routePolyline,
-                    source = "GOOGLE",
-                    createdAt = Instant.now(),
+            // Only persist true Google results. Fallback estimates should be re-attempted later,
+            // because Routes API failures can be intermittent.
+            if (uid.isNotBlank() && computed.source == "GOOGLE") {
+                dao.upsert(
+                    DistanceCacheEntity(
+                        uid = uid,
+                        startLocationId = startLocationId,
+                        endLocationId = endLocationId,
+                        startLatE5 = key.startLatE5,
+                        startLngE5 = key.startLngE5,
+                        destLatE5 = key.destLatE5,
+                        destLngE5 = key.destLngE5,
+                        travelMode = "DRIVE",
+                        distanceMeters = computed.distanceMeters,
+                        durationMinutes = minutes,
+                        routePolyline = computed.routePolyline,
+                        source = computed.source,
+                        createdAt = Instant.now(),
+                    )
                 )
-            )
+            }
 
             RouteMetrics(
                 distanceMeters = computed.distanceMeters,
                 durationMinutes = minutes,
                 routePolyline = computed.routePolyline,
-                source = "GOOGLE",
+                source = computed.source,
             )
         }
     }

@@ -1,4 +1,11 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.TrimsyTRACK.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@android:color/black</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+        <item name="postSplashScreenTheme">@style/Theme.TrimsyTRACK</item>
+    </style>
+
     <style name="Theme.TrimsyTRACK" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/black</item>
         <item name="android:navigationBarColor">@android:color/black</item>

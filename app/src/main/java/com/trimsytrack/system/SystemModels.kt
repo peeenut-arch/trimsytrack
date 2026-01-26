@@ -1,7 +1,5 @@
 package com.trimsytrack.system
 
-import kotlinx.serialization.json.JsonElement
-
 /**
  * Startup handshake contract (minimal fields the client needs for routing).
  *
@@ -9,21 +7,39 @@ import kotlinx.serialization.json.JsonElement
  */
 data class HandshakeResult(
     val protocolVersion: Int,
-    val normalizedEmail: String,
-    val profileExists: Boolean,
-    val profileId: String?,
+    val protocol: BackendProtocolInfo?,
+    val writesEnabled: Boolean,
+    val safetyModeEnabled: Boolean,
+    val safetyModeReason: String?,
+    val identityUid: String,
+    val identityEmail: String?,
+    val deployment: BackendDeploymentInfo?,
+    val capabilities: BackendCapabilities?,
+    val clientRequestId: String?,
 )
 
-data class CachedProfile(
-    val raw: JsonElement,
+/** Backend-advertised feature flags (optional; missing means unknown). */
+data class BackendCapabilities(
+    val trackEvents: Boolean?,
 )
 
-data class CachedProfileMedia(
-    val raw: JsonElement,
+data class BackendProtocolInfo(
+    val current: Int,
+    val minSupported: Int,
+    val maxSupported: Int,
+)
+
+data class BackendDeploymentInfo(
+    val service: String?,
+    val revision: String?,
+    val functionTarget: String?,
+    val serverTimeIso: String?,
 )
 
 enum class HardBlockCode {
     EMAIL_REQUIRED,
-    PROFILE_REQUIRED,
     ACCOUNT_CONFLICT,
+    CLIENT_UPDATE_REQUIRED,
+    UID_DATA_MISSING,
+    UID_DELETED,
 }

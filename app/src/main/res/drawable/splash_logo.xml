@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      SplashScreen expects an icon-like drawable; wrapping the logo as a centered bitmap
+      prevents non-square logos from being stretched.
+    -->
+    <item android:gravity="center">
+        <bitmap
+            android:src="@drawable/logo"
+            android:gravity="center" />
+    </item>
+
+</layer-list>

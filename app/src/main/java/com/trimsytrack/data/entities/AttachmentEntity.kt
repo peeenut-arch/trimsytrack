@@ -8,13 +8,13 @@ import java.time.Instant
 @Entity(
     tableName = "attachments",
     indices = [
-        Index(value = ["profileId"], unique = false),
+        Index(value = ["uid"], unique = false),
         Index(value = ["tripId"], unique = false),
     ]
 )
 data class AttachmentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val profileId: String,
+    val uid: String,
     val tripId: Long,
 
     /** Stable UUID for this evidence item's metadata (universal ID). */

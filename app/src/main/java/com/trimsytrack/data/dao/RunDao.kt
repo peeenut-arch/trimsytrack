@@ -15,18 +15,21 @@ interface RunDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(entities: List<RunEntity>): List<Long>
 
-    @Query("SELECT * FROM runs WHERE profileId = :profileId AND day = :day ORDER BY createdAt DESC")
-    suspend fun getByDay(profileId: String, day: LocalDate): List<RunEntity>
+    @Query("SELECT * FROM runs WHERE uid = :uid AND day = :day ORDER BY createdAt DESC")
+    suspend fun getByDay(uid: String, day: LocalDate): List<RunEntity>
 
-    @Query("SELECT * FROM runs WHERE profileId = :profileId")
-    suspend fun listAll(profileId: String): List<RunEntity>
+    @Query("SELECT * FROM runs WHERE uid = :uid")
+    suspend fun listAll(uid: String): List<RunEntity>
 
-    @Query("SELECT COUNT(*) FROM runs WHERE profileId = :profileId")
-    suspend fun countAll(profileId: String): Int
+    @Query("SELECT COUNT(*) FROM runs WHERE uid = :uid")
+    suspend fun countAll(uid: String): Int
 
-    @Query("UPDATE runs SET profileId = :profileId WHERE profileId = ''")
-    suspend fun claimUnscoped(profileId: String)
+    @Query("DELETE FROM runs WHERE uid = :uid AND id = :id")
+    suspend fun deleteById(uid: String, id: Long)
 
-    @Query("UPDATE runs SET profileId = :newProfileId WHERE profileId = :oldProfileId")
-    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
+    @Query("UPDATE runs SET uid = :uid WHERE uid = ''")
+    suspend fun claimUnscoped(uid: String)
+
+    @Query("UPDATE runs SET uid = :newUid WHERE uid = :oldUid")
+    suspend fun rekeyUid(oldUid: String, newUid: String)
 }

@@ -41,7 +41,7 @@ object KorjournalExporter {
 
         val tripList = trips.listTripsBetweenDays(startDay, endDay)
 
-        val profileId = settings.profileId.first().ifBlank { "default" }
+        val uid = settings.uid.first().ifBlank { "default" }
 
         val vehicleRegNumber = settings.vehicleRegNumber.first()
         val driverName = settings.driverName.first()
@@ -71,7 +71,7 @@ object KorjournalExporter {
         }
 
         fun exportSyfte(raw: String): String {
-            val v = raw.trim()
+            val v = SettingsStore.normalizeBusinessPurpose(raw)
             return v.ifBlank { SettingsStore.DEFAULT_BUSINESS_PURPOSE }
         }
 
@@ -117,7 +117,7 @@ object KorjournalExporter {
                     val tz = runCatching { ZoneId.of(t.timeZoneId) }.getOrElse { ZoneId.systemDefault() }
                     val startTime = runCatching { t.startedAt.atZone(tz).toLocalTime().format(timeFormatter) }.getOrDefault("")
                     val endTime = runCatching { t.endedAt.atZone(tz).toLocalTime().format(timeFormatter) }.getOrDefault("")
-                    val evidenceCount = runCatching { AppGraph.db.attachmentDao().countByTrip(profileId, t.id) }.getOrDefault(0)
+                    val evidenceCount = runCatching { AppGraph.db.attachmentDao().countByTrip(uid, t.id) }.getOrDefault(0)
 
                     val startAddress = exportPlaceLabel(t.startLabelSnapshot)
                     val endAddress = exportPlaceLabel(t.storeNameSnapshot)

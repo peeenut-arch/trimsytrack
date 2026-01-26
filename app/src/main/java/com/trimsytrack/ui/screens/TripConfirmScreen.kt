@@ -18,20 +18,27 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import com.trimsytrack.ui.components.TrimsyWhiteRadioButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.trimsytrack.ui.vm.TripConfirmViewModel
 import com.trimsytrack.data.SettingsStore
+import com.trimsytrack.debug.DebuggReportBuilder
+import kotlinx.coroutines.launch
 
 private enum class ConfirmAction { AddTrip, AddTripWithMedia }
 
@@ -41,13 +48,22 @@ fun TripConfirmScreen(
     promptId: Long,
     onAddTrip: (Long) -> Unit,
     onAddTripWithMedia: (Long) -> Unit,
+    onRemoved: () -> Unit,
 ) {
     val vm: TripConfirmViewModel = viewModel(factory = TripConfirmViewModel.factory(promptId))
 
     val state by vm.state.collectAsState()
     val notes = remember { mutableStateOf("") }
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
     val pendingConfirmAction = remember { mutableStateOf<ConfirmAction?>(null) }
+    var showRemoveDialog by remember { mutableStateOf(false) }
+    var deleteConfirmText by remember { mutableStateOf("") }
+    var showDebugg by remember { mutableStateOf(false) }
+    var debuggText by remember { mutableStateOf("") }
+    var debuggLoading by remember { mutableStateOf(false) }
+    var debuggError by remember { mutableStateOf<String?>(null) }
 
     fun showAddedToast() {
         runCatching {
@@ -148,7 +164,7 @@ fun TripConfirmScreen(
                                         isCustom = false
                                     },
                             ) {
-                                RadioButton(
+                                TrimsyWhiteRadioButton(
                                     selected = !isCustom && preset == SettingsStore.DEFAULT_BUSINESS_PURPOSE,
                                     onClick = {
                                         preset = SettingsStore.DEFAULT_BUSINESS_PURPOSE
@@ -167,7 +183,7 @@ fun TripConfirmScreen(
                                         isCustom = false
                                     },
                             ) {
-                                RadioButton(
+                                TrimsyWhiteRadioButton(
                                     selected = !isCustom && preset == SettingsStore.SHIPPING_BUSINESS_PURPOSE,
                                     onClick = {
                                         preset = SettingsStore.SHIPPING_BUSINESS_PURPOSE
@@ -175,7 +191,7 @@ fun TripConfirmScreen(
                                     },
                                 )
                                 Spacer(Modifier.width(8.dp))
-                                Text("Frakt till postombud", modifier = Modifier.padding(top = 12.dp))
+                                Text(SettingsStore.POSTOMBUD_FRAKT_BUSINESS_PURPOSE, modifier = Modifier.padding(top = 12.dp))
                             }
 
                             Row(
@@ -183,10 +199,7 @@ fun TripConfirmScreen(
                                     .fillMaxWidth()
                                     .clickable { isCustom = true },
                             ) {
-                                RadioButton(
-                                    selected = isCustom,
-                                    onClick = { isCustom = true },
-                                )
+                                TrimsyWhiteRadioButton(selected = isCustom, onClick = { isCustom = true })
                                 Spacer(Modifier.width(8.dp))
                                 Text("Eget", modifier = Modifier.padding(top = 12.dp))
                             }
@@ -205,7 +218,7 @@ fun TripConfirmScreen(
                         }
                     },
                     confirmButton = {
-                        Button(
+                        TextButton(
                             enabled = canConfirmPurpose,
                             onClick = {
                                 val purpose = if (isCustom) customText.trim() else preset
@@ -228,7 +241,7 @@ fun TripConfirmScreen(
                 )
             }
 
-            Button(
+            TextButton(
                 enabled = state.canConfirm,
                 onClick = {
                     pendingConfirmAction.value = ConfirmAction.AddTrip
@@ -240,7 +253,7 @@ fun TripConfirmScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            Button(
+            TextButton(
                 enabled = state.canConfirm,
                 onClick = {
                     pendingConfirmAction.value = ConfirmAction.AddTripWithMedia
@@ -248,6 +261,65 @@ fun TripConfirmScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (state.isConfirming) "Saving…" else "Add trip & media")
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            TextButton(
+                enabled = !state.isConfirming,
+                onClick = {
+                    deleteConfirmText = ""
+                    showRemoveDialog = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Remove place")
+            }
+
+            if (showRemoveDialog) {
+                val canDelete = deleteConfirmText.trim().uppercase() == "DELETE" && !state.isConfirming
+                AlertDialog(
+                    onDismissRequest = { if (!state.isConfirming) showRemoveDialog = false },
+                    title = { Text("Remove place?") },
+                    text = {
+                        Column {
+                            Text(
+                                "This will remove the place from your store list and stop it from being used for ping/geofence tracking.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text("Type DELETE to confirm:")
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = deleteConfirmText,
+                                onValueChange = { deleteConfirmText = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                placeholder = { Text("DELETE") },
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = canDelete,
+                            onClick = {
+                                vm.removePlace {
+                                    showRemoveDialog = false
+                                    android.widget.Toast
+                                        .makeText(context, "Place removed", android.widget.Toast.LENGTH_SHORT)
+                                        .show()
+                                    onRemoved()
+                                }
+                            },
+                        ) { Text("Yes, remove") }
+                    },
+                    dismissButton = {
+                        TextButton(enabled = !state.isConfirming, onClick = { showRemoveDialog = false }) {
+                            Text("No")
+                        }
+                    },
+                )
             }
 
             if (state.error != null) {
@@ -258,6 +330,97 @@ fun TripConfirmScreen(
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
                 )
             }
+
+            Spacer(Modifier.height(14.dp))
+
+            OutlinedButton(
+                enabled = !state.isConfirming,
+                onClick = {
+                    showDebugg = true
+                    debuggLoading = true
+                    debuggError = null
+                    debuggText = ""
+                    scope.launch {
+                        runCatching { DebuggReportBuilder.build() }
+                            .onSuccess {
+                                debuggText = it
+                                debuggLoading = false
+                            }
+                            .onFailure { t ->
+                                debuggError = t.message ?: t.javaClass.simpleName
+                                debuggLoading = false
+                            }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Debugg")
+            }
+        }
+
+        if (showDebugg) {
+            AlertDialog(
+                onDismissRequest = { if (!debuggLoading) showDebugg = false },
+                title = { Text("Debugg") },
+                text = {
+                    Column {
+                        if (debuggLoading) {
+                            Text("Collecting logs…")
+                        } else if (debuggError != null) {
+                            Text(
+                                "Failed to build report: ${debuggError}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            // Keep it simple: show as plain text field.
+                            OutlinedTextField(
+                                value = debuggText,
+                                onValueChange = {},
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Report") },
+                                readOnly = true,
+                                minLines = 10,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        enabled = !debuggLoading && debuggText.isNotBlank(),
+                        onClick = {
+                            clipboard.setText(AnnotatedString(debuggText))
+                            android.widget.Toast
+                                .makeText(context, "Copied", android.widget.Toast.LENGTH_SHORT)
+                                .show()
+                        },
+                    ) {
+                        Text("Copy")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        enabled = !debuggLoading,
+                        onClick = {
+                            debuggLoading = true
+                            debuggError = null
+                            scope.launch {
+                                runCatching { DebuggReportBuilder.build() }
+                                    .onSuccess {
+                                        debuggText = it
+                                        debuggLoading = false
+                                    }
+                                    .onFailure { t ->
+                                        debuggError = t.message ?: t.javaClass.simpleName
+                                        debuggLoading = false
+                                    }
+                            }
+                        },
+                    ) {
+                        Text("Refresh")
+                    }
+                },
+            )
         }
     }
 }

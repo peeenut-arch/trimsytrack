@@ -44,6 +44,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.entities.AttachmentEntity
+import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.ui.vm.TripDetailViewModel
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +74,11 @@ fun TripDetailScreen(
     val trip by vm.trip.collectAsState()
     val attachments by AppGraph.tripRepository.observeAttachments(tripId).collectAsState(initial = emptyList())
 
+    val tripNumber = remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(tripId) {
+        tripNumber.value = runCatching { AppGraph.tripRepository.completedTripNumberForTrip(tripId) }.getOrNull()
+    }
+
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val importMessage = remember { mutableStateOf<String?>(null) }
@@ -83,7 +89,7 @@ fun TripDetailScreen(
     val feeInputError = remember { mutableStateOf<String?>(null) }
     val pendingFeeMinor = remember { mutableStateOf<Int?>(null) }
 
-    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
+    val showSyncRejectedDialog = remember { mutableStateOf(false) }
 
     val uploadFeePhotoLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -94,7 +100,6 @@ fun TripDetailScreen(
                 return@rememberLauncherForActivityResult
             }
 
-            val profileId = activeProfileId.ifBlank { "default" }
             val t = trip
             if (t == null) {
                 importMessage.value = "Trip not loaded yet. Try again."
@@ -106,7 +111,7 @@ fun TripDetailScreen(
                 try {
                     val baseEntity = importDocumentToTripFiles(
                         context = context,
-                        profileId = profileId,
+                        uid = t.uid,
                         tripId = tripId,
                         tripDay = t.day,
                         tripStoreNameSnapshot = t.storeNameSnapshot,
@@ -143,7 +148,10 @@ fun TripDetailScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
-                title = { Text("Trip #$tripId") },
+                title = {
+                    val n = tripNumber.value ?: 0
+                    Text(if (n > 0) "Trip #$n" else "Trip")
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
@@ -210,6 +218,62 @@ fun TripDetailScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )
+
+                if (t.syncStatus == SyncStatus.REJECTED) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(
+                            text = "Sync rejected — needs your attention",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { showSyncRejectedDialog.value = true }) {
+                            Text("Details")
+                        }
+                    }
+
+                    if (showSyncRejectedDialog.value) {
+                        val machine = t.syncErrorMachineCode?.takeIf { it.isNotBlank() }
+                        val msg = t.syncErrorMessage?.takeIf { it.isNotBlank() }
+
+                        AlertDialog(
+                            onDismissRequest = { showSyncRejectedDialog.value = false },
+                            title = { Text("Trip rejected by backend") },
+                            text = {
+                                Column {
+                                    Text(
+                                        msg ?: "The backend rejected this trip. You can edit the trip and retry.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                    if (machine != null) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Text(
+                                            "Reason code: $machine",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                                        )
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showSyncRejectedDialog.value = false
+                                        vm.retrySync()
+                                    }
+                                ) {
+                                    Text("Retry sync")
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showSyncRejectedDialog.value = false }) {
+                                    Text("Close")
+                                }
+                            },
+                        )
+                    }
+                }
 
                 Spacer(Modifier.height(6.dp))
 
@@ -461,7 +525,7 @@ private fun formatMinorAmount(minor: Int): String {
 
 private fun importReceiptToAppFiles(
     context: android.content.Context,
-    profileId: String,
+    uid: String,
     tripId: Long,
     tripDay: java.time.LocalDate?,
     tripStoreNameSnapshot: String?,
@@ -515,7 +579,7 @@ private fun importReceiptToAppFiles(
     )
 
     return AttachmentEntity(
-        profileId = profileId,
+        uid = uid,
         tripId = tripId,
         uri = contentUri.toString(),
         mimeType = mimeType,

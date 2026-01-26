@@ -11,10 +11,11 @@ import androidx.compose.ui.unit.dp
 
 private val TrimsyLightColors = lightColorScheme(
     // Home tile accents (Manual / Review / Journal)
-    primary = Color(0xFF2F62FF),
+    // No blue: keep actions neutral.
+    primary = Color(0xFF111111),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFF244FE0),
-    onPrimaryContainer = Color.White,
+    primaryContainer = Color(0xFFEEEEEE),
+    onPrimaryContainer = Color(0xFF111111),
 
     secondary = Color(0xFF2ECC71),
     onSecondary = Color.Black,
@@ -42,11 +43,11 @@ private val TrimsyLightColors = lightColorScheme(
 )
 
 private val TrimsyDarkColors = darkColorScheme(
-    // Keep the same brand accents, but use a dark surface/background.
-    primary = Color(0xFF2F62FF),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFF244FE0),
-    onPrimaryContainer = Color.White,
+    // No blue: keep actions neutral on dark UI.
+    primary = Color.White,
+    onPrimary = Color(0xFF0F1115),
+    primaryContainer = Color(0xFF1B2130),
+    onPrimaryContainer = Color(0xFFEAECEF),
 
     secondary = Color(0xFF2ECC71),
     onSecondary = Color.Black,

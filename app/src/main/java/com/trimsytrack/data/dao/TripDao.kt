@@ -7,6 +7,7 @@ import androidx.room.Query
 import androidx.room.Update
 import com.trimsytrack.data.entities.TripEntity
 import kotlinx.coroutines.flow.Flow
+import java.time.Instant
 import java.time.LocalDate
 
 data class StoreVisitCount(
@@ -25,24 +26,27 @@ interface TripDao {
     @Update
     suspend fun update(entity: TripEntity)
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId AND id = :id")
-    suspend fun getById(profileId: String, id: Long): TripEntity?
+    @Query("SELECT * FROM trips WHERE uid = :uid AND id = :id")
+    suspend fun getById(uid: String, id: Long): TripEntity?
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId AND day = :day ORDER BY createdAt DESC")
-    fun observeByDay(profileId: String, day: LocalDate): Flow<List<TripEntity>>
+    @Query("SELECT * FROM trips WHERE uid = :uid AND id = :id")
+    fun observeById(uid: String, id: Long): Flow<TripEntity?>
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId ORDER BY day DESC, createdAt DESC")
-    fun observeAll(profileId: String): Flow<List<TripEntity>>
+    @Query("SELECT * FROM trips WHERE uid = :uid AND day = :day ORDER BY createdAt DESC")
+    fun observeByDay(uid: String, day: LocalDate): Flow<List<TripEntity>>
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId ORDER BY day DESC, createdAt DESC LIMIT :limit")
-    fun observeRecent(profileId: String, limit: Int): Flow<List<TripEntity>>
+    @Query("SELECT * FROM trips WHERE uid = :uid ORDER BY day DESC, createdAt DESC")
+    fun observeAll(uid: String): Flow<List<TripEntity>>
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId ORDER BY day DESC, createdAt DESC LIMIT :limit")
-    suspend fun listRecent(profileId: String, limit: Int): List<TripEntity>
+    @Query("SELECT * FROM trips WHERE uid = :uid ORDER BY day DESC, createdAt DESC LIMIT :limit")
+    fun observeRecent(uid: String, limit: Int): Flow<List<TripEntity>>
+
+    @Query("SELECT * FROM trips WHERE uid = :uid ORDER BY day DESC, createdAt DESC LIMIT :limit")
+    suspend fun listRecent(uid: String, limit: Int): List<TripEntity>
 
     @Query(
         "SELECT * FROM trips " +
-            "WHERE profileId = :profileId " +
+            "WHERE uid = :uid " +
             "AND (" +
                 "citySnapshot IS NULL OR citySnapshot = '' " +
                 "OR citySnapshot LIKE '%län%' OR citySnapshot LIKE '%Län%' OR citySnapshot LIKE '%county%' OR citySnapshot LIKE '%County%' " +
@@ -53,32 +57,65 @@ interface TripDao {
             "ORDER BY day DESC, createdAt DESC " +
             "LIMIT :limit"
     )
-    suspend fun listRecentMissingCitySnapshot(profileId: String, limit: Int): List<TripEntity>
+    suspend fun listRecentMissingCitySnapshot(uid: String, limit: Int): List<TripEntity>
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId AND day >= :startDay AND day <= :endDay ORDER BY day ASC, createdAt ASC")
-    suspend fun listBetweenDays(profileId: String, startDay: LocalDate, endDay: LocalDate): List<TripEntity>
+    @Query("SELECT * FROM trips WHERE uid = :uid AND day >= :startDay AND day <= :endDay ORDER BY day ASC, createdAt ASC")
+    suspend fun listBetweenDays(uid: String, startDay: LocalDate, endDay: LocalDate): List<TripEntity>
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId AND day = :day ORDER BY createdAt DESC LIMIT 1")
-    suspend fun getLatestForDay(profileId: String, day: LocalDate): TripEntity?
+    @Query("SELECT * FROM trips WHERE uid = :uid AND day = :day ORDER BY createdAt DESC LIMIT 1")
+    suspend fun getLatestForDay(uid: String, day: LocalDate): TripEntity?
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId AND storeId = :storeId ORDER BY createdAt DESC LIMIT 1")
-    suspend fun getLatestForStore(profileId: String, storeId: String): TripEntity?
+    @Query("SELECT * FROM trips WHERE uid = :uid AND day = :day ORDER BY createdAt ASC")
+    suspend fun listByDay(uid: String, day: LocalDate): List<TripEntity>
 
-    @Query("SELECT * FROM trips WHERE profileId = :profileId")
-    suspend fun listAll(profileId: String): List<TripEntity>
+    @Query("UPDATE trips SET runId = :runId WHERE uid = :uid AND id IN (:ids)")
+    suspend fun setRunIdForTrips(uid: String, runId: Long, ids: List<Long>)
 
-    @Query("SELECT COUNT(*) FROM trips WHERE profileId = :profileId")
-    suspend fun countAll(profileId: String): Int
+    @Query("SELECT COUNT(DISTINCT runId) FROM trips WHERE uid = :uid AND endPlaceType = 'HOME' AND runId IS NOT NULL")
+    suspend fun countCompletedRuns(uid: String): Int
 
-    @Query("SELECT storeId as storeId, COUNT(*) as count FROM trips WHERE profileId = :profileId GROUP BY storeId")
-    suspend fun getStoreVisitCounts(profileId: String): List<StoreVisitCount>
+    @Query("SELECT * FROM trips WHERE uid = :uid AND storeId = :storeId ORDER BY createdAt DESC LIMIT 1")
+    suspend fun getLatestForStore(uid: String, storeId: String): TripEntity?
 
-    @Query("DELETE FROM trips WHERE profileId = :profileId AND id = :id")
-    suspend fun deleteById(profileId: String, id: Long)
+    @Query("SELECT * FROM trips WHERE uid = :uid")
+    suspend fun listAll(uid: String): List<TripEntity>
 
-    @Query("UPDATE trips SET profileId = :profileId WHERE profileId = ''")
-    suspend fun claimUnscoped(profileId: String)
+    @Query(
+        "SELECT * FROM trips " +
+            "WHERE uid = :uid " +
+            "AND (endedAt < :endedAt OR (endedAt = :endedAt AND id < :id)) " +
+            "ORDER BY endedAt DESC, id DESC " +
+            "LIMIT 1"
+    )
+    suspend fun getPreviousByEnd(uid: String, endedAt: Instant, id: Long): TripEntity?
 
-    @Query("UPDATE trips SET profileId = :newProfileId WHERE profileId = :oldProfileId")
-    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String)
+    @Query(
+        "SELECT * FROM trips " +
+            "WHERE uid = :uid " +
+            "AND endedAt <= :at " +
+            "ORDER BY endedAt DESC, id DESC " +
+            "LIMIT 1"
+    )
+    suspend fun getLatestEndingAtOrBefore(uid: String, at: Instant): TripEntity?
+
+    @Query("SELECT COUNT(*) FROM trips WHERE uid = :uid")
+    suspend fun countAll(uid: String): Int
+
+    @Query("SELECT COUNT(*) FROM trips WHERE uid = :uid AND syncStatus = 'REJECTED'")
+    suspend fun countRejected(uid: String): Int
+
+    @Query("SELECT * FROM trips WHERE uid = :uid AND syncStatus = 'REJECTED' ORDER BY day DESC, createdAt DESC LIMIT :limit")
+    suspend fun listRejected(uid: String, limit: Int): List<TripEntity>
+
+    @Query("SELECT storeId as storeId, COUNT(*) as count FROM trips WHERE uid = :uid GROUP BY storeId")
+    suspend fun getStoreVisitCounts(uid: String): List<StoreVisitCount>
+
+    @Query("DELETE FROM trips WHERE uid = :uid AND id = :id")
+    suspend fun deleteById(uid: String, id: Long)
+
+    @Query("UPDATE trips SET uid = :uid WHERE uid = ''")
+    suspend fun claimUnscoped(uid: String)
+
+    @Query("UPDATE trips SET uid = :newUid WHERE uid = :oldUid")
+    suspend fun rekeyUid(oldUid: String, newUid: String)
 }

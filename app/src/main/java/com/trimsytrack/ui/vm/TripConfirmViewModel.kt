@@ -1,12 +1,10 @@
 package com.trimsytrack.ui.vm
 
-import android.annotation.SuppressLint
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.SettingsStore
@@ -24,6 +22,8 @@ import java.time.LocalDate
 import kotlinx.coroutines.flow.first
 import java.time.ZoneId
 import kotlin.math.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class TripConfirmState(
     val storeName: String? = null,
@@ -47,8 +47,6 @@ class TripConfirmViewModel(
     app: Application,
     private val promptId: Long,
 ) : AndroidViewModel(app) {
-
-    private val fused = LocationServices.getFusedLocationProviderClient(app)
 
     private val _state = MutableStateFlow(TripConfirmState())
     val state: StateFlow<TripConfirmState> = _state
@@ -91,20 +89,27 @@ class TripConfirmViewModel(
             }.getOrDefault(false)
 
             val last = AppGraph.tripRepository.latestTripForDay(day)
+            val homeConfigured = (businessHomeLat != null && businessHomeLng != null)
+            val runOpen = (last != null && last.endPlaceType != PlaceType.HOME)
+
+            // New rule:
+            // - If the latest trip ended at HOME (or no trips yet), next trip should start from Home.
+            // - If the latest trip did not end at HOME, next trip should start from that last stop.
             val canUseLast = when {
                 last == null -> false
-                businessHomeLat == null || businessHomeLng == null -> true
-                else -> hasBusinessHomeTripToday
+                !homeConfigured -> true
+                else -> runOpen
             }
 
             _state.update { prev ->
                 val homeLat = businessHomeLat
                 val homeLng = businessHomeLng
 
-                // Required behavior:
-                // - First confirmed trip of the day must start at Business Home (when configured).
-                // - Only after a Business-Home-start trip exists for the day may we start from last store/current.
-                val autoStartFromHome = (homeLat != null && homeLng != null && !hasBusinessHomeTripToday)
+                // Required behavior (run chaining):
+                // - When Home is configured, a "run" is considered closed if the latest trip ended at HOME.
+                // - When the run is closed, default start is Business Home.
+                // - When the run is open, default start is the last stop.
+                val autoStartFromHome = (homeLat != null && homeLng != null && !runOpen)
 
                 val autoStartLabel = when {
                     canUseLast -> "Last store: ${last!!.storeNameSnapshot}"
@@ -135,7 +140,7 @@ class TripConfirmViewModel(
                     storeLat = prompt.storeLatSnapshot,
                     storeLng = prompt.storeLngSnapshot,
                     canUseLastStore = canUseLast,
-                    canUseCurrentLocation = (homeLat == null || homeLng == null || hasBusinessHomeTripToday),
+                    canUseCurrentLocation = false,
                     startLabel = autoStartLabel,
                     startLat = autoStartLat,
                     startLng = autoStartLng,
@@ -163,34 +168,8 @@ class TripConfirmViewModel(
         }
     }
 
-    @SuppressLint("MissingPermission")
     fun useCurrentLocationStart() {
-        val homeLat = businessHomeLat
-        val homeLng = businessHomeLng
-        if (homeLat != null && homeLng != null && !hasBusinessHomeTripToday) {
-            _state.update { it.copy(error = "First trip of the day must start at Business home") }
-            return
-        }
-        fused.lastLocation
-            .addOnSuccessListener { loc ->
-                if (loc == null) {
-                    _state.update { it.copy(error = "No last known location available") }
-                    return@addOnSuccessListener
-                }
-                _state.update {
-                    it.copy(
-                        startLabel = "Current location",
-                        startLat = loc.latitude,
-                        startLng = loc.longitude,
-                        startStoreId = null,
-                        error = null
-                    )
-                }
-                recomputeCanConfirm()
-            }
-            .addOnFailureListener {
-                _state.update { s -> s.copy(error = "Failed to read location") }
-            }
+        _state.update { it.copy(error = "Current location is disabled") }
     }
 
     fun confirm(notes: String, businessPurpose: String, onCreated: (Long) -> Unit) {
@@ -238,7 +217,7 @@ class TripConfirmViewModel(
                 val endedAt = createdAt
                 val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
                 val tz = ZoneId.systemDefault().id
-                val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+                val uid = AppGraph.settings.requireUid()
                 val citySnapshot = runCatching {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         AppGraph.storeRepository.getStore(store)?.city
@@ -252,7 +231,7 @@ class TripConfirmViewModel(
                 }
                 val tripId = AppGraph.tripRepository.createTrip(
                     TripEntity(
-                        profileId = profileId,
+                        uid = uid,
                         createdAt = createdAt,
                         day = day,
                         startedAt = startedAt,
@@ -287,10 +266,67 @@ class TripConfirmViewModel(
 
                 AppGraph.promptRepository.confirmWithTrip(promptId, tripId, now)
 
+                // Auto-sync: a visited store should become part of the Ping/geofence system.
+                withContext(Dispatchers.IO) {
+                    runCatching { AppGraph.settings.setStoreIgnored(store, false) }
+                    runCatching { AppGraph.trackEventEmitter.emitAutosyncStoreIgnoredSet(store, false, reason = "visited_auto") }
+                    runCatching { AppGraph.storeRepository.activateStore(store) }
+
+                    runCatching {
+                        AppGraph.db.visitedStoreDao().markVisitedOnce(
+                            uid = uid,
+                            storeId = store,
+                            visitedAt = createdAt.toEpochMilli(),
+                            name = normalizedStoreNameSnapshot,
+                            city = citySnapshot,
+                            lat = destLat,
+                            lng = destLng,
+                        )
+                    }
+                }
+
+                runCatching {
+                    val enabled = AppGraph.settings.trackingEnabled.first()
+                    if (enabled) AppGraph.geofenceSyncManager.scheduleSync("visited_auto")
+                }
+
                 _state.update { it.copy(isConfirming = false, error = null) }
                 onCreated(tripId)
             } catch (e: Exception) {
                 _state.update { it.copy(error = e.message ?: "Failed", isConfirming = false) }
+            }
+        }
+    }
+
+    fun removePlace(onRemoved: () -> Unit) {
+        viewModelScope.launch {
+            val store = storeId
+            if (store.isNullOrBlank()) {
+                _state.update { it.copy(error = "Missing store id") }
+                return@launch
+            }
+
+            _state.update { it.copy(isConfirming = true, error = null) }
+            try {
+                withContext(Dispatchers.IO) {
+                    runCatching { AppGraph.settings.setStoreIgnored(store, true) }
+                    runCatching { AppGraph.trackEventEmitter.emitAutosyncStoreIgnoredSet(store, true, reason = "remove_place") }
+                    runCatching { AppGraph.storeRepository.deleteStore(store) }
+                }
+
+                runCatching {
+                    AppGraph.promptRepository.updateStatus(promptId, PromptStatus.DELETED, Instant.now())
+                }
+
+                runCatching {
+                    val enabled = AppGraph.settings.trackingEnabled.first()
+                    if (enabled) AppGraph.geofenceSyncManager.scheduleSync("remove_place")
+                }
+
+                _state.update { it.copy(isConfirming = false) }
+                onRemoved()
+            } catch (t: Throwable) {
+                _state.update { it.copy(isConfirming = false, error = t.message ?: "Failed") }
             }
         }
     }

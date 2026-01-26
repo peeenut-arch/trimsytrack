@@ -144,6 +144,8 @@ These are generated automatically on trip creation so the backend can answer que
 - `day` + `startedAt`/`endedAt` + `timeZoneId` = **Date/Time**
 - `storeNameSnapshot` + `citySnapshot` + coordinates = **Location/Store name (incl postombud formatting)**
 
+**Date/Time rule (important):** whenever a `day` field is stored alongside a timestamp, `day` must be derived from that timestamp using the same `timeZoneId` (not from "now"). This prevents day-bucket drift when GPS/location timestamps are delivered late or batched.
+
 ### Driver + vehicle fields (synced)
 
 Driver identity fields required for a complete driving journal are synced in snapshot settings (`DriverSettings`):

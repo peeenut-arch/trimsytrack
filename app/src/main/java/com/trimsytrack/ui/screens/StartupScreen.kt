@@ -1,5 +1,6 @@
 package com.trimsytrack.ui.screens
 
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,28 +23,40 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.FirebaseApp
 import com.trimsytrack.AppGraph
+import com.trimsytrack.BuildConfig
 import com.trimsytrack.backend.BackendBlockedException
+import com.trimsytrack.data.driverdata.DriverDataSnapshotUploadWorker
+import com.trimsytrack.data.trackevents.TrackEventsCapabilityProbeWorker
+import com.trimsytrack.data.trackevents.TrackEventsOutboxWorker
+import com.trimsytrack.debug.DebuggLogStore
+import com.trimsytrack.system.BackendBaselineProbe
 import com.trimsytrack.system.HardBlockCode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private sealed interface StartupState {
     data object Loading : StartupState
-    data class NeedsProfile(val message: String? = null) : StartupState
     data class Blocked(val code: HardBlockCode, val message: String) : StartupState
     data class Error(val message: String) : StartupState
-    data class Ready(val profileId: String) : StartupState
+    data object Ready : StartupState
 }
 
 @Composable
 fun StartupScreen(
-    onReady: (profileId: String) -> Unit,
-    onNeedsProfile: () -> Unit,
+    onOpenAuth: () -> Unit,
+    onReady: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var state: StartupState by remember { mutableStateOf(StartupState.Loading) }
     var lastError: String? by remember { mutableStateOf(null) }
 
@@ -51,64 +64,276 @@ fun StartupScreen(
         state = StartupState.Loading
         lastError = null
 
-        try {
-            val result = AppGraph.systemCallables.handshakeGet()
+        for (attempt in 0..1) {
+            try {
+                val result = AppGraph.systemCallables.handshakeGet()
 
-            // Identity is email-anchored; treat missing email as blocked.
-            if (result.normalizedEmail.isBlank()) {
-                state = StartupState.Blocked(
-                    code = HardBlockCode.EMAIL_REQUIRED,
-                    message = "This account has no email address. Please sign in with an email-based account.",
+                Log.i(
+                    "Startup",
+                    "Handshake ok: uid=${result.identityUid} email=${result.identityEmail ?: ""} writesEnabled=${result.writesEnabled} safetyMode=${result.safetyModeEnabled}",
                 )
+                DebuggLogStore.add(
+                    tag = "Handshake",
+                    message = "ok uid=${result.identityUid} email=${result.identityEmail ?: ""} writesEnabled=${result.writesEnabled} safety=${result.safetyModeEnabled}",
+                )
+
+                // Identity is UID-anchored; treat missing UID as blocked.
+                if (result.identityUid.isBlank()) {
+                    Log.w("Startup", "Blocked: missing uid")
+                    state = StartupState.Blocked(
+                        code = HardBlockCode.ACCOUNT_CONFLICT,
+                        message = "This account has no uid. Please sign out and sign in again.",
+                    )
+                    return
+                }
+
+                AppGraph.settings.setBackendProtocolVersion(result.protocolVersion)
+                AppGraph.settings.setBackendProtocolSupportedRange(
+                    minSupported = result.protocol?.minSupported,
+                    maxSupported = result.protocol?.maxSupported,
+                )
+                AppGraph.settings.setBackendIdentityUid(result.identityUid)
+                AppGraph.settings.setBackendIdentityEmail(result.identityEmail.orEmpty())
+                // Handshake is authoritative; do not allow a locally latched safety flag to persist.
+                AppGraph.settings.setBackendWritesEnabled(result.writesEnabled)
+                AppGraph.settings.setBackendSafetyModeEnabled(result.safetyModeEnabled)
+                AppGraph.settings.setBackendSafetyModeReason(result.safetyModeReason.orEmpty())
+                AppGraph.settings.setBackendDeploymentMetadata(
+                    service = result.deployment?.service,
+                    revision = result.deployment?.revision,
+                    functionTarget = result.deployment?.functionTarget,
+                    serverTimeIso = result.deployment?.serverTimeIso,
+                )
+
+                // Backend-advertised capability: if present, treat as authoritative.
+                result.capabilities?.trackEvents?.let { supported ->
+                    runCatching { AppGraph.settings.setTrackEventsBackendSupported(supported) }
+                    if (supported) {
+                        runCatching { TrackEventsCapabilityProbeWorker.cancelScheduled(context) }
+                        runCatching { TrackEventsOutboxWorker.schedulePeriodic(context) }
+                    } else {
+                        runCatching { TrackEventsOutboxWorker.cancelScheduled(context) }
+                        runCatching { TrackEventsCapabilityProbeWorker.cancelScheduled(context) }
+                    }
+                }
+
+                // Self-heal fallback: if TrackEvents was disabled (e.g. due to 404) and the
+                // backend does not advertise the capability, probe at low frequency.
+                if (result.capabilities?.trackEvents == null) {
+                    val trackEventsSupported = runCatching { AppGraph.settings.trackEventsBackendSupported.first() }.getOrDefault(true)
+                    if (!trackEventsSupported) {
+                        runCatching { TrackEventsCapabilityProbeWorker.schedulePeriodic(context, reason = "startup") }
+                    }
+                }
+
+                // Deterministic protocol gating (no retry loop): if server declares a supported range
+                // and this client is outside it, the user must update the app.
+                result.protocol?.let { range ->
+                    val v = com.trimsytrack.system.SystemCallablesService.CLIENT_PROTOCOL_VERSION
+                    if (v < range.minSupported || v > range.maxSupported) {
+                        state = StartupState.Blocked(
+                            code = HardBlockCode.CLIENT_UPDATE_REQUIRED,
+                            message = "App update required. Server supports protocol ${range.minSupported}..${range.maxSupported} but this app is $v.",
+                        )
+                        return
+                    }
+                }
+
+                // Baseline verification: detect misdeploys early (e.g. missing canonical route).
+                runCatching {
+                    withContext(Dispatchers.IO) { BackendBaselineProbe.verifyCanonicalRouteBaseline() }
+                }.onFailure { t ->
+                    if (t is BackendBlockedException && t.machineCode?.trim()?.uppercase() == "ROUTE_NOT_FOUND") {
+                        val base = BuildConfig.BACKEND_API_BASE.trim()
+                        val deploy = result.deployment
+                        state = StartupState.Error(
+                            "Backend mismatch detected (canonical route missing).\n\n" +
+                                "baseUrl=$base\n" +
+                                "service=${deploy?.service ?: "-"} revision=${deploy?.revision ?: "-"} target=${deploy?.functionTarget ?: "-"}\n\n" +
+                                "This usually means you are hitting the wrong backend or an old revision that lacks drivingTripCreate."
+                        )
+                        return
+                    }
+
+                    // Any other probe failure is treated as transient.
+                    Log.w("Startup", "Baseline probe failed", t)
+                }
+
+                // One-time migration for older installs: claim legacy unscoped rows under this UID.
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val uid = result.identityUid.trim()
+                        val legacyUid = "default"
+
+                        AppGraph.db.storeDao().claimUnscoped(uid)
+                        AppGraph.db.tripDao().claimUnscoped(uid)
+                        AppGraph.db.promptDao().claimUnscoped(uid)
+                        AppGraph.db.runDao().claimUnscoped(uid)
+                        AppGraph.db.attachmentDao().claimUnscoped(uid)
+                        AppGraph.db.distanceCacheDao().claimUnscoped(uid)
+                        AppGraph.db.visitedStoreDao().claimUnscoped(uid)
+
+                        // Additional legacy migration: older installs used uid='default'.
+                        // If the current uid has no trips but 'default' does, move the legacy data over.
+                        if (uid.isNotBlank() && uid != legacyUid) {
+                            val currentTrips = AppGraph.db.tripDao().countAll(uid)
+                            val legacyTrips = AppGraph.db.tripDao().countAll(legacyUid)
+                            if (currentTrips == 0 && legacyTrips > 0) {
+                                Log.w(
+                                    "Startup",
+                                    "Rekeying legacy uid='$legacyUid' to uid='$uid' (legacyTrips=$legacyTrips)",
+                                )
+                                AppGraph.db.storeDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                                AppGraph.db.tripDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                                AppGraph.db.promptDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                                AppGraph.db.runDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                                if (AppGraph.db.attachmentDao().countAll(uid) == 0 && AppGraph.db.attachmentDao().countAll(legacyUid) > 0) {
+                                    AppGraph.db.attachmentDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                                }
+                                AppGraph.db.distanceCacheDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                                AppGraph.db.visitedStoreDao().rekeyUid(oldUid = legacyUid, newUid = uid)
+                            }
+                        }
+                    }
+                }.onFailure { t ->
+                    Log.w("Startup", "Failed to claim unscoped rows", t)
+                }
+
+                state = StartupState.Ready
+                return
+            } catch (e: BackendBlockedException) {
+                val firebaseProjectId = runCatching { FirebaseApp.getInstance().options.projectId }.getOrNull()
+                Log.e(
+                    "Startup",
+                    "Handshake blocked: backendCode=${e.backendCode} httpStatus=${e.httpStatus} machineCode=${e.machineCode} region=${BuildConfig.BACKEND_FUNCTIONS_REGION} projectId=$firebaseProjectId",
+                    e,
+                )
+                DebuggLogStore.add(
+                    tag = "Handshake",
+                    message = "blocked http=${e.httpStatus} backendCode=${e.backendCode} machineCode=${e.machineCode} msg=${e.message}",
+                )
+
+                val hard = AppGraph.systemCallables.hardBlockCodeOrNull(e.machineCode)
+                when (hard) {
+                    HardBlockCode.EMAIL_REQUIRED -> state = StartupState.Blocked(hard, e.message)
+                    HardBlockCode.ACCOUNT_CONFLICT -> state = StartupState.Blocked(hard, e.message)
+                    HardBlockCode.CLIENT_UPDATE_REQUIRED -> state = StartupState.Blocked(
+                        hard,
+                        e.message.trim().ifBlank { "App update required." },
+                    )
+                    HardBlockCode.UID_DATA_MISSING -> state = StartupState.Blocked(
+                        hard,
+                        e.message.trim().ifBlank { "Account not provisioned in backend." } +
+                            "\n\nThis usually means the backend user record (uid_state/{uid}) is missing. Provision this account, then reopen the app.",
+                    )
+                    HardBlockCode.UID_DELETED -> state = StartupState.Blocked(hard, e.message)
+                    null -> {
+                        val hint = if (e.backendCode?.trim()?.uppercase() == "NOT_FOUND") {
+                            val project = firebaseProjectId ?: "(unknown)"
+                            "\n\nNot found usually means the callable isn’t deployed in this Firebase project/region.\n" +
+                                "projectId=$project\n" +
+                                "region=${BuildConfig.BACKEND_FUNCTIONS_REGION}\n" +
+                                "If you have multiple apps (“trio”), double-check this app’s google-services.json and your functions deploy target."
+                        } else {
+                            ""
+                        }
+
+                        state = StartupState.Error(e.message + hint)
+                    }
+                }
+                return
+            } catch (t: Throwable) {
+                Log.e("Startup", "Handshake failed", t)
+                DebuggLogStore.add(
+                    tag = "Handshake",
+                    message = "failed ${t.javaClass.simpleName}:${t.message}",
+                )
+                val msg = t.message ?: "Startup failed"
+                lastError = msg
+                state = StartupState.Error(msg)
                 return
             }
-
-            AppGraph.settings.setBackendProtocolVersion(result.protocolVersion)
-            AppGraph.settings.setBackendIdentityEmail(result.normalizedEmail)
-
-            if (!result.profileExists || result.profileId.isNullOrBlank()) {
-                state = StartupState.NeedsProfile("Profile required")
-                return
-            }
-
-            val profileId = result.profileId
-            AppGraph.settings.activateProfile(profileId)
-
-            // Best-effort: cache profile objects for faster startup.
-            runCatching {
-                val profile = AppGraph.systemCallables.profileGet()
-                AppGraph.settings.setBackendProfileJson(profile.toString())
-            }
-            runCatching {
-                val media = AppGraph.systemCallables.profileMediaGet()
-                AppGraph.settings.setBackendProfileMediaJson(media.toString())
-            }
-
-            state = StartupState.Ready(profileId)
-        } catch (e: BackendBlockedException) {
-            val hard = AppGraph.systemCallables.hardBlockCodeOrNull(e.machineCode)
-            when (hard) {
-                HardBlockCode.PROFILE_REQUIRED -> state = StartupState.NeedsProfile(e.message)
-                HardBlockCode.EMAIL_REQUIRED -> state = StartupState.Blocked(hard, e.message)
-                HardBlockCode.ACCOUNT_CONFLICT -> state = StartupState.Blocked(hard, e.message)
-                null -> state = StartupState.Error(e.message)
-            }
-        } catch (t: Throwable) {
-            val msg = t.message ?: "Startup failed"
-            lastError = msg
-            state = StartupState.Error(msg)
         }
     }
 
     LaunchedEffect(Unit) {
+        // If there's no Firebase user, don't show an error UI; send user to Auth.
+        // Also skip handshake in this state (it will 401 anyway).
+        if (FirebaseAuth.getInstance().currentUser == null) {
+            onOpenAuth()
+            return@LaunchedEffect
+        }
+
+        runCatching { DriverDataSnapshotUploadWorker.schedulePeriodic(context) }
+
         runHandshake()
     }
 
+    var isCrosschecking by remember { mutableStateOf(false) }
+    var crosscheckMessage by remember { mutableStateOf("") }
+
     LaunchedEffect(state) {
-        when (val s = state) {
-            is StartupState.Ready -> onReady(s.profileId)
-            is StartupState.NeedsProfile -> onNeedsProfile()
-            else -> Unit
+        if (state is StartupState.Ready) {
+            isCrosschecking = true
+            crosscheckMessage = "Checking your data and cross-referencing with the cloud…"
+            scope.launch {
+                crosscheckMessage = "Comparing your device data with the cloud…"
+
+                val action = runCatching {
+                    withContext(Dispatchers.IO) { AppGraph.driverDataRepository.reconcileOnLoginAndMaybeRestore() }
+                }.getOrElse { t ->
+                    Log.e("Startup", "AppData reconcile failed", t)
+                    isCrosschecking = false
+                    val prefix = t::class.simpleName?.takeIf { it.isNotBlank() }?.let { "$it: " } ?: ""
+                    state = StartupState.Error(
+                        "Cloud sync check failed. Please check your connection and tap Retry.\n\n" +
+                            prefix + (t.message ?: "Unknown error")
+                    )
+                    return@launch
+                }
+
+                crosscheckMessage = when (action) {
+                    "restored" -> "Your data was restored from the cloud."
+                    "uploaded" -> "Your latest data was synced to the cloud."
+                    "no_cloud_backup" -> "No cloud backup was found for this account."
+                    else -> "Your data is up to date."
+                }
+
+                crosscheckMessage = "Verifying region files…"
+                val fileAction = runCatching {
+                    withContext(Dispatchers.IO) { AppGraph.driverDataRepository.verifyAndRepairRegionFilesFromCloud() }
+                }.getOrElse { t ->
+                    Log.e("Startup", "Region file verify/repair failed", t)
+                    isCrosschecking = false
+                    val prefix = t::class.simpleName?.takeIf { it.isNotBlank() }?.let { "$it: " } ?: ""
+                    state = StartupState.Error(
+                        "Cloud file check failed. Please check your connection and tap Retry.\n\n" +
+                            prefix + (t.message ?: "Unknown error")
+                    )
+                    return@launch
+                }
+
+                crosscheckMessage = when (fileAction) {
+                    "REPAIRED" -> "Downloaded missing files from the cloud."
+                    "OK_CACHED" -> "Files verified."
+                    "OK" -> "Files verified."
+                    "NO_CLOUD_BACKUP" -> "No cloud files to restore."
+                    else -> "Files checked ($fileAction)."
+                }
+
+                DebuggLogStore.add(
+                    tag = "DriverData",
+                    message = "region verify action=$fileAction",
+                )
+
+                DebuggLogStore.add(
+                    tag = "DriverData",
+                    message = "login reconcile action=$action",
+                )
+
+                isCrosschecking = false
+                onReady()
+            }
         }
     }
 
@@ -123,20 +348,24 @@ fun StartupScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            when (val s = state) {
-                StartupState.Loading -> {
+            when {
+                isCrosschecking -> {
+                    CircularProgressIndicator()
+                    Text(crosscheckMessage)
+                }
+                state is StartupState.Loading -> {
                     CircularProgressIndicator()
                     Text("Checking account…")
                 }
-
-                is StartupState.Blocked -> {
+                state is StartupState.Blocked -> {
+                    val s = state as StartupState.Blocked
                     Text("Blocked", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text(s.message)
                     Spacer(Modifier.height(6.dp))
                     Button(onClick = onSignOut) { Text("Sign out") }
                 }
-
-                is StartupState.Error -> {
+                state is StartupState.Error -> {
+                    val s = state as StartupState.Error
                     Text("Startup error", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text(s.message)
                     Spacer(Modifier.height(6.dp))
@@ -145,17 +374,9 @@ fun StartupScreen(
                         onSignOut = onSignOut,
                     )
                 }
-
-                is StartupState.NeedsProfile -> {
-                    Text("Profile required", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text(s.message ?: "You must create a profile to continue.")
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = onSignOut) { Text("Sign out") }
-                }
-
-                is StartupState.Ready -> {
+                state is StartupState.Ready -> {
                     CircularProgressIndicator()
-                    Text("Loading profile…")
+                    Text("Loading…")
                 }
             }
 

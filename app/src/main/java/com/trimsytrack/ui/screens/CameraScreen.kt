@@ -88,6 +88,7 @@ import com.trimsytrack.data.entities.DistanceMethod
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.ui.components.TrimsyWhiteRadioButton
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.util.Hashing
 import java.io.File
@@ -121,6 +122,13 @@ fun CameraScreen(
     ) -> Unit = { _, _, _, _ -> },
     onBack: () -> Unit,
 ) {
+    // When opened from the Home tile (no trip context), show the autosync locations manager.
+    // Trip-related camera flows (receipts/media) still use the full camera UI.
+    if (tripId == null && !returnCaptureToCaller && !autoSaveToTrip && !quickLogTripOnAutoSave) {
+        AutosyncLocationsScreen(onBack = onBack)
+        return
+    }
+
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -220,7 +228,7 @@ fun CameraScreen(
         val lngE5 = (lng * 100_000.0).toLong()
         val storeId = "gps_${latE5}_${lngE5}"
 
-        val nowProfileId = AppGraph.settings.profileId.first().ifBlank { "default" }
+        val uid = AppGraph.settings.requireUid()
         val day = LocalDate.now()
 
         // Upsert a lightweight store row so the trip points to something stable.
@@ -228,7 +236,7 @@ fun CameraScreen(
             AppGraph.db.storeDao().upsertAll(
                 listOf(
                     StoreEntity(
-                        profileId = nowProfileId,
+                        uid = uid,
                         id = storeId,
                         name = label,
                         lat = lat,
@@ -306,7 +314,7 @@ fun CameraScreen(
 
         return AppGraph.tripRepository.createTrip(
             TripEntity(
-                profileId = nowProfileId,
+                uid = uid,
                 createdAt = createdAt,
                 day = day,
                 startedAt = startedAt,
@@ -352,7 +360,7 @@ fun CameraScreen(
             saveCapturedPhotoToTrip(
                 context = context,
                 trip = trip,
-                profileId = trip.profileId,
+                uid = trip.uid,
                 tempFile = tempFile,
                 capturedAt = capturedAt,
                 location = pendingLocation.value,
@@ -361,7 +369,7 @@ fun CameraScreen(
         } else {
             importDocumentToTripFiles(
                 context = context,
-                profileId = trip.profileId,
+                uid = trip.uid,
                 tripId = trip.id,
                 tripDay = trip.day,
                 tripStoreNameSnapshot = trip.storeNameSnapshot,
@@ -410,7 +418,7 @@ fun CameraScreen(
                                 isCustom = false
                             },
                     ) {
-                        RadioButton(
+                        TrimsyWhiteRadioButton(
                             selected = !isCustom && preset == SettingsStore.DEFAULT_BUSINESS_PURPOSE,
                             onClick = {
                                 preset = SettingsStore.DEFAULT_BUSINESS_PURPOSE
@@ -429,7 +437,7 @@ fun CameraScreen(
                                 isCustom = false
                             },
                     ) {
-                        RadioButton(
+                        TrimsyWhiteRadioButton(
                             selected = !isCustom && preset == SettingsStore.SHIPPING_BUSINESS_PURPOSE,
                             onClick = {
                                 preset = SettingsStore.SHIPPING_BUSINESS_PURPOSE
@@ -437,7 +445,7 @@ fun CameraScreen(
                             },
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Frakt till postombud", modifier = Modifier.padding(top = 12.dp))
+                        Text(SettingsStore.POSTOMBUD_FRAKT_BUSINESS_PURPOSE, modifier = Modifier.padding(top = 12.dp))
                     }
 
                     Row(
@@ -445,10 +453,7 @@ fun CameraScreen(
                             .fillMaxWidth()
                             .clickable { isCustom = true },
                     ) {
-                        RadioButton(
-                            selected = isCustom,
-                            onClick = { isCustom = true },
-                        )
+                        TrimsyWhiteRadioButton(selected = isCustom, onClick = { isCustom = true })
                         Spacer(Modifier.width(8.dp))
                         Text("Eget", modifier = Modifier.padding(top = 12.dp))
                     }
@@ -467,7 +472,7 @@ fun CameraScreen(
                 }
             },
             confirmButton = {
-                Button(
+                TextButton(
                     enabled = canConfirm,
                     onClick = {
                         val purpose = if (isCustom) customText.trim() else preset
@@ -979,7 +984,7 @@ fun CameraScreen(
                                                     saveCapturedPhotoToTrip(
                                                         context = context,
                                                         trip = t,
-                                                        profileId = t.profileId,
+                                                        uid = t.uid,
                                                         tempFile = tempFile,
                                                         capturedAt = capturedAt,
                                                         location = pendingLocation.value,
@@ -988,7 +993,7 @@ fun CameraScreen(
                                                 } else {
                                                     importDocumentToTripFiles(
                                                         context = context,
-                                                        profileId = t.profileId,
+                                                        uid = t.uid,
                                                         tripId = t.id,
                                                         tripDay = t.day,
                                                         tripStoreNameSnapshot = t.storeNameSnapshot,
@@ -1068,7 +1073,7 @@ private suspend fun <T> awaitFuture(future: ListenableFuture<T>): T {
 private fun saveCapturedPhotoToTrip(
     context: android.content.Context,
     trip: TripEntity,
-    profileId: String,
+    uid: String,
     tempFile: File,
     capturedAt: Instant,
     location: Location?,
@@ -1150,7 +1155,7 @@ private fun saveCapturedPhotoToTrip(
     val now = Instant.now()
 
     return AttachmentEntity(
-        profileId = profileId,
+        uid = uid,
         tripId = trip.id,
         uri = contentUri.toString(),
         mimeType = "image/jpeg",

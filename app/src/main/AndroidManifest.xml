@@ -13,21 +13,23 @@
         android:protectionLevel="signature" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Required for geofence/prompt tracking while the app is not in the foreground (Android 10+). -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <uses-permission android:name="android.permission.CAMERA" />
-
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-
-    <!-- Requested only after clear user rationale + feature toggle enabled -->
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".TrimsyApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="TrimsyTRACK"
         android:supportsRtl="true"
         android:theme="@style/Theme.TrimsyTRACK">
@@ -35,6 +37,7 @@
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="${MAPS_API_KEY}" />
+
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -69,19 +72,41 @@
 
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:theme="@style/Theme.TrimsyTRACK.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Firebase passwordless email-link (magic link) sign-in deep links -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="trimsy-d12de.firebaseapp.com"
+                    android:pathPrefix="/emailSignIn" />
+            </intent-filter>
+
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="trimsy-d12de.firebaseapp.com"
+                    android:pathPrefix="/__/auth/action" />
+            </intent-filter>
         </activity>
 
         <receiver
-            android:name=".geofence.GeofenceBroadcastReceiver"
+            android:name=".notifications.PromptActionReceiver"
             android:exported="false" />
 
         <receiver
-            android:name=".notifications.PromptActionReceiver"
+            android:name=".notifications.RunCompletionActionReceiver"
             android:exported="false" />
 
         <receiver

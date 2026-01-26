@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 @Serializable
 data class BackendApiErrorDetails(
     val machineCode: String? = null,
+    val machine: String? = null,
     val retryAfterSeconds: Long? = null,
     val extra: JsonObject? = null,
 )

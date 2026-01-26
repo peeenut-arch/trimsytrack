@@ -12,6 +12,8 @@ object Notifications {
     const val CHANNEL_PROMPTS = "prompts"
     const val CHANNEL_LOCATION_PING = "location_ping"
     const val CHANNEL_RECEIPT_REMINDER = "receipt_reminder"
+    const val CHANNEL_RUN_COMPLETION = "run_completion"
+    const val CHANNEL_TRACKING_WARNINGS = "tracking_warnings"
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -40,6 +42,22 @@ object Notifications {
                 NotificationManager.IMPORTANCE_DEFAULT,
             )
         )
+
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_RUN_COMPLETION,
+                "Run completion",
+                NotificationManager.IMPORTANCE_HIGH,
+            )
+        )
+
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_TRACKING_WARNINGS,
+                "Tracking warnings",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            )
+        )
     }
 
     fun notify(context: Context, id: Int, builder: NotificationCompat.Builder) {
@@ -58,6 +76,12 @@ object Notifications {
 
     fun pingBuilder(context: Context): NotificationCompat.Builder {
         return NotificationCompat.Builder(context, CHANNEL_LOCATION_PING)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setAutoCancel(true)
+    }
+
+    fun trackingWarningBuilder(context: Context): NotificationCompat.Builder {
+        return NotificationCompat.Builder(context, CHANNEL_TRACKING_WARNINGS)
             .setSmallIcon(R.drawable.ic_notification)
             .setAutoCancel(true)
     }

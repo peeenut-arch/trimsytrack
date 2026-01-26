@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import com.trimsytrack.data.AppDatabase
 import com.trimsytrack.data.DistanceRepository
+import com.trimsytrack.data.PingRepository
 import com.trimsytrack.data.PromptRepository
 import com.trimsytrack.data.RegionRepository
 import com.trimsytrack.data.SettingsStore
@@ -11,12 +12,19 @@ import com.trimsytrack.data.StoreRepository
 import com.trimsytrack.data.TripRepository
 import com.trimsytrack.data.driverdata.DriverDataRepository
 import com.trimsytrack.data.driverdata.DriverDataSyncManager
+import com.trimsytrack.data.canonical.CanonicalWriteEnqueuer
+import com.trimsytrack.data.canonical.CanonicalWritesSyncManager
+import com.trimsytrack.data.sync.SyncDatabase
+import com.trimsytrack.data.trackevents.TrackEventEmitter
+import com.trimsytrack.data.trackevents.TrackEventsRepository
+import com.trimsytrack.data.trackevents.TrackEventsSyncManager
+import com.trimsytrack.backend.CanonicalApi
 import com.trimsytrack.distance.RoutesApi
 import com.trimsytrack.distance.RoutesDistanceService
 import com.trimsytrack.geofence.GeofenceSyncManager
-import com.trimsytrack.data.Migrations
 import com.trimsytrack.notifications.Notifications
 import com.trimsytrack.network.BackendRequestInterceptor
+import com.trimsytrack.debug.DebuggHttpInterceptor
 import com.trimsytrack.system.SystemCallablesService
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -36,10 +44,16 @@ object AppGraph {
     lateinit var db: AppDatabase
         private set
 
+    lateinit var syncDb: SyncDatabase
+        private set
+
     lateinit var storeRepository: StoreRepository
         private set
 
     lateinit var promptRepository: PromptRepository
+        private set
+
+    lateinit var pingRepository: PingRepository
         private set
 
     lateinit var tripRepository: TripRepository
@@ -56,6 +70,15 @@ object AppGraph {
 
     // TODO: Add new backend sync repository here when ready
 
+    lateinit var trackEventsRepository: TrackEventsRepository
+        private set
+
+    lateinit var trackEventsSyncManager: TrackEventsSyncManager
+        private set
+
+    lateinit var trackEventEmitter: TrackEventEmitter
+        private set
+
     lateinit var driverDataRepository: DriverDataRepository
         private set
 
@@ -66,6 +89,15 @@ object AppGraph {
         private set
 
     lateinit var systemCallables: SystemCallablesService
+        private set
+
+    lateinit var canonicalApi: CanonicalApi
+        private set
+
+    lateinit var canonicalWritesSyncManager: CanonicalWritesSyncManager
+        private set
+
+    lateinit var canonicalWriteEnqueuer: CanonicalWriteEnqueuer
         private set
 
     fun init(context: Context) {
@@ -81,35 +113,53 @@ object AppGraph {
 
             backendHttpClient = buildBackendHttpClient()
 
+            canonicalWritesSyncManager = CanonicalWritesSyncManager(appContext)
+
             db = Room.databaseBuilder(appContext, AppDatabase::class.java, "trimsytrack.db")
-                .addMigrations(
-                    Migrations.MIGRATION_3_4,
-                    Migrations.MIGRATION_4_5,
-                    Migrations.MIGRATION_5_6,
-                    Migrations.MIGRATION_6_7,
-                    Migrations.MIGRATION_7_8,
-                    Migrations.MIGRATION_8_9,
-                    Migrations.MIGRATION_9_10,
-                    Migrations.MIGRATION_10_11,
-                    Migrations.MIGRATION_11_12,
-                    Migrations.MIGRATION_12_13,
-                    Migrations.MIGRATION_13_14,
-                    Migrations.MIGRATION_14_15,
-                    Migrations.MIGRATION_15_16,
-                )
                 .fallbackToDestructiveMigration()
                 .build()
+
+            syncDb = Room.databaseBuilder(appContext, SyncDatabase::class.java, "trimsytrack.sync.db")
+                .fallbackToDestructiveMigration()
+                .build()
+
+            // Canonical API (backend truth writes)
+            val retrofit = Retrofit.Builder()
+                .baseUrl(normalizeBackendBaseUrl())
+                .client(backendHttpClient)
+                .addConverterFactory(ScalarsConverterFactory.create())
+                .build()
+            canonicalApi = retrofit.create(CanonicalApi::class.java)
+
+            canonicalWriteEnqueuer = CanonicalWriteEnqueuer(settings, syncDb.canonicalWriteOutboxDao())
 
             regionRepository = RegionRepository(appContext)
             storeRepository = StoreRepository(db.storeDao(), regionRepository, settings)
             promptRepository = PromptRepository(db.promptDao(), settings)
-            tripRepository = TripRepository(db.tripDao(), db.attachmentDao(), db.runDao(), settings, appContext)
+            pingRepository = PingRepository(db.pingDao(), settings)
+            trackEventsRepository = TrackEventsRepository(settings)
+            trackEventsSyncManager = TrackEventsSyncManager(appContext)
+            trackEventEmitter = TrackEventEmitter(syncDb.trackEventOutboxDao(), trackEventsSyncManager)
+
+            tripRepository = TripRepository(
+                tripDao = db.tripDao(),
+                attachmentDao = db.attachmentDao(),
+                runDao = db.runDao(),
+                settings = settings,
+                appContext = appContext,
+                trackEventEmitter = trackEventEmitter,
+                canonicalWriteEnqueuer = canonicalWriteEnqueuer,
+            )
             distanceRepository = DistanceRepository(db.distanceCacheDao(), buildRoutesService(), settings)
 
             // TODO: Initialize new backend sync repository here when ready
 
             driverDataRepository = DriverDataRepository(appContext, settings)
             driverDataSyncManager = DriverDataSyncManager(appContext)
+            // NOTE: Snapshots are checkpoints on top of canonical truth.
+            // We intentionally do NOT run the "instant sync on any DB change" loop here,
+            // to avoid spamming `driverdataPut` on routine local mutations.
+            // Checkpoints are instead triggered explicitly (e.g. after a HOME-ending trip is canonically acked).
 
             Notifications.ensureChannels(appContext)
             geofenceSyncManager = GeofenceSyncManager(appContext, settings, storeRepository)
@@ -125,6 +175,7 @@ object AppGraph {
 
         return OkHttpClient.Builder()
             .addInterceptor(BackendRequestInterceptor())
+            .addInterceptor(DebuggHttpInterceptor())
             .addInterceptor(logging)
             .build()
     }
@@ -147,5 +198,11 @@ object AppGraph {
             retrofit.create(RoutesApi::class.java),
             appContext
         )
+    }
+
+    private fun normalizeBackendBaseUrl(): String {
+        val base = BuildConfig.BACKEND_API_BASE.trim()
+        check(base.isNotBlank()) { "Missing BACKEND_API_BASE" }
+        return if (base.endsWith("/")) base else "$base/"
     }
 }

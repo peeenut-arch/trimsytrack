@@ -18,13 +18,15 @@ import java.time.LocalDate
 data class TripEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
 
-    /** Active profile that owns this trip. */
-    val profileId: String,
+    /** Auth UID that owns this trip. */
+    val uid: String,
 
     // Backend-authoritative sync fields
     val clientRef: String? = null,
     val backendId: String? = null,
     val syncStatus: SyncStatus = SyncStatus.LOCAL_ONLY,
+    val syncErrorMachineCode: String? = null,
+    val syncErrorMessage: String? = null,
 
     val createdAt: Instant,
     val day: LocalDate,

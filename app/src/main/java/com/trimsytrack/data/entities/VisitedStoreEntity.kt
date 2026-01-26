@@ -6,14 +6,14 @@ import java.time.Instant
 
 @Entity(
     tableName = "visited_stores",
-    primaryKeys = ["profileId", "storeId"],
+    primaryKeys = ["uid", "storeId"],
     indices = [
-        Index(value = ["profileId", "lastVisitedAt"], unique = false),
+        Index(value = ["uid", "lastVisitedAt"], unique = false),
     ],
 )
 data class VisitedStoreEntity(
-    /** Active profile that owns this visited-store record. */
-    val profileId: String,
+    /** Auth UID that owns this visited-store record. */
+    val uid: String,
 
     /** Canonical store id (e.g. gmap_search_* / gmap_interest_* normalized to gmap_*). */
     val storeId: String,

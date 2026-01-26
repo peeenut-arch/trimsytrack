@@ -51,9 +51,9 @@ class EvidenceProvider : ContentProvider() {
     ): Cursor? {
         return when (uriMatcher.match(uri)) {
         MATCH_LIST -> {
-            val profileId = runBlocking { AppGraph.settings.profileId.first().ifBlank { "default" } }
-            val items = runBlocking { AppGraph.db.attachmentDao().listAll(profileId) }
-            val trips = runBlocking { AppGraph.db.tripDao().listAll(profileId) }
+            val uid = runBlocking { AppGraph.settings.uid.first().ifBlank { "default" } }
+            val items = runBlocking { AppGraph.db.attachmentDao().listAll(uid) }
+            val trips = runBlocking { AppGraph.db.tripDao().listAll(uid) }
             val tripById = trips.associateBy { it.id }
 
             MatrixCursor(
@@ -81,9 +81,9 @@ class EvidenceProvider : ContentProvider() {
                 items.sortedBy { it.id }.forEach { a ->
                     val t = tripById[a.tripId]
                     addRow(
-                        arrayOf(
+                        listOf<Any?>(
                             a.id,
-                            profileId,
+                            uid,
                             a.id,
                             extractRelativeEvidencePathFromFileProviderUri(a.uri),
                             a.tripId,
@@ -108,9 +108,9 @@ class EvidenceProvider : ContentProvider() {
 
         MATCH_FILES -> {
             val ctx = context ?: return null
-            val profileId = runBlocking { AppGraph.settings.profileId.first().ifBlank { "default" } }
-            val items = runBlocking { AppGraph.db.attachmentDao().listAll(profileId) }
-            val trips = runBlocking { AppGraph.db.tripDao().listAll(profileId) }
+            val uid = runBlocking { AppGraph.settings.uid.first().ifBlank { "default" } }
+            val items = runBlocking { AppGraph.db.attachmentDao().listAll(uid) }
+            val trips = runBlocking { AppGraph.db.tripDao().listAll(uid) }
             val tripById = trips.associateBy { it.id }
 
             // Build a lookup of file-relative-path -> linked evidenceId (if the DB knows about it).
@@ -150,9 +150,9 @@ class EvidenceProvider : ContentProvider() {
                             .toLongOrNull()
                         val t = inferredTripId?.let { tripById[it] }
                         addRow(
-                            arrayOf(
+                            listOf<Any?>(
                                 rowId++,
-                                profileId,
+                                uid,
                                 rel,
                                 inferredTripId,
                                 t?.day?.toString(),
@@ -178,8 +178,8 @@ class EvidenceProvider : ContentProvider() {
             MATCH_FILES -> "vnd.android.cursor.dir/vnd.${context?.packageName}.evidence.files"
             MATCH_EVIDENCE -> {
                 val evidenceId = uri.lastPathSegment?.toLongOrNull() ?: return "application/octet-stream"
-                val profileId = runBlocking { AppGraph.settings.profileId.first().ifBlank { "default" } }
-                val entity = runBlocking { AppGraph.db.attachmentDao().getById(profileId, evidenceId) }
+                val uid = runBlocking { AppGraph.settings.uid.first().ifBlank { "default" } }
+                val entity = runBlocking { AppGraph.db.attachmentDao().getById(uid, evidenceId) }
                 entity?.mimeType ?: "application/octet-stream"
             }
 
@@ -212,8 +212,8 @@ class EvidenceProvider : ContentProvider() {
                 val evidenceId = uri.lastPathSegment?.toLongOrNull()
                     ?: throw IllegalArgumentException("Invalid evidence ID")
 
-                val profileId = runBlocking { AppGraph.settings.profileId.first().ifBlank { "default" } }
-                val entity = runBlocking { AppGraph.db.attachmentDao().getById(profileId, evidenceId) }
+                val uid = runBlocking { AppGraph.settings.uid.first().ifBlank { "default" } }
+                val entity = runBlocking { AppGraph.db.attachmentDao().getById(uid, evidenceId) }
                     ?: throw IllegalArgumentException("Unknown evidenceId=$evidenceId")
 
                 val storedUri = runCatching { Uri.parse(entity.uri) }.getOrNull()

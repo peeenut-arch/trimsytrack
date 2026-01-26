@@ -8,7 +8,7 @@ import okhttp3.Response
 
 /**
  * BackendTRIMSY compliance:
- * - Clients must NOT send profile ownership/scope headers.
+ * - Clients must NOT send any client-side ownership/scope headers (scope is derived server-side).
  * - Authentication is via Firebase ID token only.
  */
 class BackendRequestInterceptor(

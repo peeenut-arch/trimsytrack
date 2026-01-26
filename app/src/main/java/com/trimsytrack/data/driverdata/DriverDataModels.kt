@@ -20,7 +20,20 @@ data class DriverData(
 
     val stores: List<StoreDto> = emptyList(),
     val trips: List<TripDto> = emptyList(),
+
+    /**
+     * Stops/visits derived from trips. A trip is the truth; pings are UX-only.
+     * Other clients should use stops[] when they want an ordered stop list.
+     */
+    val stops: List<StopDto> = emptyList(),
+
     val promptEvents: List<PromptEventDto> = emptyList(),
+
+    /**
+     * UX telemetry only (geofence/prompt helper). Not authoritative trip/stop truth.
+     */
+    val pingEvents: List<PingEventDto> = emptyList(),
+    val visitedStores: List<VisitedStoreDto> = emptyList(),
     val runs: List<RunDto> = emptyList(),
     val distanceCache: List<DistanceCacheDto> = emptyList(),
     val attachments: List<AttachmentDto> = emptyList(),
@@ -66,6 +79,7 @@ data class DriverSettings(
     // Per-store customizations
     val storeImages: Map<String, String> = emptyMap(),
     val storeBusinessHours: Map<String, BusinessHours> = emptyMap(),
+    val storeDisplayOverrides: Map<String, StoreDisplayOverrideDto> = emptyMap(),
     val storeFetchedDetails: Map<String, StoreFetchedDetails> = emptyMap(),
 
     // UI / preferences
@@ -77,9 +91,36 @@ data class DriverSettings(
     val expandedStoreCities: List<String> = emptyList(),
     val manualTripStoreSortMode: String = "NAME",
 
+    // Manual trip categories (user-created taxonomy)
+    val manualTripCategoryConfigs: List<ManualTripCategoryConfigDto> = emptyList(),
+    val manualTripEnabledCategoryLabels: List<String> = emptyList(),
+
+    // Hidden places metadata (places removed from autosync/store list but still referenced in UI)
+    val hiddenTripPlaces: List<HiddenTripPlaceDto> = emptyList(),
+
     // Backend preferences
     val backendBaseUrl: String = "",
     val backendDriverId: String = "",
+)
+
+@Serializable
+data class StoreDisplayOverrideDto(
+    val name: String? = null,
+    val city: String? = null,
+    val categoryLabel: String? = null,
+)
+
+@Serializable
+data class ManualTripCategoryConfigDto(
+    val label: String,
+    val keywords: List<String> = emptyList(),
+)
+
+@Serializable
+data class HiddenTripPlaceDto(
+    val id: String,
+    val name: String,
+    val city: String = "",
 )
 
 @Serializable
@@ -101,6 +142,12 @@ data class TripDto(
 
     /** Stable UUID for this trip (universal TripID). */
     val clientRef: String = "",
+
+    /** Backend-assigned id (if applicable). */
+    val backendId: String? = null,
+
+    /** Sync state (e.g. LOCAL_ONLY / SYNCED). */
+    val syncStatus: String = "",
 
     val createdAt: String,
     val day: String,
@@ -139,6 +186,14 @@ data class TripDto(
     val supplierOrArea: String? = null,
     val isBusiness: Boolean = true,
     val runId: Long? = null,
+
+    /**
+     * Hint for TrimsyApp: number of non-home stops in this trip's home→home run.
+     *
+     * Semantics: count of trips in the same `runId` whose endPlaceType != HOME.
+     * This excludes the final "back home" leg and does not count the initial "leave home" start.
+     */
+    val runNonHomeStopCountHint: Int? = null,
     val currencyCode: String? = null,
     val mileageRateMicros: Long? = null,
 
@@ -147,6 +202,85 @@ data class TripDto(
 
     // Parking/traffic fee receipt metadata identifier.
     val parkingTicketId: String? = null,
+)
+
+@Serializable
+data class StopDto(
+    /** Stable UUID for the stop (same as the trip's clientRef). */
+    val stopId: String,
+
+    /** Local monotonic ordering (same as the trip's local id). */
+    val tripNumber: Long,
+
+    /** Optional full-trip grouping id (same as trip.runId). */
+    val runId: Long? = null,
+
+    /** STORE / HOME / OTHER etc (based on endPlaceType). */
+    val kind: String,
+
+    /** When the stop was reached (arrival). */
+    val occurredAt: String,
+
+    /** Optional pre-formatted local time for UI (e.g. "06/22 10:53"). */
+    val occurredAtLocal: String? = null,
+
+    val timeZoneId: String,
+    val day: String,
+
+    // Location identity + display
+    val storeId: String,
+    val storeLocationId: String? = null,
+    val postOmbudId: String? = null,
+    val placeNameSnapshot: String,
+    val citySnapshot: String = "",
+    val lat: Double,
+    val lng: Double,
+    val addressSnapshot: String? = null,
+
+    // From previous stop anchor (best-effort chain)
+    val prevStopId: String? = null,
+    val distanceFromPrevMeters: Int? = null,
+    val durationFromPrevMinutes: Int? = null,
+    val distanceMethod: String? = null,
+
+    /** Optional UI label convenience (e.g. "stop52 Brödet & Fiskarna Västerås 06/22 10:53"). */
+    val displayLabel: String? = null,
+)
+
+@Serializable
+data class PingEventDto(
+    val id: Long,
+    val storeId: String,
+    val storeNameSnapshot: String,
+    val storeLatSnapshot: Double,
+    val storeLngSnapshot: Double,
+    val day: String,
+    val occurredAt: String,
+    val transition: String,
+    val source: String,
+
+    val routeDistanceFromPrevMeters: Int? = null,
+    val routeDurationFromPrevMinutes: Int? = null,
+    val routeSource: String? = null,
+    val routeComputedAt: String? = null,
+
+    /** Local Trip id used as route anchor (if any). */
+    val routeAnchorTripId: Long? = null,
+
+    /** Stable UUID for the route anchor trip (preferred join key). */
+    val routeAnchorTripClientRef: String? = null,
+)
+
+@Serializable
+data class VisitedStoreDto(
+    val storeId: String,
+    val firstVisitedAt: String,
+    val lastVisitedAt: String,
+    val visitCount: Int,
+    val lastStoreNameSnapshot: String,
+    val lastCitySnapshot: String,
+    val lastLatSnapshot: Double,
+    val lastLngSnapshot: Double,
 )
 
 @Serializable

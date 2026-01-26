@@ -6,14 +6,14 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "stores",
-    primaryKeys = ["profileId", "id"],
+    primaryKeys = ["uid", "id"],
     indices = [
-        Index(value = ["profileId"], unique = false),
-        Index(value = ["profileId", "regionCode"], unique = false),
+        Index(value = ["uid"], unique = false),
+        Index(value = ["uid", "regionCode"], unique = false),
     ]
 )
 data class StoreEntity(
-    val profileId: String,
+    val uid: String,
     val id: String,
     val name: String,
     val lat: Double,

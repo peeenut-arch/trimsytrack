@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,15 +16,38 @@ class TripDetailViewModel(private val tripId: Long) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            _trip.value = AppGraph.tripRepository.get(tripId)
+            AppGraph.tripRepository.observeTrip(tripId).collect { t ->
+                _trip.value = t
+            }
         }
     }
 
     fun updateTrip(entity: TripEntity) {
         viewModelScope.launch {
-            AppGraph.tripRepository.updateTrip(entity)
-            _trip.value = entity
+            val previous = _trip.value
+            val isUserMutation = previous != null && previous != entity
+            val desired = if (isUserMutation) {
+                entity.copy(
+                    syncStatus = SyncStatus.PENDING,
+                    syncErrorMachineCode = null,
+                    syncErrorMessage = null,
+                )
+            } else {
+                entity
+            }
+            AppGraph.tripRepository.updateTrip(desired)
         }
+    }
+
+    fun retrySync() {
+        val t = _trip.value ?: return
+        updateTrip(
+            t.copy(
+                syncStatus = SyncStatus.PENDING,
+                syncErrorMachineCode = null,
+                syncErrorMessage = null,
+            )
+        )
     }
 
     companion object {

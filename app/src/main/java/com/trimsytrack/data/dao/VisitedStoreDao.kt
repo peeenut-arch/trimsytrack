@@ -1,6 +1,8 @@
 package com.trimsytrack.data.dao
 
 import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import com.trimsytrack.data.entities.VisitedStoreEntity
@@ -8,13 +10,19 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface VisitedStoreDao {
-    @Query("SELECT * FROM visited_stores WHERE profileId = :profileId ORDER BY lastVisitedAt DESC")
-    fun observeAll(profileId: String): Flow<List<VisitedStoreEntity>>
+    @Query("SELECT * FROM visited_stores WHERE uid = :uid ORDER BY lastVisitedAt DESC")
+    fun observeAll(uid: String): Flow<List<VisitedStoreEntity>>
+
+    @Query("SELECT * FROM visited_stores WHERE uid = :uid ORDER BY lastVisitedAt DESC")
+    suspend fun listAll(uid: String): List<VisitedStoreEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(entities: List<VisitedStoreEntity>)
 
     @Query(
         """
         INSERT INTO visited_stores(
-            profileId,
+            uid,
             storeId,
             firstVisitedAt,
             lastVisitedAt,
@@ -24,7 +32,7 @@ interface VisitedStoreDao {
             lastLatSnapshot,
             lastLngSnapshot
         ) VALUES (
-            :profileId,
+            :uid,
             :storeId,
             :visitedAt,
             :visitedAt,
@@ -34,7 +42,7 @@ interface VisitedStoreDao {
             :lat,
             :lng
         )
-        ON CONFLICT(profileId, storeId) DO UPDATE SET
+        ON CONFLICT(uid, storeId) DO UPDATE SET
             firstVisitedAt = CASE WHEN :visitedAt < firstVisitedAt THEN :visitedAt ELSE firstVisitedAt END,
             lastVisitedAt = CASE WHEN :visitedAt > lastVisitedAt THEN :visitedAt ELSE lastVisitedAt END,
             visitCount = MAX(visitCount, 1),
@@ -45,7 +53,7 @@ interface VisitedStoreDao {
         """
     )
     suspend fun markVisitedOnce(
-        profileId: String,
+        uid: String,
         storeId: String,
         visitedAt: Long,
         name: String,
@@ -54,21 +62,21 @@ interface VisitedStoreDao {
         lng: Double,
     )
 
-    @Query("UPDATE visited_stores SET profileId = :profileId WHERE profileId = ''")
-    suspend fun claimUnscoped(profileId: String)
+    @Query("UPDATE visited_stores SET uid = :uid WHERE uid = ''")
+    suspend fun claimUnscoped(uid: String)
 
     @Query(
-        "DELETE FROM visited_stores WHERE profileId = :newProfileId AND storeId IN (SELECT storeId FROM visited_stores WHERE profileId = :oldProfileId)"
+        "DELETE FROM visited_stores WHERE uid = :newUid AND storeId IN (SELECT storeId FROM visited_stores WHERE uid = :oldUid)"
     )
-    suspend fun deleteConflictsForRekey(oldProfileId: String, newProfileId: String)
+    suspend fun deleteConflictsForRekey(oldUid: String, newUid: String)
 
-    @Query("UPDATE visited_stores SET profileId = :newProfileId WHERE profileId = :oldProfileId")
-    suspend fun updateProfileId(oldProfileId: String, newProfileId: String)
+    @Query("UPDATE visited_stores SET uid = :newUid WHERE uid = :oldUid")
+    suspend fun updateUid(oldUid: String, newUid: String)
 
     @Transaction
-    suspend fun rekeyProfile(oldProfileId: String, newProfileId: String) {
-        if (oldProfileId.isBlank() || newProfileId.isBlank() || oldProfileId == newProfileId) return
-        deleteConflictsForRekey(oldProfileId = oldProfileId, newProfileId = newProfileId)
-        updateProfileId(oldProfileId = oldProfileId, newProfileId = newProfileId)
+    suspend fun rekeyUid(oldUid: String, newUid: String) {
+        if (oldUid.isBlank() || newUid.isBlank() || oldUid == newUid) return
+        deleteConflictsForRekey(oldUid = oldUid, newUid = newUid)
+        updateUid(oldUid = oldUid, newUid = newUid)
     }
 }

@@ -4,9 +4,14 @@ import android.Manifest
 import android.app.TimePickerDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -17,6 +22,7 @@ import android.location.Geocoder
 import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
@@ -70,12 +76,15 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.ImeAction
@@ -87,19 +96,26 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
-import com.trimsytrack.data.IndustryProfile
 import com.trimsytrack.data.RegionPayload
 import com.trimsytrack.data.StorePayload
-import com.trimsytrack.data.sync.BackendSyncMode
+import com.trimsytrack.data.canonical.CanonicalWriteOutboxWorker
+import com.trimsytrack.data.driverdata.DriverDataSnapshotUploadWorker
 import com.trimsytrack.data.entities.StoreEntity
+import com.trimsytrack.data.trackevents.TrackEventsOutboxWorker
+import com.trimsytrack.data.trackevents.TrackEventsCapabilityProbeWorker
 import com.trimsytrack.export.KorjournalExporter
 import com.trimsytrack.ui.components.HomeTileIds
 import java.io.File
@@ -132,7 +148,8 @@ fun SettingsScreen(
     onOpenOnboarding: () -> Unit,
     onOpenAuth: () -> Unit,
     onOpenEvidence: () -> Unit,
-    onOpenProfileLocation: () -> Unit,
+    onOpenAccount: () -> Unit,
+    onOpenAccountLocation: () -> Unit,
     onOpenSavedStores: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -152,11 +169,7 @@ fun SettingsScreen(
 
     val showSyncDialog = rememberSaveable { mutableStateOf(false) }
 
-
-    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
-    val profileName by AppGraph.settings.profileName.collectAsState(initial = "")
-    val profiles by AppGraph.settings.profiles.collectAsState(initial = emptyList())
-    val subProfileId by AppGraph.settings.subProfileId.collectAsState(initial = "")
+    val uid by AppGraph.settings.uid.collectAsState(initial = "")
     val trackingEnabled by AppGraph.settings.trackingEnabled.collectAsState(initial = false)
     val dwell by AppGraph.settings.dwellMinutes.collectAsState(initial = 5)
     val radius by AppGraph.settings.radiusMeters.collectAsState(initial = 120)
@@ -181,9 +194,24 @@ fun SettingsScreen(
     val backendBaseUrl by AppGraph.settings.backendBaseUrl.collectAsState(initial = "")
     val backendDriverId by AppGraph.settings.backendDriverId.collectAsState(initial = "")
 
-    val backendSyncMode by AppGraph.settings.backendSyncMode.collectAsState(initial = BackendSyncMode.INSTANT)
-    val backendDailySyncMinutes by AppGraph.settings.backendDailySyncMinutes.collectAsState(initial = 3 * 60)
-    val backendLastSyncAtMillis by AppGraph.settings.backendLastSyncAtMillis.collectAsState(initial = null)
+    val backendProtocolVersion by AppGraph.settings.backendProtocolVersion.collectAsState(initial = null)
+    val backendProtocolMinSupported by AppGraph.settings.backendProtocolMinSupported.collectAsState(initial = null)
+    val backendProtocolMaxSupported by AppGraph.settings.backendProtocolMaxSupported.collectAsState(initial = null)
+    val backendWritesEnabled by AppGraph.settings.backendWritesEnabled.collectAsState(initial = true)
+    val backendSafetyModeEnabled by AppGraph.settings.backendSafetyModeEnabled.collectAsState(initial = false)
+    val backendSafetyModeReason by AppGraph.settings.backendSafetyModeReason.collectAsState(initial = "")
+
+    val backendService by AppGraph.settings.backendService.collectAsState(initial = null)
+    val backendRevision by AppGraph.settings.backendRevision.collectAsState(initial = null)
+    val backendServerTimeIso by AppGraph.settings.backendServerTimeIso.collectAsState(initial = null)
+
+    val driverDataLastUploadAtMillis by AppGraph.settings.driverDataLastUploadAtMillis.collectAsState(initial = null)
+    val driverDataLastUploadResult by AppGraph.settings.driverDataLastUploadResult.collectAsState(initial = "")
+    val driverDataLastUploadFingerprint by AppGraph.settings.driverDataLastUploadFingerprint.collectAsState(initial = "")
+
+    val trackEventsLastSyncAtMillis by AppGraph.settings.trackEventsLastSyncAtMillis.collectAsState(initial = 0L)
+    val trackEventsLastSyncResult by AppGraph.settings.trackEventsLastSyncResult.collectAsState(initial = "")
+    val trackEventsBackendSupported by AppGraph.settings.trackEventsBackendSupported.collectAsState(initial = true)
 
     val dataStoreLoaded by AppGraph.settings.dataStoreLoaded.collectAsState(initial = false)
     val manualTripSearchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 50)
@@ -196,89 +224,14 @@ fun SettingsScreen(
 
     val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
 
-    LaunchedEffect(dataStoreLoaded, subProfileId, manualTripCategoryConfigs, manualTripCategoriesInitialized) {
-        if (!dataStoreLoaded) return@LaunchedEffect
-        if (manualTripCategoryConfigs.isEmpty() && !manualTripCategoriesInitialized) {
-            AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId)
-        }
-    }
-
-    val activeProfilePhotoUri = remember(activeProfileId, profiles) {
-        profiles.firstOrNull { it.id == activeProfileId }?.photoUri
-    }
-
-    val subProfileLabel = remember(subProfileId) {
-        if (subProfileId.isBlank()) {
-            "Not set"
-        } else {
-            IndustryProfile.entries.firstOrNull { it.id == subProfileId }?.displayName ?: subProfileId
-        }
-    }
-
-    var showEditProfileNameDialog by rememberSaveable { mutableStateOf(false) }
-    var editedProfileName by rememberSaveable { mutableStateOf("") }
-
-    val changeProfilePhotoLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-        onResult = { uri: Uri? ->
-            if (uri != null && activeProfileId.isNotBlank()) {
-                runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                    )
-                }
-                scope.launch { AppGraph.settings.updateProfilePhoto(activeProfileId, uri.toString()) }
-            }
-        },
-    )
-
-    if (showEditProfileNameDialog) {
-        AlertDialog(
-            onDismissRequest = { showEditProfileNameDialog = false },
-            title = { Text("Edit profile name") },
-            text = {
-                OutlinedTextField(
-                    value = editedProfileName,
-                    onValueChange = { editedProfileName = it },
-                    label = { Text("Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = editedProfileName.trim().isNotBlank() && activeProfileId.isNotBlank(),
-                    onClick = {
-                        val newName = editedProfileName.trim()
-                        showEditProfileNameDialog = false
-                        scope.launch { AppGraph.settings.updateProfileName(activeProfileId, newName) }
-                    },
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showEditProfileNameDialog = false }) {
-                    Text("Cancel")
-                }
-            },
-        )
-    }
-    val backendLastSyncResult by AppGraph.settings.backendLastSyncResult.collectAsState(initial = "")
-
     val darkModeEnabled by AppGraph.settings.darkModeEnabled.collectAsState(initial = false)
     val useNewUi by AppGraph.settings.useNewUi.collectAsState(initial = false)
-
-    // Settings UI layout: allow reverting to the previous tabbed layout.
-    val useLegacySettingsLayout by AppGraph.settings.useLegacySettingsLayout.collectAsState(initial = false)
-    var showLayoutDialog by rememberSaveable { mutableStateOf(false) }
 
     // Editable text fields: keep local state to avoid DataStore roundtrip fighting typing.
     var vehicleRegHasFocus by remember { mutableStateOf(false) }
     var driverNameHasFocus by remember { mutableStateOf(false) }
-    var vehicleRegText by rememberSaveable(activeProfileId) { mutableStateOf(vehicleRegNumber) }
-    var driverNameText by rememberSaveable(activeProfileId) { mutableStateOf(driverName) }
+    var vehicleRegText by rememberSaveable(uid) { mutableStateOf(vehicleRegNumber) }
+    var driverNameText by rememberSaveable(uid) { mutableStateOf(driverName) }
 
     LaunchedEffect(vehicleRegNumber, vehicleRegHasFocus) {
         if (!vehicleRegHasFocus) vehicleRegText = vehicleRegNumber
@@ -295,9 +248,6 @@ fun SettingsScreen(
         scope.launch { AppGraph.settings.setDriverName(driverNameText) }
     }
 
-    var backendDailySyncText by rememberSaveable { mutableStateOf(minutesToTime(backendDailySyncMinutes)) }
-    var backendDailySyncError by remember { mutableStateOf<String?>(null) }
-
     val workManager = remember { WorkManager.getInstance(context) }
     val syncWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("backend-sync") }
         .collectAsState(initial = emptyList())
@@ -308,6 +258,18 @@ fun SettingsScreen(
     val dailyWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("backend-sync-daily") }
         .collectAsState(initial = emptyList())
 
+    val canonicalWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("canonical-write-outbox-flush") }
+        .collectAsState(initial = emptyList())
+
+    val driverDataWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("driverdata-snapshot-upload-now") }
+        .collectAsState(initial = emptyList())
+
+    val trackEventsWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("track-events-outbox-upload-now") }
+        .collectAsState(initial = emptyList())
+
+    val stressWorkInfos by remember(workManager) { workManager.uniqueWorkInfosFlow("sync-debug-stress") }
+        .collectAsState(initial = emptyList())
+
     fun deriveState(infos: List<WorkInfo>): WorkInfo.State? = infos.firstOrNull()?.state
     val syncState = deriveState(syncWorkInfos)
     val hourlyState = deriveState(hourlyWorkInfos)
@@ -315,14 +277,171 @@ fun SettingsScreen(
     val anyRunning = listOf(syncState, hourlyState, dailyState).any { it == WorkInfo.State.RUNNING }
     val anyQueued = listOf(syncState, hourlyState, dailyState).any { it == WorkInfo.State.ENQUEUED }
 
-    LaunchedEffect(backendDailySyncMinutes) {
-        backendDailySyncText = minutesToTime(backendDailySyncMinutes)
+    data class SyncOutboxCounts(
+        val pendingCanonical: Int = 0,
+        val pendingTrackEvents: Int = 0,
+    )
+
+    val clipboardManager = LocalClipboardManager.current
+    val syncLogSdf = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+    var syncDebugLog by rememberSaveable { mutableStateOf("") }
+
+    var syncOutboxCounts by remember { mutableStateOf(SyncOutboxCounts()) }
+    var syncOutboxError by remember { mutableStateOf<String?>(null) }
+
+    fun appendSyncDebugLog(message: String) {
+        val ts = runCatching { syncLogSdf.format(Date()) }.getOrDefault("?")
+        val line = "$ts  $message"
+        val next = if (syncDebugLog.isBlank()) "$line\n" else (syncDebugLog + line + "\n")
+        syncDebugLog = next.takeLast(12_000)
+    }
+
+    fun dumpSyncDebugStatusToLog() {
+        fun summarizeWork(label: String, infos: List<WorkInfo>): String {
+            val wi = infos.firstOrNull() ?: return "$label=NONE"
+            val idShort = wi.id.toString().take(8)
+            return "$label=${wi.state}#${wi.runAttemptCount} id=$idShort"
+        }
+
+        val conn = runCatching {
+            val cm = context.getSystemService(ConnectivityManager::class.java)
+            val net = cm.activeNetwork
+            val caps = cm.getNetworkCapabilities(net)
+            val connected = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+            val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val cell = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+            "connected=$connected validated=$validated wifi=$wifi cell=$cell"
+        }.getOrDefault("unknown")
+
+        appendSyncDebugLog("--- STATUS DUMP ---")
+        appendSyncDebugLog("baseUrl=${backendBaseUrl.take(64)} driverId=${backendDriverId.take(32)}")
+        appendSyncDebugLog("net: $conn")
+        appendSyncDebugLog("uid=${uid.trim().ifBlank { "-" }}")
+        appendSyncDebugLog(
+            "protocolVersion=${backendProtocolVersion ?: "-"} (min=${backendProtocolMinSupported ?: "-"}, max=${backendProtocolMaxSupported ?: "-"})"
+        )
+        appendSyncDebugLog(
+            "writesEnabled=$backendWritesEnabled safetyMode=$backendSafetyModeEnabled reason=${backendSafetyModeReason.take(120)}"
+        )
+        appendSyncDebugLog(
+            "backendService=${backendService ?: "-"} backendRevision=${backendRevision ?: "-"} backendTime=${backendServerTimeIso ?: "-"}"
+        )
+        appendSyncDebugLog(
+            "outbox: canonical=${syncOutboxCounts.pendingCanonical} trackEvents=${syncOutboxCounts.pendingTrackEvents}"
+        )
+
+        // Rejected trips preview (async; avoid DB work on main thread)
+        scope.launch {
+            val u = uid.trim()
+            if (u.isBlank()) return@launch
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val count = AppGraph.db.tripDao().countRejected(u)
+                    val items = AppGraph.db.tripDao().listRejected(u, limit = 3)
+                    Pair(count, items)
+                }
+            }
+                .onSuccess { (count, items) ->
+                    appendSyncDebugLog("rejectedTrips=$count")
+                    items.forEach { t ->
+                        val mc = t.syncErrorMachineCode?.trim().orEmpty().ifBlank { "-" }
+                        val msg = t.syncErrorMessage?.trim().orEmpty().ifBlank { "-" }
+                        appendSyncDebugLog("rejected tripId=${t.id} day=${t.day} mc=$mc msg=${msg.take(120)}")
+                    }
+                }
+                .onFailure {
+                    appendSyncDebugLog("rejectedTrips lookup failed: ${it.message ?: it.javaClass.simpleName}")
+                }
+        }
+
+        appendSyncDebugLog(
+            listOf(
+                summarizeWork("canonical", canonicalWorkInfos),
+                summarizeWork("driverdata", driverDataWorkInfos),
+                summarizeWork("trackEvents", trackEventsWorkInfos),
+                summarizeWork("stress", stressWorkInfos),
+            ).joinToString("  ")
+        )
+        appendSyncDebugLog("--- END ---")
+    }
+
+    fun refreshSyncOutboxCounts() {
+        scope.launch {
+            syncOutboxError = null
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    SyncOutboxCounts(
+                        pendingCanonical = AppGraph.syncDb.canonicalWriteOutboxDao().countPending(),
+                        pendingTrackEvents = AppGraph.syncDb.trackEventOutboxDao().countPending(),
+                    )
+                }
+            }
+                .onSuccess {
+                    syncOutboxCounts = it
+                    appendSyncDebugLog("Outbox pending: canonical=${it.pendingCanonical} trackEvents=${it.pendingTrackEvents}")
+                }
+                .onFailure {
+                    val msg = it.message ?: it.javaClass.simpleName
+                    syncOutboxError = msg
+                    appendSyncDebugLog("Outbox read failed: $msg")
+                }
+        }
+    }
+
+    var stressRoundsText by rememberSaveable { mutableStateOf("5") }
+
+    fun enqueueSyncDebugStress(rounds: Int) {
+        val net = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        fun canonicalReq(i: Int) = OneTimeWorkRequestBuilder<CanonicalWriteOutboxWorker>()
+            .setConstraints(net)
+            .setInputData(workDataOf("reason" to "debug_stress#$i"))
+            .addTag("sync-debug-stress")
+            .build()
+
+        fun driverDataReq(i: Int) = OneTimeWorkRequestBuilder<DriverDataSnapshotUploadWorker>()
+            .setConstraints(DriverDataSnapshotUploadWorker.defaultConstraints())
+            .setInputData(
+                workDataOf(
+                    "trigger" to "debug_stress",
+                    "reason" to "debug_stress#$i",
+                )
+            )
+            .addTag("driverdata-snapshot-upload")
+            .addTag("sync-debug-stress")
+            .build()
+
+        fun trackEventsReq(i: Int) = OneTimeWorkRequestBuilder<TrackEventsOutboxWorker>()
+            .setConstraints(net)
+            .setInputData(workDataOf("reason" to "debug_stress#$i"))
+            .addTag("track-events-outbox")
+            .addTag("sync-debug-stress")
+            .build()
+
+        val first = canonicalReq(1)
+        var continuation = workManager.beginUniqueWork(
+            "sync-debug-stress",
+            ExistingWorkPolicy.REPLACE,
+            first,
+        )
+
+        for (i in 1..rounds) {
+            if (i > 1) continuation = continuation.then(canonicalReq(i))
+            continuation = continuation.then(driverDataReq(i))
+            continuation = continuation.then(trackEventsReq(i))
+        }
+
+        continuation.enqueue()
+        appendSyncDebugLog("Stress enqueued: rounds=$rounds")
     }
 
     val allStores by AppGraph.storeRepository.observeAllStores().collectAsState(initial = emptyList())
 
-    val effectiveProfileId = remember(activeProfileId) { activeProfileId.ifBlank { "default" } }
-    val allTrips by AppGraph.db.tripDao().observeAll(effectiveProfileId).collectAsState(initial = emptyList())
+    val effectiveUid = remember(uid) { uid.trim().ifBlank { "anon" } }
+    val allTrips by AppGraph.db.tripDao().observeAll(effectiveUid).collectAsState(initial = emptyList())
 
     fun canonicalizeStoreId(storeId: String): String {
         return when {
@@ -355,17 +474,7 @@ fun SettingsScreen(
             .toList()
     }
 
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val tabTitles = remember { listOf("Körjournal", "Spårning", "Konto") }
-
-    // Collapsed by default (and reset when reopening Settings).
-    var automationExpanded by remember { mutableStateOf(false) }
-    var hiddenAndSyncedExpanded by remember { mutableStateOf(false) }
-    var syncedStoresExpanded by remember { mutableStateOf(false) }
-    var hiddenTripExpanded by remember { mutableStateOf(false) }
-    var homeTilesMenuExpanded by remember { mutableStateOf(false) }
-    var visitedStorePhotosMenuExpanded by remember { mutableStateOf(false) }
-    var resehanterareTab by rememberSaveable { mutableIntStateOf(0) }
+    // Collapsed by default.
     var arbetstidExpanded by remember { mutableStateOf(false) }
 
     var activeStartText by rememberSaveable { mutableStateOf(minutesToTime(activeStartMinutes)) }
@@ -408,6 +517,10 @@ fun SettingsScreen(
     var showStartOverConfirm by remember { mutableStateOf(false) }
     var startOverBusy by remember { mutableStateOf(false) }
 
+    var showForceCloudRestoreConfirm by remember { mutableStateOf(false) }
+    var forceCloudRestoreBusy by remember { mutableStateOf(false) }
+    var forceCloudRestoreConfirmText by rememberSaveable { mutableStateOf("") }
+
     val clearDataRequiredPassword = "12345109876DELETE"
     var showClearDataFirstConfirmDialog by rememberSaveable { mutableStateOf(false) }
     var showClearDataPasswordDialog by rememberSaveable { mutableStateOf(false) }
@@ -415,22 +528,21 @@ fun SettingsScreen(
     var clearDataBusy by rememberSaveable { mutableStateOf(false) }
     var clearDataPassword by rememberSaveable { mutableStateOf("") }
 
-    var backendDataExpanded by remember { mutableStateOf(false) }
-
-    suspend fun loadStoredDataCounts(profileId: String): StoredDataCounts = withContext(Dispatchers.IO) {
+    suspend fun loadStoredDataCounts(uid: String): StoredDataCounts = withContext(Dispatchers.IO) {
         StoredDataCounts(
-            trips = AppGraph.db.tripDao().countAll(profileId),
-            stores = AppGraph.db.storeDao().countAll(profileId),
-            promptEvents = AppGraph.db.promptDao().countAll(profileId),
-            runs = AppGraph.db.runDao().countAll(profileId),
-            distanceCache = AppGraph.db.distanceCacheDao().countAll(profileId),
+            trips = AppGraph.db.tripDao().countAll(uid),
+            stores = AppGraph.db.storeDao().countAll(uid),
+            promptEvents = AppGraph.db.promptDao().countAll(uid),
+            runs = AppGraph.db.runDao().countAll(uid),
+            distanceCache = AppGraph.db.distanceCacheDao().countAll(uid),
         )
     }
 
-    LaunchedEffect(activeProfileId) {
+    LaunchedEffect(uid) {
         storedDataError = null
+        refreshSyncOutboxCounts()
         runCatching {
-            loadStoredDataCounts(activeProfileId.ifBlank { "default" })
+            loadStoredDataCounts(uid.trim().ifBlank { "anon" })
         }.onSuccess { storedDataCounts = it }
             .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
     }
@@ -439,6 +551,7 @@ fun SettingsScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 refreshTick.intValue++
+                refreshSyncOutboxCounts()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -494,12 +607,22 @@ fun SettingsScreen(
                     Manifest.permission.ACCESS_BACKGROUND_LOCATION
                 ) == PackageManager.PERMISSION_GRANTED
 
+            val nowHasNotifications = Build.VERSION.SDK_INT < 33 ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+
             if (!nowHasFine) {
                 permissionHint.value = "Please allow Location so the app can detect store visits."
                 return@rememberLauncherForActivityResult
             }
             if (!nowHasBackground) {
                 permissionHint.value = "Please set Location to ‘Allow all the time’ for background prompts."
+                return@rememberLauncherForActivityResult
+            }
+            if (!nowHasNotifications) {
+                permissionHint.value = "Please allow Notifications so the app can remind you about trips."
                 return@rememberLauncherForActivityResult
             }
 
@@ -549,6 +672,59 @@ fun SettingsScreen(
 
     var exporting by remember { mutableStateOf(false) }
     var exportMessage by remember { mutableStateOf<String?>(null) }
+    var showExportOptionsDialog by remember { mutableStateOf(false) }
+
+    fun exportKorjournalShare() {
+        if (exporting) return
+        exporting = true
+        exportMessage = null
+        scope.launch {
+            try {
+                val result = KorjournalExporter.exportYearCsv(
+                    context = context,
+                    settings = AppGraph.settings,
+                    trips = AppGraph.tripRepository,
+                    year = journalYear,
+                )
+
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/csv"
+                    putExtra(Intent.EXTRA_SUBJECT, "Körjournal ${journalYear}")
+                    putExtra(Intent.EXTRA_STREAM, result.uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(Intent.createChooser(shareIntent, "Share körjournal"))
+                exportMessage = "Exported ${result.tripCount} trips: ${result.displayName}"
+            } catch (e: Exception) {
+                exportMessage = "Export failed: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                exporting = false
+            }
+        }
+    }
+
+    fun exportKorjournalToDownloads() {
+        if (exporting) return
+        exporting = true
+        exportMessage = null
+        scope.launch {
+            try {
+                val name = "korjournal_${journalYear}.csv"
+                val result = KorjournalExporter.exportYearCsvToDownloads(
+                    context = context,
+                    settings = AppGraph.settings,
+                    trips = AppGraph.tripRepository,
+                    year = journalYear,
+                    displayName = name,
+                )
+                exportMessage = "Saved ${result.tripCount} trips to Downloads: ${name}"
+            } catch (e: Exception) {
+                exportMessage = "Save failed: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                exporting = false
+            }
+        }
+    }
 
     val saveKorjournalLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("text/csv"),
@@ -603,7 +779,8 @@ fun SettingsScreen(
             text = {
                 Text(
                     "This clears local database + settings on this device and signs you out. " +
-                        "After this, onboarding will run again.",
+                        "After this, onboarding will run again. " +
+                        "If you don’t have a cloud DriverData snapshot (or a CSV export), trips and autosync locations cannot be recovered.",
                 )
             },
             confirmButton = {
@@ -638,7 +815,7 @@ fun SettingsScreen(
                                 FirebaseAuth.getInstance().signOut()
 
                                 storedDataError = null
-                                runCatching { loadStoredDataCounts(activeProfileId.ifBlank { "default" }) }
+                                runCatching { loadStoredDataCounts(uid.trim().ifBlank { "anon" }) }
                                     .onSuccess { storedDataCounts = it }
                                     .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
 
@@ -668,34 +845,69 @@ fun SettingsScreen(
         )
     }
 
-    if (showLayoutDialog) {
+    if (showForceCloudRestoreConfirm) {
         AlertDialog(
-            onDismissRequest = { showLayoutDialog = false },
-            title = { Text("Settings layout") },
+            onDismissRequest = { if (!forceCloudRestoreBusy) showForceCloudRestoreConfirm = false },
+            title = { Text("Restore from cloud snapshot") },
             text = {
-                Text(
-                    if (useLegacySettingsLayout) {
-                        "Switch to the simplified settings layout? (You can switch back anytime.)"
-                    } else {
-                        "Revert to the previous (classic) settings layout? (You can switch back anytime.)"
-                    }
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "This replaces local trips + settings with the latest cloud DriverData snapshot for your account. " +
+                            "Use this after reinstall / data loss. Type RESTORE to confirm.",
+                    )
+
+                    OutlinedTextField(
+                        value = forceCloudRestoreConfirmText,
+                        onValueChange = { forceCloudRestoreConfirmText = it },
+                        label = { Text("Type RESTORE") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             },
             confirmButton = {
                 Button(
+                    enabled = !forceCloudRestoreBusy && forceCloudRestoreConfirmText.trim().uppercase() == "RESTORE",
                     onClick = {
-                        showLayoutDialog = false
-                        scope.launch { AppGraph.settings.setUseLegacySettingsLayout(!useLegacySettingsLayout) }
+                        scope.launch {
+                            forceCloudRestoreBusy = true
+                            try {
+                                appendSyncDebugLog("Force restore: starting")
+                                val snapshot = withContext(Dispatchers.IO) {
+                                    AppGraph.driverDataRepository.downloadAndRestore()
+                                }
+
+                                appendSyncDebugLog(
+                                    "Force restore: ok trips=${snapshot.trips.size} runs=${snapshot.runs.size} visitedStores=${snapshot.visitedStores.size}"
+                                )
+
+                                storedDataError = null
+                                runCatching { loadStoredDataCounts(uid.trim().ifBlank { "anon" }) }
+                                    .onSuccess { storedDataCounts = it }
+                                    .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+
+                                refreshSyncOutboxCounts()
+                                showForceCloudRestoreConfirm = false
+                                forceCloudRestoreConfirmText = ""
+                            } catch (t: Throwable) {
+                                appendSyncDebugLog("Force restore: failed ${t.message ?: t.javaClass.simpleName}")
+                            } finally {
+                                forceCloudRestoreBusy = false
+                            }
+                        }
                     },
                 ) {
-                    Text(if (useLegacySettingsLayout) "Use simplified" else "Use classic")
+                    Text(if (forceCloudRestoreBusy) "Restoring..." else "Restore")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showLayoutDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { if (!forceCloudRestoreBusy) showForceCloudRestoreConfirm = false }) {
+                    Text("Cancel")
+                }
             },
         )
     }
+
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -703,41 +915,22 @@ fun SettingsScreen(
         contentWindowInsets = WindowInsets.statusBars,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
-            Column {
-                TopAppBar(
-                    title = { Text("Settings") },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background,
-                        titleContentColor = MaterialTheme.colorScheme.onBackground,
-                        navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
-                    )
-                )
-                if (useLegacySettingsLayout) {
-                    TabRow(selectedTabIndex = selectedTab) {
-                        tabTitles.forEachIndexed { index, title ->
-                            val icon = when (index) {
-                                0 -> Icons.Filled.Settings
-                                1 -> Icons.Filled.Tune
-                                else -> Icons.Filled.AccountCircle
-                            }
-                            Tab(
-                                selected = selectedTab == index,
-                                onClick = { selectedTab = index },
-                                text = { Text(title) },
-                                icon = { Icon(icon, contentDescription = null) },
-                            )
-                        }
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Close",
+                        )
                     }
-                }
-            }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onBackground,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onBackground,
+                )
+            )
         }
     ) { padding ->
         LazyColumn(
@@ -752,6 +945,665 @@ fun SettingsScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            item {
+                val driverLabel = driverNameText.trim().ifBlank { "No driver name" }
+                val vehicleLabel = vehicleRegText.trim().ifBlank { "No vehicle" }
+                val accountSubtitle = buildString {
+                    val email = signedInUser?.email?.trim().orEmpty()
+                    if (email.isNotBlank()) append(email) else append("Not signed in")
+                    append(" • ")
+                    append(driverLabel)
+                    append(" • ")
+                    append(vehicleLabel)
+                }
+
+                SettingsAccordionCard(
+                    title = "Account",
+                    subtitle = accountSubtitle,
+                ) {
+                    ListItem(
+                        headlineContent = { Text(if (signedInUser == null) "Sign in" else "Account") },
+                        supportingContent = {
+                            val email = signedInUser?.email?.trim().orEmpty()
+                            Text(
+                                if (signedInUser == null) {
+                                    "Google or email/password"
+                                } else {
+                                    email.ifBlank { "Account details" }
+                                },
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        trailingContent = {
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (signedInUser == null) onOpenAuth() else onOpenAccount()
+                            },
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    Text(
+                        "Driver Info",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+
+                    OutlinedTextField(
+                        value = journalYear.toString(),
+                        onValueChange = { raw ->
+                            val parsed = raw.filter { it.isDigit() }.take(4).toIntOrNull()
+                            if (parsed != null) scope.launch { AppGraph.settings.setJournalYear(parsed) }
+                        },
+                        label = { Text("Year") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        singleLine = true,
+                    )
+
+                    OutlinedTextField(
+                        value = vehicleRegText,
+                        onValueChange = { vehicleRegText = it },
+                        label = { Text("Vehicle registration number") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .onFocusChanged {
+                                val hadFocus = vehicleRegHasFocus
+                                vehicleRegHasFocus = it.isFocused
+                                if (hadFocus && !it.isFocused) commitVehicleReg()
+                            },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                commitVehicleReg()
+                                focusManager.clearFocus()
+                            },
+                        ),
+                    )
+
+                    OutlinedTextField(
+                        value = driverNameText,
+                        onValueChange = { driverNameText = it },
+                        label = { Text("Driver name") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .onFocusChanged {
+                                val hadFocus = driverNameHasFocus
+                                driverNameHasFocus = it.isFocused
+                                if (hadFocus && !it.isFocused) commitDriverName()
+                            },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                commitDriverName()
+                                focusManager.clearFocus()
+                            },
+                        ),
+                    )
+
+                    OutlinedTextField(
+                        value = businessHomeAddress,
+                        onValueChange = { scope.launch { AppGraph.settings.setBusinessHomeAddress(it) } },
+                        label = { Text("Business home address") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        singleLine = false,
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+                }
+            }
+
+            item {
+                SettingsAccordionCard(
+                    title = "Backend och data",
+                    subtitle = "Synk, ID och lagrad data",
+                ) {
+                    Text(
+                        "Backend",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+
+                    OutlinedTextField(
+                        value = backendBaseUrl,
+                        onValueChange = { scope.launch { AppGraph.settings.setBackendBaseUrl(it) } },
+                        label = { Text("Base URL") },
+                        placeholder = { Text("https://...") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        singleLine = true,
+                    )
+
+                    OutlinedTextField(
+                        value = backendDriverId,
+                        onValueChange = { scope.launch { AppGraph.settings.setBackendDriverId(it) } },
+                        label = { Text("Driver ID") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        singleLine = true,
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    Text(
+                        "Backend sync (debug)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+
+                    if (!syncOutboxError.isNullOrBlank()) {
+                        Text(
+                            "Failed to read outbox counts: ${syncOutboxError}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+
+                    ListItem(
+                        headlineContent = { Text("Backend flags") },
+                        supportingContent = {
+                            Text(
+                                "protocol=${backendProtocolVersion ?: "-"}  writesEnabled=${backendWritesEnabled}  safetyMode=${backendSafetyModeEnabled}",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        trailingContent = {
+                            Text(
+                                backendSafetyModeReason.takeIf { it.isNotBlank() }?.take(24) ?: "",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    ListItem(
+                        headlineContent = { Text("Outbox pending") },
+                        supportingContent = {
+                            Text(
+                                "canonical=${syncOutboxCounts.pendingCanonical}  trackEvents=${syncOutboxCounts.pendingTrackEvents}",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        trailingContent = {
+                            TextButton(onClick = {
+                                appendSyncDebugLog("Manual refresh")
+                                refreshSyncOutboxCounts()
+                            }) {
+                                Text("Refresh")
+                            }
+                        },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    ListItem(
+                        headlineContent = { Text("Last DriverData snapshot") },
+                        supportingContent = {
+                            Text(
+                                "${driverDataLastUploadResult.ifBlank { "-" }}  fp=${driverDataLastUploadFingerprint.take(10)}",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        trailingContent = {
+                            Text(
+                                driverDataLastUploadAtMillis?.toString() ?: "-",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    ListItem(
+                        headlineContent = { Text("Last TrackEvents sync") },
+                        supportingContent = {
+                            Text(
+                                trackEventsLastSyncResult.ifBlank { "-" },
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        trailingContent = {
+                            Text(
+                                trackEventsLastSyncAtMillis.toString(),
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            appendSyncDebugLog("Enqueue: canonical outbox flush")
+                            AppGraph.canonicalWritesSyncManager.enqueueImmediate("settings_debug")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Enqueue canonical flush")
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            appendSyncDebugLog("Enqueue: DriverData snapshot upload")
+                            AppGraph.driverDataSyncManager.enqueueImmediate(reason = "settings_debug", trigger = "settings")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Upload DriverData snapshot (now)")
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = {
+                            appendSyncDebugLog("Open: Force restore from cloud snapshot")
+                            showForceCloudRestoreConfirm = true
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Force restore from cloud snapshot")
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            appendSyncDebugLog("Enqueue: TrackEvents outbox sync")
+                            if (!trackEventsBackendSupported) {
+                                appendSyncDebugLog("TrackEvents is disabled (backendSupported=false). Probing capability now...")
+                                TrackEventsCapabilityProbeWorker.enqueueNow(context, reason = "settings_debug")
+                            } else {
+                                TrackEventsOutboxWorker.enqueue(context, reason = "settings_debug")
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Sync TrackEvents (now)")
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    OutlinedTextField(
+                        value = stressRoundsText,
+                        onValueChange = { stressRoundsText = it.filter { ch -> ch.isDigit() }.take(3) },
+                        label = { Text("Stress rounds") },
+                        supportingText = { Text("Enqueues a unique WorkManager chain: canonical → snapshot → trackEvents") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Button(
+                            onClick = {
+                                val rounds = stressRoundsText.toIntOrNull()?.coerceIn(1, 200) ?: 5
+                                enqueueSyncDebugStress(rounds)
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Start stress")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                appendSyncDebugLog("Stress canceled")
+                                workManager.cancelUniqueWork("sync-debug-stress")
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    ListItem(
+                        headlineContent = { Text("Work states") },
+                        supportingContent = {
+                            Text(
+                                "canonical=${deriveState(canonicalWorkInfos)}  driverdata=${deriveState(driverDataWorkInfos)}  trackEvents=${deriveState(trackEventsWorkInfos)}  stress=${deriveState(stressWorkInfos)}",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = { dumpSyncDebugStatusToLog() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Dump status")
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Log",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                    )
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        ),
+                    ) {
+                        val logScroll = rememberScrollState()
+                        Text(
+                            text = syncDebugLog.ifBlank { "(empty)" },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 110.dp, max = 240.dp)
+                                .verticalScroll(logScroll)
+                                .padding(12.dp),
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(syncDebugLog))
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Copy") }
+                        OutlinedButton(
+                            onClick = { syncDebugLog = "" },
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Clear") }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    Text(
+                        "Lagrad data",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+
+                    if (!storedDataError.isNullOrBlank()) {
+                        Text(
+                            "Kunde inte läsa antal: ${storedDataError}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+
+                    ListItem(
+                        headlineContent = { Text("Resor") },
+                        supportingContent = { Text("Start-GPS + butik + sparad distans") },
+                        trailingContent = { Text(storedDataCounts.trips.toString()) },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        headlineContent = { Text("Butiker") },
+                        supportingContent = { Text("Sparade platser (namn + lat/lng)") },
+                        trailingContent = { Text(storedDataCounts.stores.toString()) },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        headlineContent = { Text("Frågor") },
+                        supportingContent = { Text("Geofence-historik (när den frågade)") },
+                        trailingContent = { Text(storedDataCounts.promptEvents.toString()) },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        headlineContent = { Text("Distance cache") },
+                        supportingContent = { Text("Cached route distances") },
+                        trailingContent = { Text(storedDataCounts.distanceCache.toString()) },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        headlineContent = { Text("Runs") },
+                        supportingContent = { Text("Saved run groupings") },
+                        trailingContent = { Text(storedDataCounts.runs.toString()) },
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = { showStartOverConfirm = true },
+                        enabled = !startOverBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                    ) {
+                        Text("Start over (new user)")
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+            }
+
+            item {
+                val missingFine = !hasFineLocation
+                val missingBackground = !hasBackgroundLocation
+                val missingNotifications = Build.VERSION.SDK_INT >= 33 && !hasNotifications
+                val permSubtitle = buildString {
+                    append("Plats: ")
+                    append(if (hasFineLocation) "OK" else "SAKNAS")
+                    append(" • Bakgrund: ")
+                    append(if (hasBackgroundLocation) "OK" else "SAKNAS")
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        append(" • Notiser: ")
+                        append(if (hasNotifications) "OK" else "SAKNAS")
+                    }
+                }
+
+                SettingsAccordionCard(
+                    title = "Spårning och behörigheter",
+                    subtitle = permSubtitle,
+                ) {
+                    ListItem(
+                        headlineContent = { Text("Spårning") },
+                        supportingContent = { Text("Använder Android geofence (ingen GPS-pollning).") },
+                        trailingContent = {
+                            Switch(
+                                checked = trackingEnabled,
+                                onCheckedChange = { enabled ->
+                                    scope.launch {
+                                        if (enabled) {
+                                            val notificationsOk = Build.VERSION.SDK_INT < 33 || hasNotifications
+                                            if (!hasFineLocation || !hasBackgroundLocation || !notificationsOk) {
+                                                permissionHint.value = "Ge behörigheter först."
+                                                requestNeededPermissions()
+                                                return@launch
+                                            }
+                                            permissionHint.value = null
+                                            AppGraph.settings.setTrackingEnabled(true)
+                                            AppGraph.geofenceSyncManager.scheduleSync("user_enabled")
+                                        } else {
+                                            AppGraph.settings.setTrackingEnabled(false)
+                                            AppGraph.geofenceSyncManager.scheduleDisable("user_disabled")
+                                        }
+                                    }
+                                },
+                            )
+                        },
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    ListItem(
+                        headlineContent = { Text("Behörigheter") },
+                        supportingContent = {
+                            Text(
+                                "Plats: ${if (hasFineLocation) "OK" else "SAKNAS"}\n" +
+                                    "Bakgrundsplats: ${if (hasBackgroundLocation) "OK" else "SAKNAS"}\n" +
+                                    "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
+                    )
+
+                    if (missingFine || missingBackground || missingNotifications) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = { requestNeededPermissions() },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("Begär") }
+                            OutlinedButton(
+                                onClick = { openAppSettings() },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("Inställningar") }
+                        }
+                    }
+
+                    if (permissionHint.value != null) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Text(
+                            permissionHint.value ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+            }
+
+            item {
+                SettingsAccordionCard(
+                    title = "Automatiska frågor",
+                    subtitle = "Tid ${dwell}m • Radie ${radius}m",
+                ) {
+                    SettingStepper(
+                        label = "Tid innan fråga (minuter)",
+                        description = "Vänta så här länge innan en fråga visas.",
+                        value = dwell,
+                        min = 1,
+                        max = 60,
+                        onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
+                    )
+                    SettingStepper(
+                        label = "Upptäcktsradie (meter)",
+                        description = "Hur nära du måste vara för att räknas som 'där'.",
+                        value = radius,
+                        min = 75,
+                        max = 150,
+                        onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
+                    )
+                    SettingStepper(
+                        label = "Max frågor per dag",
+                        description = "Högsta antal frågor per dag.",
+                        value = limit,
+                        min = 1,
+                        max = 200,
+                        onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
+                    )
+                    SettingStepper(
+                        label = "Tystnad efter Avfärda (minuter)",
+                        description = "Efter Avfärda väntar den så här länge.",
+                        value = suppression,
+                        min = 0,
+                        max = 24 * 60,
+                        onChange = { scope.launch { AppGraph.settings.setSuppressionMinutes(it) } },
+                    )
+
+                    OutlinedButton(
+                        onClick = { scope.launch { AppGraph.geofenceSyncManager.scheduleSync("manual_sync") } },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                    ) { Text("Update places") }
+
+                    Spacer(Modifier.height(10.dp))
+                }
+            }
+
+            item {
+                SettingsAccordionCard(
+                    title = "Manual trip",
+                    subtitle = "Default search distance: ${manualTripSearchRadiusKm} km",
+                ) {
+                    SettingStepper(
+                        label = "Default search distance (km)",
+                        description = "Used on the manual trip search screen.",
+                        value = manualTripSearchRadiusKm,
+                        min = 1,
+                        max = 500,
+                        onChange = { km -> scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) } },
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+            }
+
+            item {
+                SettingsAccordionCard(
+                    title = "Export",
+                    subtitle = "Körjournal (CSV)",
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (exporting) return@OutlinedButton
+                            showExportOptionsDialog = true
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        enabled = !exporting,
+                    ) {
+                        Text(if (exporting) "Exporting..." else "Export options")
+                    }
+
+                    if (exportMessage != null) {
+                        Text(
+                            exportMessage ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
+                }
+            }
+
+            /* Legacy settings UI removed (classic view + old sections)
             item {
                 SettingsSectionCard(title = "Startsida tiles") {
                     ListItem(
@@ -1757,113 +2609,6 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Backend och data") {
-                        ListItem(
-                            headlineContent = { Text("Backend och data") },
-                            supportingContent = { Text("Synk, ID och lagrad data") },
-                            trailingContent = {
-                                Icon(
-                                    if (backendDataExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = null,
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { backendDataExpanded = !backendDataExpanded },
-                        )
-
-                        if (backendDataExpanded) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                            Text(
-                                "Lagrad data",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            )
-
-                            Text(
-                                "Sparat lokalt på den här enheten (databas + inställningar).",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                            )
-
-                        if (!storedDataError.isNullOrBlank()) {
-                            Text(
-                                "Kunde inte läsa antal: ${storedDataError}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                        }
-
-                        ListItem(
-                            headlineContent = { Text("Resor") },
-                            supportingContent = { Text("Start-GPS + butik + sparad distans") },
-                            trailingContent = { Text(storedDataCounts.trips.toString()) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Butiker") },
-                            supportingContent = { Text("Sparade platser (namn + lat/lng)") },
-                            trailingContent = { Text(storedDataCounts.stores.toString()) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Frågor") },
-                            supportingContent = { Text("Geofence-historik (när den frågade)") },
-                            trailingContent = { Text(storedDataCounts.promptEvents.toString()) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Distance cache") },
-                            supportingContent = { Text("Cached route distances (reduces repeated lookups)") },
-                            trailingContent = { Text(storedDataCounts.distanceCache.toString()) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Runs") },
-                            supportingContent = { Text("Saved run groupings") },
-                            trailingContent = { Text(storedDataCounts.runs.toString()) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Store photos") },
-                            supportingContent = { Text("Custom images you picked") },
-                            trailingContent = { Text(storeImages.size.toString()) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Store hours") },
-                            supportingContent = { Text("Opening hours you saved") },
-                            trailingContent = { Text(storeBusinessHours.size.toString()) },
-                        )
-
-                        Spacer(Modifier.height(10.dp))
-                        Button(
-                            onClick = { showStartOverConfirm = true },
-                            enabled = !startOverBusy,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                        ) {
-                            Text("Start over (new user)")
-                        }
-
-                        Spacer(Modifier.height(10.dp))
-                        }
-                    }
-                }
-
-                item {
                     SettingsSectionCard(title = "Underlag") {
                         ListItem(
                             headlineContent = { Text("Underlag") },
@@ -2436,7 +3181,57 @@ fun SettingsScreen(
                     }
                 }
             }
+            */
         }
+    }
+
+    if (showExportOptionsDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!exporting) showExportOptionsDialog = false },
+            title = { Text("Export") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Choose how you want to export the körjournal for ${journalYear}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            showExportOptionsDialog = false
+                            exportKorjournalShare()
+                        },
+                        enabled = !exporting,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Share (CSV)") }
+
+                    OutlinedButton(
+                        onClick = {
+                            showExportOptionsDialog = false
+                            saveKorjournalLauncher.launch("Korjournal_${journalYear}.csv")
+                        },
+                        enabled = !exporting,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Save to file...") }
+
+                    OutlinedButton(
+                        onClick = {
+                            showExportOptionsDialog = false
+                            exportKorjournalToDownloads()
+                        },
+                        enabled = !exporting,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Save to Downloads") }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showExportOptionsDialog = false },
+                    enabled = !exporting,
+                ) { Text("Close") }
+            },
+        )
     }
 
     if (showSyncDialog.value) {
@@ -2572,6 +3367,54 @@ fun SettingsScreen(
             },
         )
     }
+}
+
+@Composable
+private fun SettingsAccordionCard(
+    title: String,
+    subtitle: String? = null,
+    defaultExpanded: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    var expanded by rememberSaveable(title) { mutableStateOf(defaultExpanded) }
+
+    OutlinedCard(
+        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.animateContentSize()) {
+            ListItem(
+                headlineContent = { Text(title) },
+                supportingContent =
+                    subtitle?.let {
+                        {
+                            Text(
+                                it,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            )
+                        }
+                    },
+                trailingContent = {
+                    Icon(
+                        Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        modifier = Modifier.rotate(if (expanded) 180f else 0f),
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+            )
+
+            if (expanded) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                content()
+            }
+        }
+    }
+
+    Spacer(Modifier.height(12.dp))
 }
 
 @Composable

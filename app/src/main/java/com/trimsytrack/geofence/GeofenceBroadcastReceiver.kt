@@ -7,16 +7,22 @@ import android.util.Log
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingEvent
 import com.trimsytrack.AppGraph
+import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.data.entities.PingEventEntity
+import com.trimsytrack.data.entities.PingSource
+import com.trimsytrack.data.entities.PingTransition
 import com.trimsytrack.data.entities.PromptEventEntity
 import com.trimsytrack.data.entities.PromptStatus
+import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.notifications.PromptNotifications
+import com.trimsytrack.notifications.RunCompletionNotifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
-import java.time.LocalTime
 import java.time.Instant
-import java.time.LocalDate
+import java.time.Duration
+import java.time.ZoneId
 
 class GeofenceBroadcastReceiver : BroadcastReceiver() {
 
@@ -38,15 +44,34 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
 
                 val geofence = event.triggeringGeofences?.firstOrNull() ?: return@launch
                 val storeId = geofence.requestId
+                val occurredAt = event.triggeringLocation?.time
+                    ?.takeIf { it > 0 }
+                    ?.let { Instant.ofEpochMilli(it) }
+                    ?: Instant.now()
+
+                AppGraph.settings.setLastGeofenceEvent(
+                    storeId = storeId,
+                    transition = event.geofenceTransition.toString(),
+                    occurredAt = occurredAt,
+                )
 
                 Log.i(TAG, "Geofence transition=${event.geofenceTransition} storeId=$storeId")
 
                 when (event.geofenceTransition) {
                     Geofence.GEOFENCE_TRANSITION_ENTER -> {
-                        // ENTER is used to start dwell timing; we only prompt on DWELL.
+                        logPing(storeId, PingTransition.ENTER, occurredAt)
+                        // Prompt immediately on arrival.
+                        handleArrive(storeId, occurredAt)
                     }
-                    Geofence.GEOFENCE_TRANSITION_DWELL -> handleDwell(storeId)
-                    Geofence.GEOFENCE_TRANSITION_EXIT -> handleExit(storeId)
+                    Geofence.GEOFENCE_TRANSITION_DWELL -> {
+                        logPing(storeId, PingTransition.DWELL, occurredAt)
+                        // Fallback: in case ENTER was delayed/batched.
+                        handleArrive(storeId, occurredAt)
+                    }
+                    Geofence.GEOFENCE_TRANSITION_EXIT -> {
+                        // EXIT isn't useful for arrival time; keep timeline clean.
+                        handleExit(storeId)
+                    }
                 }
             } finally {
                 pendingResult.finish()
@@ -54,68 +79,86 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
         }
     }
 
-    private suspend fun handleDwell(storeId: String) {
+    private fun dayFor(at: Instant): java.time.LocalDate {
+        val zone = ZoneId.systemDefault()
+        return at.atZone(zone).toLocalDate()
+    }
+
+    private suspend fun logPing(storeId: String, transition: PingTransition, occurredAt: Instant) {
+        val uid = AppGraph.pingRepository.currentUidOrEmpty()
+        if (uid.isBlank()) return
+        val day = dayFor(occurredAt)
+
+        val (name, lat, lng) = if (storeId == BUSINESS_HOME_LOCATION_ID) {
+            val homeLat = AppGraph.settings.businessHomeLat.first()
+            val homeLng = AppGraph.settings.businessHomeLng.first()
+            if (homeLat == null || homeLng == null) return
+            val label = AppGraph.settings.businessHomeAddress.first()?.trim().orEmpty().ifBlank { "Business home" }
+            Triple(label, homeLat, homeLng)
+        } else {
+            val store = AppGraph.storeRepository.getStore(storeId) ?: return
+            Triple(store.name, store.lat, store.lng)
+        }
+
+        AppGraph.pingRepository.insert(
+            PingEventEntity(
+                uid = uid,
+                storeId = storeId,
+                storeNameSnapshot = name,
+                storeLatSnapshot = lat,
+                storeLngSnapshot = lng,
+                day = day,
+                occurredAt = occurredAt,
+                transition = transition,
+                source = PingSource.GEOFENCE,
+            )
+        )
+    }
+
+    private suspend fun handleArrive(storeId: String, occurredAt: Instant) {
+        if (storeId == BUSINESS_HOME_LOCATION_ID) {
+            handleArriveHome(occurredAt)
+            return
+        }
+
         // Minimal private zone support: never prompt for ignored stores.
         val ignoredStoreIds = AppGraph.settings.ignoredStoreIds.first()
         if (ignoredStoreIds.contains(storeId)) {
-            Log.i(TAG, "DWELL suppressed: ignored storeId=$storeId")
+            Log.i(TAG, "ARRIVE suppressed: ignored storeId=$storeId")
             return
-        }
-
-        // Active time/day gating
-        val dayOfWeek = LocalDate.now().dayOfWeek
-        val activeDays = AppGraph.settings.activeDays.first()
-        if (!activeDays.contains(dayOfWeek)) {
-            Log.i(TAG, "DWELL suppressed: inactive day=$dayOfWeek storeId=$storeId")
-            return
-        }
-
-        val nowTime = LocalTime.now()
-        val minutesNow = nowTime.hour * 60 + nowTime.minute
-        val startMin = AppGraph.settings.activeStartMinutes.first().coerceIn(0, 24 * 60)
-        val endMin = AppGraph.settings.activeEndMinutes.first().coerceIn(0, 24 * 60)
-        if (endMin > startMin) {
-            if (minutesNow !in startMin until endMin) {
-                Log.i(TAG, "DWELL suppressed: inactive time now=$minutesNow start=$startMin end=$endMin storeId=$storeId")
-                return
-            }
         }
 
         val store = AppGraph.storeRepository.getStore(storeId) ?: return
-        val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
-        val day = LocalDate.now()
-        val now = Instant.now()
+    val uid = AppGraph.settings.uidOrEmpty()
+    if (uid.isBlank()) return
+        val day = dayFor(occurredAt)
+        val now = occurredAt
 
-        // Rules: per-store-per-day, suppression after dismissal, daily limits
-        val perStorePerDay = AppGraph.settings.perStorePerDay.first()
-        val suppressionMinutes = AppGraph.settings.suppressionMinutes.first().coerceAtLeast(0)
-        val dailyLimit = AppGraph.settings.dailyPromptLimit.first().coerceAtLeast(1)
-
-        val latest = AppGraph.db.promptDao().getLatestForStoreDay(profileId, storeId, day)
-        if (perStorePerDay && latest != null && latest.status != PromptStatus.DELETED) {
-            Log.i(TAG, "DWELL suppressed: perStorePerDay storeId=$storeId status=${latest.status}")
-            return
-        }
-
-        if (latest != null && latest.status == PromptStatus.DISMISSED) {
-            val minutes = (now.toEpochMilli() - latest.lastUpdatedAt.toEpochMilli()) / 60_000
-            if (minutes < suppressionMinutes) {
-                Log.i(TAG, "DWELL suppressed: dismissal suppression storeId=$storeId minutes=$minutes")
+        // Avoid spamming duplicates if Play Services delivers ENTER/DWELL repeatedly while you're still there.
+        val latest = AppGraph.db.promptDao().getLatestForStoreDay(uid, storeId, day)
+        if (latest != null) {
+            val minutesSince = Duration.between(latest.triggeredAt, now).toMinutes()
+            if (minutesSince in 0..29) {
+                if (latest.status == PromptStatus.TRIGGERED) {
+                    Log.i(TAG, "ARRIVE: re-show existing promptId=${latest.id} storeId=$storeId")
+                    PromptNotifications.showPrompt(
+                        context = AppGraph.appContext,
+                        promptId = latest.id,
+                        notificationId = latest.notificationId,
+                        storeName = store.name,
+                    )
+                } else {
+                    Log.i(TAG, "ARRIVE suppressed: recent prompt status=${latest.status} storeId=$storeId")
+                }
                 return
             }
-        }
-
-        val countToday = AppGraph.db.promptDao().countByDay(profileId, day)
-        if (countToday >= dailyLimit) {
-            Log.i(TAG, "DWELL suppressed: dailyLimit countToday=$countToday limit=$dailyLimit")
-            return
         }
 
         val notificationId = PromptNotifications.notificationIdFor(storeId, day)
 
         val promptId = AppGraph.promptRepository.insert(
             PromptEventEntity(
-                profileId = profileId,
+                uid = uid,
                 storeId = store.id,
                 storeNameSnapshot = store.name,
                 storeLatSnapshot = store.lat,
@@ -140,15 +183,38 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
     }
 
     private suspend fun handleExit(storeId: String) {
-        val profileId = AppGraph.settings.profileId.first().ifBlank { "default" }
-        val day = LocalDate.now()
-        val latest = AppGraph.db.promptDao().getLatestForStoreDay(profileId, storeId, day) ?: return
+        if (storeId == BUSINESS_HOME_LOCATION_ID) return
+        val uid = AppGraph.settings.uidOrEmpty()
+        if (uid.isBlank()) return
+        val now = Instant.now()
+        val day = dayFor(now)
+        val latest = AppGraph.db.promptDao().getLatestForStoreDay(uid, storeId, day) ?: return
         if (latest.status != PromptStatus.TRIGGERED) return
 
-        val now = Instant.now()
         AppGraph.promptRepository.updateStatus(latest.id, PromptStatus.LEFT_AREA, now)
         PromptNotifications.cancel(AppGraph.appContext, latest.notificationId)
 
         Log.i(TAG, "EXIT -> LEFT_AREA promptId=${latest.id} storeId=$storeId")
+    }
+
+    private suspend fun handleArriveHome(occurredAt: Instant) {
+        val uid = AppGraph.settings.uidOrEmpty().trim()
+        if (uid.isBlank()) return
+
+        val homeLat = AppGraph.settings.businessHomeLat.first()
+        val homeLng = AppGraph.settings.businessHomeLng.first()
+        if (homeLat == null || homeLng == null) return
+
+        val day = dayFor(occurredAt)
+        val last = AppGraph.db.tripDao().getLatestForDay(uid, day) ?: return
+        if (last.endPlaceType == PlaceType.HOME) return
+
+        val notificationId = RunCompletionNotifications.notificationIdFor(day)
+        RunCompletionNotifications.show(
+            context = AppGraph.appContext,
+            notificationId = notificationId,
+            message = "Set hometrip?",
+            suggestedArrivalAtMillis = occurredAt.toEpochMilli(),
+        )
     }
 }

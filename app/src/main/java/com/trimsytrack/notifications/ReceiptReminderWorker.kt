@@ -25,14 +25,16 @@ class ReceiptReminderWorker(
     override suspend fun doWork(): Result {
         AppGraph.init(applicationContext)
 
-        val profileId = inputData.getString(KEY_PROFILE_ID).orEmpty()
+        val uid = inputData.getString(KEY_UID)
+            .orEmpty()
+            .ifBlank { inputData.getString(KEY_PROFILE_ID).orEmpty() }
         val tripId = inputData.getLong(KEY_TRIP_ID, -1L)
         val message = inputData.getString(KEY_MESSAGE)?.ifBlank { DEFAULT_MESSAGE } ?: DEFAULT_MESSAGE
 
-        if (profileId.isBlank() || tripId <= 0L) return Result.success()
+        if (uid.isBlank() || tripId <= 0L) return Result.success()
 
         val attachmentCount = runCatching {
-            AppGraph.db.attachmentDao().countByTrip(profileId, tripId)
+            AppGraph.db.attachmentDao().countByTrip(uid, tripId)
         }.getOrDefault(0)
 
         // If media already exists, do not nag.
@@ -46,7 +48,7 @@ class ReceiptReminderWorker(
             putExtra(IdKeys.TRIP_ID_ALT, tripId)
         }
 
-        val requestCode = notificationId(profileId, tripId)
+        val requestCode = notificationId(uid, tripId)
         val pendingIntent = PendingIntent.getActivity(
             applicationContext,
             requestCode,
@@ -61,7 +63,7 @@ class ReceiptReminderWorker(
             .setContentText(message)
             .setContentIntent(pendingIntent)
 
-        Notifications.notify(applicationContext, notificationId(profileId, tripId), builder)
+        Notifications.notify(applicationContext, notificationId(uid, tripId), builder)
         return Result.success()
     }
 
@@ -69,25 +71,27 @@ class ReceiptReminderWorker(
         private const val UNIQUE_WORK_PREFIX = "receipt-reminder"
         private const val WORK_TAG = "receipt-reminder"
 
+        private const val KEY_UID = "uid"
+        @Deprecated("Legacy key. Use KEY_UID.")
         private const val KEY_PROFILE_ID = "profileId"
         private const val KEY_TRIP_ID = "tripId"
         private const val KEY_MESSAGE = "message"
 
         private const val DEFAULT_MESSAGE = "Don't forget to add the media"
 
-        private fun uniqueWorkName(profileId: String, tripId: Long): String {
-            return "$UNIQUE_WORK_PREFIX:$profileId:$tripId"
+        private fun uniqueWorkName(uid: String, tripId: Long): String {
+            return "$UNIQUE_WORK_PREFIX:$uid:$tripId"
         }
 
-        private fun notificationId(profileId: String, tripId: Long): Int {
+        private fun notificationId(uid: String, tripId: Long): Int {
             val tripBits = (tripId xor (tripId ushr 32)).toInt()
-            val hash = 31 * profileId.hashCode() + tripBits
+            val hash = 31 * uid.hashCode() + tripBits
             return hash and 0x7fffffff
         }
 
         fun scheduleForTrip(
             context: android.content.Context,
-            profileId: String,
+            uid: String,
             tripId: Long,
             triggerMinutes: Int,
             message: String,
@@ -101,7 +105,7 @@ class ReceiptReminderWorker(
             val delay = Duration.between(now, target).coerceAtLeast(Duration.ZERO)
 
             val data = workDataOf(
-                KEY_PROFILE_ID to profileId,
+                KEY_UID to uid,
                 KEY_TRIP_ID to tripId,
                 KEY_MESSAGE to message.ifBlank { DEFAULT_MESSAGE },
             )
@@ -113,7 +117,7 @@ class ReceiptReminderWorker(
                 .build()
 
             WorkManager.getInstance(context)
-                .enqueueUniqueWork(uniqueWorkName(profileId, tripId), ExistingWorkPolicy.REPLACE, req)
+                .enqueueUniqueWork(uniqueWorkName(uid, tripId), ExistingWorkPolicy.REPLACE, req)
         }
     }
 }

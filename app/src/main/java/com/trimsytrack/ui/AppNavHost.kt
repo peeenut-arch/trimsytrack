@@ -2,7 +2,6 @@ package com.trimsytrack.ui
 
 import android.content.Intent
 import android.net.Uri
-import android.util.Base64
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -24,14 +23,11 @@ import androidx.navigation.navArgument
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.trimsytrack.AppGraph
-import com.trimsytrack.backend.BackendBlockedException
 import com.trimsytrack.data.IdKeys
+import com.trimsytrack.ui.screens.AccountScreen
 import com.trimsytrack.ui.screens.AuthScreen
-import com.trimsytrack.ui.screens.CreateProfilePayload
-import com.trimsytrack.ui.screens.CreateProfileScreen
 import com.trimsytrack.ui.screens.HomeScreen
 import com.trimsytrack.ui.screens.JournalScreen
-import com.trimsytrack.ui.screens.ManualTripScreen
 import com.trimsytrack.ui.screens.OnboardingScreen
 import com.trimsytrack.ui.screens.ReviewPlacesScreen
 import com.trimsytrack.ui.screens.SettingsScreen
@@ -40,13 +36,15 @@ import com.trimsytrack.ui.screens.EvidenceGalleryScreen
 import com.trimsytrack.ui.screens.TripConfirmScreen
 import com.trimsytrack.ui.screens.TripDetailScreen
 import com.trimsytrack.ui.screens.TripMediaReviewScreen
-import com.trimsytrack.ui.screens.ProfileSelectScreen
-import com.trimsytrack.ui.screens.ProfileLocationScreen
+import com.trimsytrack.ui.screens.AccountLocationScreen
 import com.trimsytrack.ui.screens.SavedStoresScreen
 import com.trimsytrack.ui.screens.TestPingActionsScreen
 import com.trimsytrack.ui.screens.StartupScreen
+import com.trimsytrack.ui.screens.RunCompletionScreen
+import com.trimsytrack.ui.screens.TodayScreen
+import com.trimsytrack.ui.screens.PingHistoryScreen
 import com.trimsytrack.notifications.ReceiptReminderWorker
-import com.trimsytrack.system.HardBlockCode
+import com.trimsytrack.notifications.RunCompletionNotifications
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -54,23 +52,25 @@ import kotlinx.coroutines.flow.first
 
 object Routes {
     const val Startup = "startup"
-    const val CreateProfile = "createProfile"
+    const val Account = "account"
     const val Onboarding = "onboarding"
     const val Home = "home"
-    const val Manual = "manual"
+    const val Manual = "manual" // legacy (will be unused)
     const val Review = "review"
+    const val Today = "today"
+    const val PingHistory = "pingHistory"
     const val Journal = "journal"
     const val Settings = "settings"
     const val Camera = "camera"
     const val Evidence = "evidence"
     const val Auth = "auth"
-    const val Profiles = "profiles"
     const val Confirm = "confirm"
     const val Trip = "trip"
     const val MediaReview = "mediaReview"
-    const val ProfileLocation = "profileLocation"
+    const val AccountLocation = "accountLocation"
     const val SavedStores = "savedStores"
     const val TestPing = "testPing"
+    const val RunComplete = "runComplete"
 }
 
 @Composable
@@ -79,7 +79,7 @@ fun AppNavHost(intent: Intent) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    val activeProfileId by AppGraph.settings.profileId.collectAsState(initial = "")
+    val activeUid by AppGraph.settings.uid.collectAsState(initial = "")
     val currentUser = rememberFirebaseUser()
 
     var didAutoRouteFromAuth by remember { mutableStateOf(false) }
@@ -97,6 +97,18 @@ fun AppNavHost(intent: Intent) {
 
     val openTestPing = remember(intent) {
         intent.getBooleanExtra("openTestPing", false)
+    }
+
+    val openRunComplete = remember(intent) {
+        intent.getBooleanExtra(RunCompletionNotifications.EXTRA_OPEN_RUN_COMPLETE, false)
+    }
+
+    val suggestedRunCompleteArrivalAtMillis = remember(intent) {
+        intent.getLongExtra(RunCompletionNotifications.EXTRA_SUGGESTED_ARRIVAL_AT_MILLIS, 0L).takeIf { it > 0L }
+    }
+
+    val initialEmailLink = remember(intent) {
+        intent.data?.toString()?.trim()?.ifBlank { null }
     }
     val testPingAddress = remember(intent) {
         intent.getStringExtra("testPingAddress").orEmpty()
@@ -126,6 +138,12 @@ fun AppNavHost(intent: Intent) {
         }
     }
 
+    val runCompleteRoute = remember(openRunComplete, suggestedRunCompleteArrivalAtMillis) {
+        if (!openRunComplete) return@remember null
+        val millis = suggestedRunCompleteArrivalAtMillis ?: 0L
+        "${Routes.RunComplete}?arrivalAtMillis=$millis"
+    }
+
     // Spec: app always launches to Login Screen (Auth).
     val startDestination = remember { Routes.Auth }
 
@@ -142,7 +160,7 @@ fun AppNavHost(intent: Intent) {
                 val message = AppGraph.settings.receiptReminderMessage.first()
                 ReceiptReminderWorker.scheduleForTrip(
                     context = context.applicationContext,
-                    profileId = trip.profileId,
+                    uid = trip.uid,
                     tripId = trip.id,
                     triggerMinutes = minutes,
                     message = message,
@@ -151,33 +169,7 @@ fun AppNavHost(intent: Intent) {
         }
     }
 
-    fun activateProfileAndNavigate(selectedId: String) {
-        if (selectedId.isBlank()) return
-        scope.launch {
-            AppGraph.settings.activateProfile(selectedId)
-
-            // First-run migration for users upgrading from single-profile builds.
-            withContext(Dispatchers.IO) {
-                AppGraph.db.storeDao().claimUnscoped(selectedId)
-                AppGraph.db.tripDao().claimUnscoped(selectedId)
-                AppGraph.db.promptDao().claimUnscoped(selectedId)
-                AppGraph.db.runDao().claimUnscoped(selectedId)
-                AppGraph.db.attachmentDao().claimUnscoped(selectedId)
-                AppGraph.db.distanceCacheDao().claimUnscoped(selectedId)
-                // AppGraph.db.syncOutboxDao().claimUnscoped(selectedId) // Old backend
-                AppGraph.db.visitedStoreDao().claimUnscoped(selectedId)
-            }
-
-            val onboarded = AppGraph.settings.onboardingCompleted.first()
-            val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
-            navController.navigate(target) {
-                popUpTo(Routes.Auth) { inclusive = true }
-                launchSingleTop = true
-            }
-        }
-    }
-
-    LaunchedEffect(currentUser, activeProfileId) {
+    LaunchedEffect(currentUser, activeUid) {
         val currentRoute = navController.currentBackStackEntry?.destination?.route
 
         // If signed out: ensure we're on Auth.
@@ -203,22 +195,15 @@ fun AppNavHost(intent: Intent) {
         }
     }
 
-    LaunchedEffect(currentUser, activeProfileId) {
-        // Definition-of-done: app cannot enter main UI without an active profile.
+    LaunchedEffect(currentUser, activeUid) {
+        // Auth-only app: do not gate on any local account/profile state.
         if (currentUser == null) return@LaunchedEffect
-
-        val currentRoute = navController.currentBackStackEntry?.destination?.route
-        val allowedWithoutProfile = setOf(Routes.Auth, Routes.Startup, Routes.CreateProfile)
-        if (activeProfileId.isBlank() && currentRoute !in allowedWithoutProfile) {
-            navController.navigate(Routes.Startup) { launchSingleTop = true }
-        }
     }
 
     // If the app is already running and a notification intent arrives, navigate once we're ready.
-    LaunchedEffect(pendingInitialRoute, currentUser, activeProfileId) {
-        val route = pendingInitialRoute ?: return@LaunchedEffect
+    LaunchedEffect(pendingInitialRoute, runCompleteRoute, currentUser, activeUid) {
+        val route = pendingInitialRoute ?: runCompleteRoute ?: return@LaunchedEffect
         if (currentUser == null) return@LaunchedEffect
-        if (activeProfileId.isBlank()) return@LaunchedEffect
         navController.navigate(route) {
             launchSingleTop = true
         }
@@ -226,134 +211,52 @@ fun AppNavHost(intent: Intent) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         NavHost(navController = navController, startDestination = startDestination) {
-        composable(Routes.Startup) {
-            StartupScreen(
-                onReady = {
-                    scope.launch {
-                        val onboarded = AppGraph.settings.onboardingCompleted.first()
-                        val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
-                        navController.navigate(target) {
+            composable(Routes.Startup) {
+                StartupScreen(
+                    onOpenAuth = {
+                        navController.navigate(Routes.Auth) {
                             popUpTo(Routes.Auth) { inclusive = true }
                             launchSingleTop = true
                         }
-                    }
-                },
-                onNeedsProfile = {
-                    navController.navigate(Routes.CreateProfile) {
-                        popUpTo(Routes.Startup) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                },
-                onSignOut = {
-                    signOut()
-                    navController.navigate(Routes.Auth) {
-                        popUpTo(Routes.Auth) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                },
-            )
-        }
-
-        composable(Routes.CreateProfile) {
-            suspend fun readImageAsBase64(uriString: String): Map<String, Any?>? = withContext(Dispatchers.IO) {
-                val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return@withContext null
-                val resolver = context.contentResolver
-                val mime = resolver.getType(uri) ?: "application/octet-stream"
-                val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@withContext null
-                mapOf(
-                    "mimeType" to mime,
-                    "base64" to Base64.encodeToString(bytes, Base64.NO_WRAP),
-                )
-            }
-
-            CreateProfileScreen(
-                onSubmit = { payload: CreateProfilePayload ->
-                    try {
-                        // 1) Create profile (authoritative backend)
-                        val createBody = buildMap<String, Any?> {
-                            put("profileName", payload.profileName)
-                            put("profileKind", payload.profileKind)
-
-                            payload.businessKind?.let { put("businessKind", it) }
-                            payload.businessName?.let { put("businessName", it) }
-                            payload.organisationNumber?.let { put("organisationNumber", it) }
-                            payload.vatRegistered?.let { put("vatRegistered", it) }
-
-                            payload.ownerName?.let { put("ownerName", it) }
-                            payload.phoneNumber?.let { put("phoneNumber", it) }
-                            payload.countryOfOrigin?.let { put("countryOfOrigin", it) }
-                            payload.emailAddress?.let { put("emailAddress", it) }
-                            payload.companyAddress?.let { put("companyAddress", it) }
-                            payload.website?.let { put("website", it) }
-                            payload.social?.let { put("social", it) }
-                        }
-                        AppGraph.systemCallables.profileCreate(createBody)
-
-                        // 2) Store document/logo preferences locally.
-                        AppGraph.settings.setUseLogosInDocuments(payload.useLogosInDocuments)
-                        AppGraph.settings.setDocumentLogoOptOut(payload.documentLogoOptOutIds)
-
-                        // 3) Best-effort media upload (backend contract decides shape).
-                        val mediaBody = mutableMapOf<String, Any?>()
-                        payload.profilePictureUri?.let { uriStr ->
-                            readImageAsBase64(uriStr)?.let { mediaBody["profilePicture"] = it }
-                        }
-                        payload.squareLogoUri?.let { uriStr ->
-                            readImageAsBase64(uriStr)?.let { mediaBody["squareLogo"] = it }
-                        }
-                        payload.rectangularLogoUri?.let { uriStr ->
-                            readImageAsBase64(uriStr)?.let { mediaBody["rectangularLogo"] = it }
-                        }
-                        if (mediaBody.isNotEmpty()) {
-                            runCatching { AppGraph.systemCallables.profileMediaSet(mediaBody) }
-                        }
-
-                        // 4) Re-run handshake via Startup.
-                        navController.navigate(Routes.Startup) {
-                            popUpTo(Routes.CreateProfile) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    } catch (e: BackendBlockedException) {
-                        val hard = AppGraph.systemCallables.hardBlockCodeOrNull(e.machineCode)
-                        if (hard == HardBlockCode.EMAIL_REQUIRED || hard == HardBlockCode.ACCOUNT_CONFLICT) {
-                            signOut()
-                            navController.navigate(Routes.Auth) {
+                    },
+                    onReady = {
+                        scope.launch {
+                            val onboarded = AppGraph.settings.onboardingCompleted.first()
+                            val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
+                            navController.navigate(target) {
                                 popUpTo(Routes.Auth) { inclusive = true }
                                 launchSingleTop = true
                             }
                         }
-                        throw e
-                    }
-                },
-                onSignOut = {
-                    signOut()
-                    navController.navigate(Routes.Auth) {
-                        popUpTo(Routes.Auth) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                },
-            )
-        }
+                    },
+                    onSignOut = {
+                        signOut()
+                        navController.navigate(Routes.Auth) {
+                            popUpTo(Routes.Auth) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
+                )
+            }
 
-        composable(Routes.Profiles) {
-            ProfileSelectScreen(
-                onSelectProfile = { selectedId ->
-                    activateProfileAndNavigate(selectedId)
-                },
-            )
-        }
+            composable(Routes.Account) {
+                AccountScreen(
+                    onBack = { navController.popBackStack() },
+                    onSignOut = {
+                        signOut()
+                        navController.navigate(Routes.Auth) {
+                            popUpTo(Routes.Auth) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
+                )
+            }
+
         composable(Routes.Onboarding) {
             OnboardingScreen(
                 onDone = {
-                    // Ensure the active profile is listed and has onboarding marked complete.
-                    // (OnboardingScreen already sets onboardingCompleted in SettingsStore.)
-                    // Keep profiles metadata in sync.
                     scope.launch {
-                        val id = activeProfileId
-                        if (id.isNotBlank()) {
-                            AppGraph.settings.ensureActiveProfileListed()
-                            AppGraph.settings.setProfileOnboardingCompleted(id, true)
-                        }
+                        AppGraph.settings.setOnboardingCompleted(true)
                     }
                     navController.navigate(Routes.Home) {
                         popUpTo(Routes.Onboarding) { inclusive = true }
@@ -364,39 +267,35 @@ fun AppNavHost(intent: Intent) {
         }
         composable(Routes.Home) {
             HomeScreen(
-                onAddTrip = { withMedia ->
-                    if (withMedia) navController.navigate("${Routes.Manual}?addMedia=1")
-                    else navController.navigate(Routes.Manual)
-                },
+                onAddTrip = { /* handled in HomeScreen via modal */ },
                 onAddTripQuickLogWithPhoto = {
                     navController.navigate("${Routes.Camera}?tripId=-1&return=0&autoSave=1&quickLog=1")
                 },
-                onReviewPlaces = { navController.navigate(Routes.Review) },
+                // Blue location/ping tile: go straight to Ping trip creator.
+                onReviewPlaces = { navController.navigate(Routes.PingHistory) },
                 onJournal = { navController.navigate(Routes.Journal) },
                 onCamera = { navController.navigate(Routes.Camera) },
                 onOpenSettings = { navController.navigate(Routes.Settings) },
-                onOpenProfiles = { navController.navigate(Routes.Profiles) },
-                onOpenOnboarding = { navController.navigate(Routes.Onboarding) },
-                onOpenProfileLocation = { navController.navigate(Routes.ProfileLocation) },
-                onOpenSavedStores = { navController.navigate(Routes.SavedStores) },
             )
         }
-        composable(
-            route = "${Routes.Manual}?addMedia={addMedia}",
-            arguments = listOf(navArgument("addMedia") { type = NavType.IntType; defaultValue = 0 }),
-        ) {
-            ManualTripScreen(
+
+        composable(Routes.Today) {
+            TodayScreen(
                 onBack = { navController.popBackStack() },
-                onOpenTrip = { tripId, addMedia ->
-                    if (addMedia) {
-                        scheduleReceiptReminder(tripId)
-                        navController.navigate("${Routes.Camera}?tripId=$tripId&return=0&autoSave=1")
-                    } else {
-                        navController.navigate("${Routes.Trip}/$tripId?addMedia=0")
-                    }
-                },
+                onOpenSettings = { navController.navigate(Routes.Settings) },
+                onOpenPrompt = { navController.navigate("${Routes.Confirm}/$it") },
+                onOpenTrip = { navController.navigate("${Routes.Trip}/$it") },
+                onOpenPings = { navController.navigate(Routes.PingHistory) },
             )
         }
+
+        composable(Routes.PingHistory) {
+            PingHistoryScreen(
+                onBack = { navController.popBackStack() },
+                onOpenTrip = { navController.navigate("${Routes.Trip}/$it") },
+            )
+        }
+        // Manual route removed in favor of in-place modal on HomeScreen
         composable(Routes.Review) {
             ReviewPlacesScreen(
                 onOpenPrompt = { navController.navigate("${Routes.Confirm}/$it") },
@@ -419,13 +318,14 @@ fun AppNavHost(intent: Intent) {
                 onOpenOnboarding = { navController.navigate(Routes.Onboarding) },
                 onOpenAuth = { navController.navigate(Routes.Auth) },
                 onOpenEvidence = { navController.navigate(Routes.Evidence) },
-                onOpenProfileLocation = { navController.navigate(Routes.ProfileLocation) },
+                onOpenAccount = { navController.navigate(Routes.Account) },
+                onOpenAccountLocation = { navController.navigate(Routes.AccountLocation) },
                 onOpenSavedStores = { navController.navigate(Routes.SavedStores) },
             )
         }
 
-        composable(Routes.ProfileLocation) {
-            ProfileLocationScreen(onBack = { navController.popBackStack() })
+        composable(Routes.AccountLocation) {
+            AccountLocationScreen(onBack = { navController.popBackStack() })
         }
 
         composable(
@@ -450,6 +350,17 @@ fun AppNavHost(intent: Intent) {
                         launchSingleTop = true
                     }
                 },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(
+            route = "${Routes.RunComplete}?arrivalAtMillis={arrivalAtMillis}",
+            arguments = listOf(navArgument("arrivalAtMillis") { type = NavType.LongType; defaultValue = 0L }),
+        ) { entry ->
+            val arrivalAtMillis = entry.arguments?.getLong("arrivalAtMillis")?.takeIf { it > 0L }
+            RunCompletionScreen(
+                suggestedArrivalAtMillis = arrivalAtMillis,
                 onBack = { navController.popBackStack() },
             )
         }
@@ -516,6 +427,7 @@ fun AppNavHost(intent: Intent) {
         composable(Routes.Auth) {
             AuthScreen(
                 onBack = { navController.popBackStack() },
+                initialEmailLink = initialEmailLink,
                 onContinue = {
                     navController.navigate(Routes.Startup) {
                         launchSingleTop = true
@@ -540,6 +452,7 @@ fun AppNavHost(intent: Intent) {
                         popUpTo("${Routes.Confirm}/$promptId") { inclusive = true }
                     }
                 },
+                onRemoved = { navController.popBackStack() },
             )
         }
         composable(
