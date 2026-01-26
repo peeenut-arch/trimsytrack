@@ -423,7 +423,8 @@ fun CreateTripModal(
         )
 
         val endedAt = endedAtOverride ?: Instant.now()
-        val createdAt = endedAt
+        // createdAt is when the user logged it; endedAt is when it occurred.
+        val createdAt = Instant.now()
         val uid = AppGraph.settings.requireUid()
         val zone = ZoneId.systemDefault()
         val day = endedAt.atZone(zone).toLocalDate()
@@ -482,6 +483,10 @@ fun CreateTripModal(
             snackbarHostState.showSnackbar("Business home is not configured")
             return
         }
+        if (start == null || !start.lat.isFinite() || !start.lng.isFinite()) {
+            snackbarHostState.showSnackbar("Start location unavailable")
+            return
+        }
         if (start != null && start.placeType == PlaceType.HOME) {
             onSaved(createdTripIds.toList())
             onDismiss()
@@ -489,6 +494,41 @@ fun CreateTripModal(
         }
         busy = true
         runCatching {
+            val uid = AppGraph.settings.requireUid()
+            val day = LocalDate.now()
+            val lastForDay = withContext(Dispatchers.IO) {
+                runCatching { AppGraph.db.tripDao().getLatestForDay(uid, day) }.getOrNull()
+            }
+
+            // Anchor Home arrival to the last recorded stop for the day.
+            val departAt = lastForDay?.endedAt ?: Instant.now()
+
+            val route = runCatching {
+                AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                    startLat = start.lat,
+                    startLng = start.lng,
+                    destLat = homeLat,
+                    destLng = homeLng,
+                    startLocationId = start.locationId,
+                    endLocationId = BUSINESS_HOME_LOCATION_ID,
+                )
+            }.getOrElse {
+                AppGraph.distanceRepository.estimateStraightLineRoute(
+                    startLat = start.lat,
+                    startLng = start.lng,
+                    destLat = homeLat,
+                    destLng = homeLng,
+                )
+            }
+
+            val minArriveHomeAt = departAt.plusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
+            val finalArriveHomeAt = if (arrivedHomeAt.isBefore(minArriveHomeAt)) {
+                snackbarHostState.showSnackbar("Adjusted Home time to fit after last stop")
+                minArriveHomeAt
+            } else {
+                arrivedHomeAt
+            }
+
             addStopTo(
                 destLabel = homeAnchor.label,
                 destLat = homeLat,
@@ -497,7 +537,7 @@ fun CreateTripModal(
                 destCity = "",
                 endPlaceType = PlaceType.HOME,
                 businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
-                endedAtOverride = arrivedHomeAt,
+                endedAtOverride = finalArriveHomeAt,
             )
         }.onFailure { t ->
             snackbarHostState.showSnackbar(t.message ?: "Failed to add Home")
@@ -829,8 +869,50 @@ fun CreateTripModal(
                                             scope.launch { snackbarHostState.showSnackbar("Business home is not configured") }
                                             return@HomeDistanceTile
                                         }
-                                        homeConfirmRecommendedArrival = Instant.now()
-                                        showSetHomeConfirm = true
+                                        val start = startAnchor
+                                        if (start == null || !start.lat.isFinite() || !start.lng.isFinite()) {
+                                            scope.launch { snackbarHostState.showSnackbar("Start location unavailable") }
+                                            return@HomeDistanceTile
+                                        }
+
+                                        scope.launch {
+                                            if (busy) return@launch
+                                            busy = true
+                                            try {
+                                                val uid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                                val day = LocalDate.now()
+                                                val lastForDay = withContext(Dispatchers.IO) {
+                                                    runCatching { AppGraph.db.tripDao().getLatestForDay(uid, day) }.getOrNull()
+                                                }
+
+                                                val departAt = lastForDay?.endedAt ?: Instant.now()
+
+                                                val route = runCatching {
+                                                    AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                                                        startLat = start.lat,
+                                                        startLng = start.lng,
+                                                        destLat = homeLat,
+                                                        destLng = homeLng,
+                                                        startLocationId = start.locationId,
+                                                        endLocationId = BUSINESS_HOME_LOCATION_ID,
+                                                    )
+                                                }.getOrElse {
+                                                    AppGraph.distanceRepository.estimateStraightLineRoute(
+                                                        startLat = start.lat,
+                                                        startLng = start.lng,
+                                                        destLat = homeLat,
+                                                        destLng = homeLng,
+                                                    )
+                                                }
+
+                                                homeConfirmRecommendedArrival = departAt.plusSeconds(
+                                                    route.durationMinutes.toLong().coerceAtLeast(0) * 60L,
+                                                )
+                                                showSetHomeConfirm = true
+                                            } finally {
+                                                busy = false
+                                            }
+                                        }
                                     },
                                 )
                             }
