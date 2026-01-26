@@ -2,11 +2,14 @@
 
 package com.trimsytrack.ui.screens
 
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -109,6 +112,7 @@ import retrofit2.converter.scalars.ScalarsConverterFactory
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.ZoneId
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -284,6 +288,7 @@ fun CreateTripModal(
 
     var showCurrentTripDialog by remember { mutableStateOf(false) }
     var showSetHomeConfirm by remember { mutableStateOf(false) }
+    var homeConfirmRecommendedArrival by remember { mutableStateOf<Instant?>(null) }
 
     LaunchedEffect(businessHomeLat, businessHomeLng, deviceLocation) {
         if (startAnchor != null) return@LaunchedEffect
@@ -400,6 +405,7 @@ fun CreateTripModal(
         destCity: String,
         endPlaceType: PlaceType,
         businessPurpose: String,
+        endedAtOverride: Instant? = null,
     ) {
         val start = startAnchor
         if (start == null || !start.lat.isFinite() || !start.lng.isFinite()) {
@@ -416,16 +422,19 @@ fun CreateTripModal(
             endLocationId = destStoreId,
         )
 
-        val now = Instant.now()
+        val endedAt = endedAtOverride ?: Instant.now()
+        val createdAt = endedAt
         val uid = AppGraph.settings.requireUid()
-        val day = LocalDate.now()
+        val zone = ZoneId.systemDefault()
+        val day = endedAt.atZone(zone).toLocalDate()
+        val startedAt = endedAt.minusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
         val trip = TripEntity(
             uid = uid,
-            createdAt = now,
+            createdAt = createdAt,
             day = day,
-            startedAt = now,
-            endedAt = now,
-            timeZoneId = ZoneId.systemDefault().id,
+            startedAt = startedAt,
+            endedAt = endedAt,
+            timeZoneId = zone.id,
             storeId = destStoreId,
             storeLocationId = destStoreId,
             storeNameSnapshot = destLabel,
@@ -465,7 +474,7 @@ fun CreateTripModal(
         pendingStop = stop
     }
 
-    suspend fun completeTripToHome() {
+    suspend fun completeTripToHome(arrivedHomeAt: Instant) {
         val start = startAnchor
         val homeLat = businessHomeLat
         val homeLng = businessHomeLng
@@ -488,6 +497,7 @@ fun CreateTripModal(
                 destCity = "",
                 endPlaceType = PlaceType.HOME,
                 businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                endedAtOverride = arrivedHomeAt,
             )
         }.onFailure { t ->
             snackbarHostState.showSnackbar(t.message ?: "Failed to add Home")
@@ -819,6 +829,7 @@ fun CreateTripModal(
                                             scope.launch { snackbarHostState.showSnackbar("Business home is not configured") }
                                             return@HomeDistanceTile
                                         }
+                                        homeConfirmRecommendedArrival = Instant.now()
                                         showSetHomeConfirm = true
                                     },
                                 )
@@ -873,9 +884,10 @@ fun CreateTripModal(
             if (showSetHomeConfirm) {
                 SetHomeConfirmDialog(
                     enabled = !busy,
-                    onConfirm = {
+                    recommendedArrival = homeConfirmRecommendedArrival ?: Instant.now(),
+                    onConfirm = { chosenArrival ->
                         showSetHomeConfirm = false
-                        scope.launch { completeTripToHome() }
+                        scope.launch { completeTripToHome(chosenArrival) }
                     },
                     onDismiss = { showSetHomeConfirm = false },
                 )
@@ -1141,9 +1153,24 @@ private fun HomeDistanceTile(
 @Composable
 private fun SetHomeConfirmDialog(
     enabled: Boolean,
-    onConfirm: () -> Unit,
+    recommendedArrival: Instant,
+    onConfirm: (Instant) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val zone = remember { ZoneId.systemDefault() }
+    val recommendedZdt = remember(recommendedArrival) { recommendedArrival.atZone(zone) }
+    val timeFmt = remember { java.time.format.DateTimeFormatter.ofPattern("HH:mm") }
+
+    var selectedDate by rememberSaveable(recommendedArrival) { mutableStateOf(recommendedZdt.toLocalDate()) }
+    var selectedTime by rememberSaveable(recommendedArrival) {
+        mutableStateOf(recommendedZdt.toLocalTime().withSecond(0).withNano(0))
+    }
+
+    fun selectedInstant(): Instant {
+        return LocalDateTime.of(selectedDate, selectedTime).atZone(zone).toInstant()
+    }
+
     Dialog(
         onDismissRequest = { if (enabled) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -1188,6 +1215,60 @@ private fun SetHomeConfirmDialog(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                 )
 
+                Text(
+                    text = "Recommended: ${recommendedZdt.toLocalDate()} ${recommendedZdt.toLocalTime().format(timeFmt)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Surface(
+                        onClick = {
+                            DatePickerDialog(
+                                context,
+                                { _, y, m, d ->
+                                    selectedDate = LocalDate.of(y, m + 1, d)
+                                },
+                                selectedDate.year,
+                                selectedDate.monthValue - 1,
+                                selectedDate.dayOfMonth,
+                            ).show()
+                        },
+                        tonalElevation = 0.dp,
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(
+                            text = selectedDate.toString(),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        )
+                    }
+
+                    Surface(
+                        onClick = {
+                            TimePickerDialog(
+                                context,
+                                { _, hh, mm ->
+                                    selectedTime = LocalTime.of(hh, mm)
+                                },
+                                selectedTime.hour,
+                                selectedTime.minute,
+                                true,
+                            ).show()
+                        },
+                        tonalElevation = 0.dp,
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(
+                            text = selectedTime.format(timeFmt),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                 Row(
@@ -1204,7 +1285,7 @@ private fun SetHomeConfirmDialog(
                     }
                     Spacer(Modifier.width(6.dp))
                     TextButton(
-                        onClick = onConfirm,
+                        onClick = { onConfirm(selectedInstant()) },
                         enabled = enabled,
                         colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF2E7D32)),
                     ) {
@@ -1939,16 +2020,19 @@ private data class PlacePick(
                 endLocationId = destStoreId,
             )
 
-            val now = Instant.now()
+            val endedAt = Instant.now()
+            val createdAt = endedAt
             val uid = AppGraph.settings.requireUid()
-            val day = LocalDate.now()
+            val zone = ZoneId.systemDefault()
+            val day = endedAt.atZone(zone).toLocalDate()
+            val startedAt = endedAt.minusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
             val trip = TripEntity(
                 uid = uid,
-                createdAt = now,
+                createdAt = createdAt,
                 day = day,
-                startedAt = now,
-                endedAt = now,
-                timeZoneId = ZoneId.systemDefault().id,
+                startedAt = startedAt,
+                endedAt = endedAt,
+                timeZoneId = zone.id,
                 storeId = destStoreId,
                 storeLocationId = destStoreId,
                 storeNameSnapshot = destLabel,

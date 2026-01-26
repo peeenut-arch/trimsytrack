@@ -186,6 +186,11 @@ fun JournalScreen(
     val trips by AppGraph.tripRepository.observeAllTrips()
         .collectAsState(initial = emptyList())
 
+    val businessHomeAddress by AppGraph.settings.businessHomeAddress.collectAsState(initial = "")
+    val businessHomeLabel = remember(businessHomeAddress) {
+        businessHomeAddress.trim().ifBlank { "Home" }
+    }
+
     // Trip counter policy: count only completed trips (Home→…→Home).
     // We number only runs whose last stop ends at Home.
     val completedTripNumberByKey = remember(trips) {
@@ -250,7 +255,7 @@ fun JournalScreen(
         }
     }
 
-    val displayRuns = remember(displayTrips, zone) {
+    val displayRuns = remember(displayTrips, zone, businessHomeLabel) {
         displayTrips
             .groupBy { it.runId ?: -it.id }
             .mapNotNull { (key, group) ->
@@ -271,8 +276,14 @@ fun JournalScreen(
                 val end = LocalDateTime.ofInstant(last.endedAt, zone)
 
                 val stopLabels = buildList {
-                    add(labelForRunStart(first))
-                    ordered.forEach { add(labelForTripEnd(it)) }
+                    // Show the run as: Home → stops → Home.
+                    // Stops are non-Home destinations; the final return-to-Home is implied.
+                    add(businessHomeLabel)
+                    ordered
+                        .asSequence()
+                        .filter { it.endPlaceType != PlaceType.HOME }
+                        .forEach { add(labelForTripEnd(it)) }
+                    add("Home")
                 }
 
                 RunCardModel(
@@ -548,6 +559,7 @@ fun JournalScreen(
             run = selectedRun,
             zone = zone,
             timeFmt = timeFmt,
+            businessHomeLabel = businessHomeLabel,
             imageAttachmentsByTripId = imageAttachmentsByTripId,
             onDismiss = { activeRunKey = null },
             onOpenTrip = onOpenTrip,
@@ -578,11 +590,12 @@ private fun RunCard(
 
     val stops = run.stopLabels.joinToString(" → ")
     val km = run.totalDistanceMeters / 1000.0
+    val stopCount = run.trips.count { it.endPlaceType != PlaceType.HOME }
     val meta = buildString {
         append(run.day)
         if (timeRange.isNotBlank()) append(" · ").append(timeRange)
         append(" · ").append("%.1f".format(km)).append(" km")
-        append(" · ").append(run.trips.size).append(" stops")
+        append(" · ").append(stopCount).append(" stops")
     }
 
     val cardShape = RoundedCornerShape(12.dp)
@@ -726,6 +739,7 @@ private fun RunDetailsDialog(
     run: RunCardModel,
     zone: ZoneId,
     timeFmt: DateTimeFormatter,
+    businessHomeLabel: String,
     imageAttachmentsByTripId: Map<Long, List<AttachmentEntity>>,
     onDismiss: () -> Unit,
     onOpenTrip: (Long) -> Unit,
@@ -770,6 +784,9 @@ private fun RunDetailsDialog(
                     )
                 }
             ) { padding ->
+                val stopTrips = run.trips.filter { it.endPlaceType != PlaceType.HOME }
+                val endTrip = run.trips.lastOrNull { it.endPlaceType == PlaceType.HOME }
+
                 LazyColumn(
                     modifier = Modifier
                         .padding(padding)
@@ -781,6 +798,7 @@ private fun RunDetailsDialog(
                         val timeRange = runCatching {
                             "${run.start.format(timeFmt)}–${run.end.format(timeFmt)}"
                         }.getOrDefault("")
+                        val stopCount = run.trips.count { it.endPlaceType != PlaceType.HOME }
 
                         Text(
                             text = run.stopLabels.joinToString(" → "),
@@ -788,7 +806,7 @@ private fun RunDetailsDialog(
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "${timeRange} · ${"%.1f".format(km)} km · ${run.trips.size} stops",
+                            text = "${timeRange} · ${"%.1f".format(km)} km · ${stopCount} stops",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                         )
@@ -801,7 +819,7 @@ private fun RunDetailsDialog(
                     item {
                         val firstTrip = run.trips.firstOrNull()
                         if (firstTrip != null) {
-                            val startLabel = labelForRunStart(firstTrip)
+                            val startLabel = businessHomeLabel
                             val startTime = runCatching {
                                 LocalDateTime.ofInstant(firstTrip.startedAt, zone).format(timeFmt)
                             }.getOrDefault("")
@@ -815,7 +833,7 @@ private fun RunDetailsDialog(
                         }
                     }
 
-                    itemsIndexed(run.trips) { idx, t ->
+                    itemsIndexed(stopTrips) { idx, t ->
                         val photos = imageAttachmentsByTripId[t.id].orEmpty()
                         val thumbnailUri = photos.firstOrNull()?.uri
                         val normalizedCity = runCatching { t.citySnapshot }.getOrDefault("")
@@ -849,6 +867,19 @@ private fun RunDetailsDialog(
                             metaOverride = stopMeta,
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+
+                    if (endTrip != null) {
+                        item {
+                            val endTime = runCatching { LocalDateTime.ofInstant(endTrip.endedAt, zone).format(timeFmt) }.getOrDefault("")
+                            val endMeta = buildString {
+                                append("End")
+                                if (endTime.isNotBlank()) append(" · ").append(endTime)
+                            }
+
+                            RunStartRow(title = "Home", meta = endMeta)
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
                     }
                 }
             }

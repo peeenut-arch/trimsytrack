@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,6 +28,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.trimsytrack.system.AppPermissionChecks
 
 @Composable
@@ -34,6 +38,7 @@ fun PermissionsRequiredScreen(
     onContinue: () -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     var missing by remember { mutableStateOf(AppPermissionChecks.missingCritical(context)) }
 
@@ -52,6 +57,18 @@ fun PermissionsRequiredScreen(
         requestPermissionsLauncher.launch(perms.toTypedArray())
     }
 
+    val requestBackgroundLocationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = {
+            missing = AppPermissionChecks.missingCritical(context)
+        },
+    )
+
+    fun requestBackgroundLocationNow() {
+        if (android.os.Build.VERSION.SDK_INT < 29) return
+        requestBackgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+    }
+
     fun openAppSettings() {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)
@@ -67,10 +84,29 @@ fun PermissionsRequiredScreen(
         context.startActivity(intent)
     }
 
+    fun openNotificationSettings() {
+        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }
+
     LaunchedEffect(Unit) {
         // In case permissions were granted just before navigation.
         missing = AppPermissionChecks.missingCritical(context)
         if (missing.isEmpty()) onContinue()
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                missing = AppPermissionChecks.missingCritical(context)
+                if (missing.isEmpty()) onContinue()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Column(
@@ -115,6 +151,21 @@ fun PermissionsRequiredScreen(
                     "location_services" -> {
                         OutlinedButton(onClick = ::openLocationSettings) {
                             Text("Open Location settings")
+                        }
+                    }
+                    "location_permission_background" -> {
+                        OutlinedButton(
+                            onClick = ::requestBackgroundLocationNow,
+                        ) {
+                            Text("Request 'Always allow' location")
+                        }
+                        OutlinedButton(onClick = ::openAppSettings) {
+                            Text("Open app settings")
+                        }
+                    }
+                    "notifications_disabled" -> {
+                        OutlinedButton(onClick = ::openNotificationSettings) {
+                            Text("Open notification settings")
                         }
                     }
                 }

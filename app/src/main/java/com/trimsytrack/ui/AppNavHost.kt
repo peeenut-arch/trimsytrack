@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -83,12 +86,26 @@ fun AppNavHost(intent: Intent) {
     val navController = rememberNavController()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
     val activeUid by AppGraph.settings.uid.collectAsState(initial = "")
     val currentUser = rememberFirebaseUser()
+
+    var permissionCheckTick by remember { mutableStateOf(0) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                // User may have changed permissions/settings while the app was backgrounded.
+                permissionCheckTick += 1
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var didAutoRouteFromAuth by remember { mutableStateOf(false) }
 
@@ -218,7 +235,7 @@ fun AppNavHost(intent: Intent) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        val missingCritical = remember(currentUser, currentRoute) {
+        val missingCritical = remember(currentUser, currentRoute, permissionCheckTick) {
             if (currentUser == null) emptyList() else AppPermissionChecks.missingCritical(context)
         }
 

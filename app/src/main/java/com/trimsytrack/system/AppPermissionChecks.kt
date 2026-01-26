@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.location.LocationManager
 import android.os.Build
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
 object AppPermissionChecks {
@@ -14,12 +15,24 @@ object AppPermissionChecks {
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
+    fun hasBackgroundLocation(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
     fun hasNotifications(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 33) return true
         return ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.POST_NOTIFICATIONS,
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    fun areNotificationsEnabled(context: Context): Boolean {
+        return NotificationManagerCompat.from(context).areNotificationsEnabled()
     }
 
     fun isLocationServicesEnabled(context: Context): Boolean {
@@ -35,13 +48,25 @@ object AppPermissionChecks {
     fun missingCritical(context: Context): List<CriticalMissing> {
         val missing = mutableListOf<CriticalMissing>()
 
+        // Location / GPS requirements
         if (!hasFineLocation(context)) {
             missing += CriticalMissing(
-                key = "location_permission",
+                key = "location_permission_foreground",
                 title = "Location permission",
                 description = "Required for GPS/geofence features.",
             )
-        } else if (!isLocationServicesEnabled(context)) {
+        }
+
+        // For geofencing to be reliable, we require "Allow all the time" on Android 10+.
+        if (hasFineLocation(context) && !hasBackgroundLocation(context)) {
+            missing += CriticalMissing(
+                key = "location_permission_background",
+                title = "Location set to 'Always allow'",
+                description = "Set Location to 'Allow all the time' so GPS/geofences work reliably.",
+            )
+        }
+
+        if (!isLocationServicesEnabled(context)) {
             missing += CriticalMissing(
                 key = "location_services",
                 title = "Location services",
@@ -49,11 +74,20 @@ object AppPermissionChecks {
             )
         }
 
+        // Notifications requirements
+        if (!areNotificationsEnabled(context)) {
+            missing += CriticalMissing(
+                key = "notifications_disabled",
+                title = "Notifications turned off",
+                description = "Enable notifications in system settings so TrimsyTRACK can warn you.",
+            )
+        }
+
         if (!hasNotifications(context)) {
             missing += CriticalMissing(
                 key = "notifications_permission",
                 title = "Notifications permission",
-                description = "Required so the app can warn you and show reminders.",
+                description = "Required on Android 13+ so the app can warn you and show reminders.",
             )
         }
 
