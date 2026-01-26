@@ -9,6 +9,7 @@ import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.StoreEntity
+import com.trimsytrack.system.AppPermissionChecks
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 
@@ -35,6 +36,18 @@ class GeofenceSyncWorker(
                 registeredStores = 0,
                 result = "tracking disabled",
             )
+            return Result.success()
+        }
+
+        if (!AppPermissionChecks.hasFineLocation(applicationContext)) {
+            Log.w(TAG, "GeofenceSyncWorker: missing ACCESS_FINE_LOCATION; skipping")
+            AppGraph.settings.setGeofenceSyncDiagnostics(
+                reason = reason,
+                totalStores = 0,
+                registeredStores = 0,
+                result = "missing location permission",
+            )
+            // Do not fail/retry; user needs to grant permissions.
             return Result.success()
         }
 

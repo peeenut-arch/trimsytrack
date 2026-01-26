@@ -6,11 +6,16 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingClient
 import com.google.android.gms.location.GeofencingRequest
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.tasks.Task
 import com.trimsytrack.data.entities.StoreEntity
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class GeofenceRegistrar(private val context: Context) {
 
@@ -19,6 +24,13 @@ class GeofenceRegistrar(private val context: Context) {
     }
 
     private val geofencingClient: GeofencingClient = LocationServices.getGeofencingClient(context)
+
+    private suspend fun Task<Void>.awaitVoid() {
+        suspendCancellableCoroutine { cont ->
+            addOnSuccessListener { cont.resume(Unit) }
+            addOnFailureListener { cont.resumeWithException(it) }
+        }
+    }
 
     fun pendingIntent(): PendingIntent {
         val intent = Intent(context, GeofenceBroadcastReceiver::class.java)
@@ -45,6 +57,15 @@ class GeofenceRegistrar(private val context: Context) {
         radiusMetersOverride: Int?,
         responsivenessSeconds: Int,
     ) {
+        val hasFine = ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasFine) {
+            Log.w(TAG, "GeofenceRegistrar.register skipped: missing ACCESS_FINE_LOCATION")
+            return
+        }
+
         Log.i(
             TAG,
             "GeofenceRegistrar.register stores=${stores.size} dwellMin=$dwellMinutes radiusOverride=$radiusMetersOverride respS=$responsivenessSeconds"
