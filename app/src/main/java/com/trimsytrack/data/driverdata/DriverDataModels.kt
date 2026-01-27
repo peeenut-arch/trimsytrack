@@ -63,7 +63,8 @@ data class DriverSettings(
     val perStorePerDay: Boolean = true,
     val suppressionMinutes: Int = 0,
 
-    val maxActiveGeofences: Int = 0,
+    // Default matches SettingsStore default (100). Older snapshots may omit this field.
+    val maxActiveGeofences: Int = 100,
     val suggestLinkingWindowMinutes: Int = 0,
 
     // Körjournal / export profile

@@ -68,6 +68,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -96,7 +97,10 @@ fun OnboardingScreen(
     var selectedDwellMinutes by rememberSaveable { mutableStateOf(5) }
     var selectedActiveHoursId by rememberSaveable { mutableStateOf(PresetDefaults.activeHoursPresets[0].id) }
 
+    var driverName by rememberSaveable { mutableStateOf("") }
     var vehicleRegNumber by rememberSaveable { mutableStateOf("") }
+
+    var profileError by rememberSaveable { mutableStateOf<String?>(null) }
 
     var gpsGranted by rememberSaveable { mutableStateOf(false) }
     var homeLat by rememberSaveable { mutableStateOf<Double?>(null) }
@@ -124,6 +128,16 @@ fun OnboardingScreen(
             }
         }
     )
+
+    LaunchedEffect(Unit) {
+        // Best-effort prefills for restarts / manual onboarding.
+        if (driverName.isBlank()) {
+            driverName = runCatching { AppGraph.settings.driverName.first() }.getOrDefault("")
+        }
+        if (vehicleRegNumber.isBlank()) {
+            vehicleRegNumber = runCatching { AppGraph.settings.vehicleRegNumber.first() }.getOrDefault("")
+        }
+    }
 
     LaunchedEffect(step) {
         if (step == OnboardingStep.GpsPermission) {
@@ -199,7 +213,6 @@ fun OnboardingScreen(
                     var expandRadius by rememberSaveable { mutableStateOf(false) }
                     var expandTrigger by rememberSaveable { mutableStateOf(false) }
                     var expandActive by rememberSaveable { mutableStateOf(false) }
-                    var expandVehicle by rememberSaveable { mutableStateOf(false) }
 
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
@@ -215,21 +228,42 @@ fun OnboardingScreen(
                         }
 
                         item {
-                            CollapsibleHeader(
-                                title = "Fordon",
-                                expanded = expandVehicle,
-                                onToggle = { expandVehicle = !expandVehicle },
+                            Text(
+                                "Körjournal",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                             )
-                        }
+                            Spacer(Modifier.height(6.dp))
 
-                        if (expandVehicle) {
-                            item {
-                                OutlinedTextField(
-                                    value = vehicleRegNumber,
-                                    onValueChange = { vehicleRegNumber = it },
-                                    label = { Text("Regnummer") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
+                            OutlinedTextField(
+                                value = driverName,
+                                onValueChange = {
+                                    driverName = it
+                                    if (profileError != null) profileError = null
+                                },
+                                label = { Text("Förarnamn") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                            )
+
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = vehicleRegNumber,
+                                onValueChange = {
+                                    vehicleRegNumber = it
+                                    if (profileError != null) profileError = null
+                                },
+                                label = { Text("Regnummer") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                            )
+
+                            if (!profileError.isNullOrBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    profileError!!,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
                                 )
                             }
                         }
@@ -298,6 +332,14 @@ fun OnboardingScreen(
                                 baseColor = MaterialTheme.colorScheme.primary,
                                 icon = Icons.Rounded.LocationOn,
                                 onClick = {
+                                    val trimmedDriver = driverName.trim()
+                                    val trimmedVehicle = vehicleRegNumber.trim()
+
+                                    if (trimmedDriver.isBlank() || trimmedVehicle.isBlank()) {
+                                        profileError = "Fyll i förarnamn och regnummer (kan ändras senare i Inställningar)."
+                                        return@LargeActionTile
+                                    }
+
                                     val radiusPreset = PresetDefaults.radiusPresets.firstOrNull { it.id == selectedRadiusId }
                                         ?: PresetDefaults.radiusPresets[1]
                                     val activePreset = PresetDefaults.activeHoursPresets.firstOrNull { it.id == selectedActiveHoursId }
@@ -307,9 +349,13 @@ fun OnboardingScreen(
                                         // Onboarding no longer auto-seeds categories/places.
                                         AppGraph.settings.setPreferredCategories(emptyList())
                                         runCatching { AppGraph.trackEventEmitter.emitProfilePreferredCategoriesSet(emptyList(), reason = "onboarding_init") }
-                                        if (vehicleRegNumber.isNotBlank()) {
-                                            AppGraph.settings.setVehicleRegNumber(vehicleRegNumber.trim())
-                                        }
+
+                                        // Körjournal identity (used in exports + backend writes).
+                                        AppGraph.settings.setDriverName(trimmedDriver)
+                                        AppGraph.settings.setVehicleRegNumber(trimmedVehicle)
+                                        runCatching { AppGraph.trackEventEmitter.emitProfileDriverNameSet(trimmedDriver, reason = "onboarding_init") }
+                                        runCatching { AppGraph.trackEventEmitter.emitProfileVehicleRegNumberSet(trimmedVehicle, reason = "onboarding_init") }
+
                                         AppGraph.settings.setStoreSyncRadiusKm(radiusPreset.radiusKm)
                                         runCatching { AppGraph.trackEventEmitter.emitAutosyncStoreRadiusKmSet(radiusPreset.radiusKm, reason = "onboarding_init") }
                                         AppGraph.settings.setDwellMinutes(selectedDwellMinutes)

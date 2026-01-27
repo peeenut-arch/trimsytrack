@@ -815,7 +815,11 @@ private fun RunDetailsDialog(
                                 if (startTime.isNotBlank()) append(" · ").append(startTime)
                             }
 
-                            RunStartRow(title = startLabel, meta = startMeta)
+                            RunStartRow(
+                                title = startLabel,
+                                meta = startMeta,
+                                onClick = { onOpenTrip(firstTrip.id) },
+                            )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
                     }
@@ -834,9 +838,21 @@ private fun RunDetailsDialog(
                             createdTime.isNotBlank() -> createdTime
                             else -> ""
                         }
+
+                        val isLastStopBeforeHome = (idx == stopTrips.lastIndex) && (endTrip != null)
+                        val departTimeFromLastStop = if (isLastStopBeforeHome && endTrip != null) {
+                            runCatching { LocalDateTime.ofInstant(endTrip.startedAt, zone).format(timeFmt) }.getOrDefault("")
+                        } else {
+                            ""
+                        }
                         val stopMeta = buildString {
                             append("Stop #").append(idx + 1)
-                            if (timeLabel.isNotBlank()) append(" · ").append(timeLabel)
+                            if (isLastStopBeforeHome && endTime.isNotBlank() && departTimeFromLastStop.isNotBlank()) {
+                                append(" · Arrive ").append(endTime)
+                                append(" · Depart ").append(departTimeFromLastStop)
+                            } else {
+                                if (timeLabel.isNotBlank()) append(" · ").append(timeLabel)
+                            }
                         }
 
                         TripRow(
@@ -858,13 +874,19 @@ private fun RunDetailsDialog(
 
                     if (endTrip != null) {
                         item {
-                            val endTime = runCatching { LocalDateTime.ofInstant(endTrip.endedAt, zone).format(timeFmt) }.getOrDefault("")
+                            val endTime = runCatching {
+                                LocalDateTime.ofInstant(endTrip.endedAt, zone).format(timeFmt)
+                            }.getOrDefault("")
                             val endMeta = buildString {
                                 append("End")
                                 if (endTime.isNotBlank()) append(" · ").append(endTime)
                             }
 
-                            RunStartRow(title = "Home", meta = endMeta)
+                            RunStartRow(
+                                title = "Home",
+                                meta = endMeta,
+                                onClick = { onOpenTrip(endTrip.id) },
+                            )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
                     }
@@ -878,10 +900,12 @@ private fun RunDetailsDialog(
 private fun RunStartRow(
     title: String,
     meta: String,
+    onClick: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,

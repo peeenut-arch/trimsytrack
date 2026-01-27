@@ -19,6 +19,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -169,7 +170,8 @@ fun TripDetailScreen(
         }
     ) { padding ->
         val zone = remember { ZoneId.systemDefault() }
-        val dateTimeFmt = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm") }
+        val dateFmt = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd") }
+        val timeFmt = remember { DateTimeFormatter.ofPattern("HH:mm") }
 
         val startAddressLine = remember { mutableStateOf<String?>(null) }
         val startCity = remember { mutableStateOf<String?>(null) }
@@ -212,24 +214,13 @@ fun TripDetailScreen(
             Spacer(Modifier.height(8.dp))
 
             if (t != null) {
-                val started = runCatching { LocalDateTime.ofInstant(t.startedAt, zone).format(dateTimeFmt) }.getOrDefault("")
-                val ended = runCatching { LocalDateTime.ofInstant(t.endedAt, zone).format(dateTimeFmt) }.getOrDefault("")
-                val created = runCatching { LocalDateTime.ofInstant(t.createdAt, zone).format(dateTimeFmt) }.getOrDefault("")
-                Text(
-                    buildString {
-                        if (started.isNotBlank()) append("Start: ").append(started)
-                        if (ended.isNotBlank()) {
-                            if (isNotEmpty()) append("\n")
-                            append("End: ").append(ended)
-                        }
-                        if (created.isNotBlank()) {
-                            if (isNotEmpty()) append("\n")
-                            append("Created: ").append(created)
-                        }
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                )
+                val startLocal = runCatching { LocalDateTime.ofInstant(t.startedAt, zone) }.getOrNull()
+                val endLocal = runCatching { LocalDateTime.ofInstant(t.endedAt, zone) }.getOrNull()
+
+                val startTime = startLocal?.format(timeFmt).orEmpty()
+                val startDate = startLocal?.format(dateFmt).orEmpty()
+                val endTime = endLocal?.format(timeFmt).orEmpty()
+                val endDate = endLocal?.format(dateFmt).orEmpty()
 
                 if (t.syncStatus == SyncStatus.REJECTED) {
                     Spacer(Modifier.height(8.dp))
@@ -287,25 +278,6 @@ fun TripDetailScreen(
                     }
                 }
 
-                Spacer(Modifier.height(6.dp))
-
-                val distanceKm = t.distanceMeters / 1000.0
-                Text(
-                    "Distance (from ${t.startLabelSnapshot}): ${String.format(Locale.getDefault(), "%.1f", distanceKm)} km",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                )
-
-                val feeMinor = t.parkingTrafficFeeMinor
-                if (feeMinor != null) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Parking fee: ${formatMinorAmount(feeMinor)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                    )
-                }
-
                 Spacer(Modifier.height(12.dp))
 
                 Text(
@@ -318,8 +290,24 @@ fun TripDetailScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )
+                if (startTime.isNotBlank()) {
+                    Text(
+                        "Time: $startTime",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+                if (startDate.isNotBlank()) {
+                    Text(
+                        "Date: $startDate",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(10.dp))
 
                 Text(
                     "End",
@@ -332,6 +320,41 @@ fun TripDetailScreen(
                         .ifBlank { t.storeNameSnapshot },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
+
+                if (endTime.isNotBlank()) {
+                    Text(
+                        "Time: $endTime",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+                if (endDate.isNotBlank()) {
+                    Text(
+                        "Date: $endDate",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                val feeMinor = t.parkingTrafficFeeMinor
+                if (feeMinor != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Parking fee: ${formatMinorAmount(feeMinor)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                val distanceKm = t.distanceMeters / 1000.0
+                Text(
+                    text = "Distance Traveled: ${String.format(Locale.getDefault(), "%.1f", distanceKm)} km",
+                    style = MaterialTheme.typography.titleMedium,
                 )
             }
 

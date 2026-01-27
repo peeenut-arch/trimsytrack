@@ -43,8 +43,10 @@ import com.trimsytrack.ui.screens.StartupScreen
 import com.trimsytrack.ui.screens.RunCompletionScreen
 import com.trimsytrack.ui.screens.TodayScreen
 import com.trimsytrack.ui.screens.PingHistoryScreen
+import com.trimsytrack.ui.screens.PermissionsRequiredScreen
 import com.trimsytrack.notifications.ReceiptReminderWorker
 import com.trimsytrack.notifications.RunCompletionNotifications
+import com.trimsytrack.system.AppPermissionChecks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -52,6 +54,7 @@ import kotlinx.coroutines.flow.first
 
 object Routes {
     const val Startup = "startup"
+    const val PermissionsRequired = "permissionsRequired"
     const val Account = "account"
     const val Onboarding = "onboarding"
     const val Home = "home"
@@ -221,6 +224,14 @@ fun AppNavHost(intent: Intent) {
                     },
                     onReady = {
                         scope.launch {
+                            val missing = AppPermissionChecks.missingCritical(context)
+                            if (missing.isNotEmpty()) {
+                                navController.navigate(Routes.PermissionsRequired) {
+                                    popUpTo(Routes.Auth) { inclusive = true }
+                                    launchSingleTop = true
+                                }
+                                return@launch
+                            }
                             val onboarded = AppGraph.settings.onboardingCompleted.first()
                             val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
                             navController.navigate(target) {
@@ -234,6 +245,21 @@ fun AppNavHost(intent: Intent) {
                         navController.navigate(Routes.Auth) {
                             popUpTo(Routes.Auth) { inclusive = true }
                             launchSingleTop = true
+                        }
+                    },
+                )
+            }
+
+            composable(Routes.PermissionsRequired) {
+                PermissionsRequiredScreen(
+                    onContinue = {
+                        scope.launch {
+                            val onboarded = AppGraph.settings.onboardingCompleted.first()
+                            val target = pendingInitialRoute ?: if (!onboarded) Routes.Onboarding else Routes.Home
+                            navController.navigate(target) {
+                                popUpTo(Routes.Auth) { inclusive = true }
+                                launchSingleTop = true
+                            }
                         }
                     },
                 )

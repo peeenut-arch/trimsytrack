@@ -1264,6 +1264,16 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[Keys.backendIdentityUid] = v }
         // Once canonical uid is known, ensure all user-facing settings are scoped.
         migrateLegacyAccountScopedPrefsIfNeeded(v)
+
+        // Backward-compat: older cloud snapshots could restore invalid values (e.g. 0) into the
+        // scoped settings. Remove invalid values so flows fall back to sane defaults.
+        context.dataStore.edit { prefs ->
+            val scopedKey = scopedIntKey("maxActiveGeofences", v)
+            val raw = prefs[scopedKey]
+            if (raw != null && raw !in 1..100) {
+                prefs.remove(scopedKey)
+            }
+        }
     }
 
     suspend fun setBackendWritesEnabled(value: Boolean) {
@@ -1330,8 +1340,16 @@ class SettingsStore(private val context: Context) {
     /** Bulk import used by DriverData restore. */
     suspend fun importDriverSettings(s: DriverSettings) {
         val u = requireUid()
+
+        // Onboarding completion is monotonic unless explicitly reset locally.
+        // Do not allow a cloud snapshot to regress a completed onboarding.
+        val keepOnboarded = onboardingCompleted.first() || s.onboardingCompleted
+
+        val maxActiveGeofencesKey = scopedIntKey("maxActiveGeofences", u)
+        val importedMaxActiveGeofences = s.maxActiveGeofences
+
         context.dataStore.edit { prefs ->
-            prefs[scopedBooleanKey("onboardingCompleted", u)] = s.onboardingCompleted
+            prefs[scopedBooleanKey("onboardingCompleted", u)] = keepOnboarded
             prefs.remove(Keys.onboardingCompleted)
 
             prefs[scopedBooleanKey("trackingEnabled", u)] = s.trackingEnabled
@@ -1367,7 +1385,13 @@ class SettingsStore(private val context: Context) {
             prefs[scopedIntKey("suppressionMinutes", u)] = s.suppressionMinutes
             prefs.remove(Keys.suppressionMinutes)
 
-            prefs[scopedIntKey("maxActiveGeofences", u)] = s.maxActiveGeofences
+            // Backward-compat: older snapshots may not include this field (default 0).
+            // Do not overwrite the local/default value unless the imported value is valid.
+            if (importedMaxActiveGeofences in 1..100) {
+                prefs[maxActiveGeofencesKey] = importedMaxActiveGeofences
+            } else {
+                prefs.remove(maxActiveGeofencesKey)
+            }
             prefs.remove(Keys.maxActiveGeofences)
 
             prefs[scopedIntKey("suggestLinkingWindowMinutes", u)] = s.suggestLinkingWindowMinutes
@@ -1544,8 +1568,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setMaxActiveGeofences(value: Int) {
         val u = requireUid()
+        val safe = value.coerceIn(1, 100)
         context.dataStore.edit {
-            it[scopedIntKey("maxActiveGeofences", u)] = value
+            it[scopedIntKey("maxActiveGeofences", u)] = safe
             it.remove(Keys.maxActiveGeofences)
         }
     }

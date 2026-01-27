@@ -3,6 +3,7 @@ package com.trimsytrack.ui.screens
 import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -41,11 +43,23 @@ fun PermissionsRequiredScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var missing by remember { mutableStateOf(AppPermissionChecks.missingCritical(context)) }
+    var batteryMissing by remember { mutableStateOf(!AppPermissionChecks.isBatteryOptimizationDisabled(context)) }
+
+    var didAutoRequest by rememberSaveable { mutableStateOf(false) }
+    var didContinue by rememberSaveable { mutableStateOf(false) }
+
+    fun continueOnce() {
+        if (didContinue) return
+        didContinue = true
+        onContinue()
+    }
 
     val requestPermissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
         onResult = {
             missing = AppPermissionChecks.missingCritical(context)
+            batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+            if (missing.isEmpty()) continueOnce()
         },
     )
 
@@ -61,6 +75,8 @@ fun PermissionsRequiredScreen(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = {
             missing = AppPermissionChecks.missingCritical(context)
+            batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+            if (missing.isEmpty()) continueOnce()
         },
     )
 
@@ -92,17 +108,38 @@ fun PermissionsRequiredScreen(
         context.startActivity(intent)
     }
 
+    fun openBatteryOptimizationSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }
+
     LaunchedEffect(Unit) {
         // In case permissions were granted just before navigation.
         missing = AppPermissionChecks.missingCritical(context)
-        if (missing.isEmpty()) onContinue()
+        batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+        if (missing.isEmpty()) continueOnce()
+
+        // Auto-request the permissions we can prompt for directly.
+        // Background location and battery optimization usually require additional user steps.
+        if (!didAutoRequest) {
+            didAutoRequest = true
+            val keys = missing.map { it.key }.toSet()
+            val shouldRequestNow = keys.contains("location_permission_foreground") || keys.contains("notifications_permission")
+            if (shouldRequestNow) {
+                requestNow()
+            }
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 missing = AppPermissionChecks.missingCritical(context)
-                if (missing.isEmpty()) onContinue()
+                batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+                if (missing.isEmpty()) continueOnce()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -130,6 +167,19 @@ fun PermissionsRequiredScreen(
 
         if (missing.isEmpty()) {
             Text("All set.")
+            if (batteryMissing) {
+                Text(
+                    text = "Battery setting is still recommended (OEM devices may not report it correctly). You can continue.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                )
+                OutlinedButton(
+                    onClick = ::openBatteryOptimizationSettings,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Open battery settings")
+                }
+            }
             Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) {
                 Text("Continue")
             }
@@ -168,6 +218,14 @@ fun PermissionsRequiredScreen(
                             Text("Open notification settings")
                         }
                     }
+                    "battery_optimization" -> {
+                        OutlinedButton(onClick = ::openBatteryOptimizationSettings) {
+                            Text("Open battery settings")
+                        }
+                        OutlinedButton(onClick = ::openAppSettings) {
+                            Text("Open app settings")
+                        }
+                    }
                 }
             }
         }
@@ -193,7 +251,8 @@ fun PermissionsRequiredScreen(
         OutlinedButton(
             onClick = {
                 missing = AppPermissionChecks.missingCritical(context)
-                if (missing.isEmpty()) onContinue()
+                batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+                if (missing.isEmpty()) continueOnce()
             },
             modifier = Modifier.fillMaxWidth(),
         ) {

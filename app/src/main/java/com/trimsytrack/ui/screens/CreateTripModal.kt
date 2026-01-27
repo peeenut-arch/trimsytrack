@@ -296,6 +296,7 @@ fun CreateTripModal(
     var showCurrentTripDialog by remember { mutableStateOf(false) }
     var showSetHomeConfirm by remember { mutableStateOf(false) }
     var homeConfirmRecommendedArrival by remember { mutableStateOf<Instant?>(null) }
+    var homeConfirmMinArrival by remember { mutableStateOf<Instant?>(null) }
     var homeConfirmTimeZoneId by remember { mutableStateOf<String?>(null) }
 
     var showSetStopConfirm by remember { mutableStateOf(false) }
@@ -562,34 +563,9 @@ fun CreateTripModal(
             val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
             // Only count dwell if we actually have a stop we are leaving.
             val minArriveHomeAt = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
-            val finalArriveHomeAt = if (arrivedHomeAt.isBefore(minArriveHomeAt)) {
-                snackbarHostState.showSnackbar("Adjusted Home time to fit after last stop")
-                minArriveHomeAt
-            } else {
-                arrivedHomeAt
-            }
-
-            // Re-time the open run backwards so dwell time is included and times never go backwards.
-            if (openRunTrips.isNotEmpty()) {
-                val homeStartedAt = finalArriveHomeAt.minusSeconds(travelSeconds)
-                withContext(Dispatchers.IO) {
-                    var cursorNextStart = homeStartedAt
-                    openRunTrips
-                        .asReversed()
-                        .forEach { existing ->
-                            val legTravelSeconds = existing.durationMinutes.toLong().coerceAtLeast(0) * 60L
-                            val newEndedAt = cursorNextStart.minusSeconds(dwellSeconds)
-                            val newStartedAt = newEndedAt.minusSeconds(legTravelSeconds)
-                            tripDao.update(
-                                existing.copy(
-                                    startedAt = newStartedAt,
-                                    endedAt = newEndedAt,
-                                    day = openRunDay,
-                                ),
-                            )
-                            cursorNextStart = newStartedAt
-                        }
-                }
+            if (arrivedHomeAt.isBefore(minArriveHomeAt)) {
+                snackbarHostState.showSnackbar("Home arrival must be after previous stop")
+                return
             }
 
             val openRunId = openRunTrips.lastOrNull()?.runId
@@ -602,7 +578,7 @@ fun CreateTripModal(
                 destCity = "",
                 endPlaceType = PlaceType.HOME,
                 businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
-                endedAtOverride = finalArriveHomeAt,
+                endedAtOverride = arrivedHomeAt,
                 dayOverride = openRunDay,
                 runIdOverride = openRunId,
                 timeZoneIdOverride = homeConfirmTimeZoneId,
@@ -1137,7 +1113,9 @@ fun CreateTripModal(
                                                 }
 
                                                 val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
-                                                homeConfirmRecommendedArrival = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
+                                                val minArrival = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
+                                                homeConfirmRecommendedArrival = minArrival
+                                                homeConfirmMinArrival = minArrival
                                                 showSetHomeConfirm = true
                                             } finally {
                                                 busy = false
@@ -1197,6 +1175,7 @@ fun CreateTripModal(
                 SetHomeConfirmDialog(
                     enabled = !busy,
                     recommendedArrival = homeConfirmRecommendedArrival ?: Instant.now(),
+                    minArrival = homeConfirmMinArrival,
                     maxArrival = Instant.now(),
                     timeZoneId = homeConfirmTimeZoneId,
                     onConfirm = { chosenArrival ->
@@ -1220,23 +1199,20 @@ fun CreateTripModal(
                         timeZoneId = stopConfirmTimeZoneId,
                         stopLabel = stop.label,
                         onConfirm = { chosenArrival ->
-                            showSetStopConfirm = false
                             scope.launch {
                                 if (busy) return@launch
                                 busy = true
                                 try {
                                     val minAt = stopConfirmMinArrival
-                                    val finalArrival = if (minAt != null && chosenArrival.isBefore(minAt)) {
-                                        snackbarHostState.showSnackbar("Adjusted arrival time to fit after last stop")
-                                        minAt
-                                    } else {
-                                        chosenArrival
+                                    if (minAt != null && chosenArrival.isBefore(minAt)) {
+                                        snackbarHostState.showSnackbar("Arrival time must be after previous stop")
+                                        return@launch
                                     }
                                     val zone = runCatching {
                                         val raw = stopConfirmTimeZoneId.orEmpty().trim()
                                         if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
                                     }.getOrElse { ZoneId.systemDefault() }
-                                    val day = finalArrival.atZone(zone).toLocalDate()
+                                    val day = chosenArrival.atZone(zone).toLocalDate()
                                     addStopTo(
                                         destLabel = stop.label,
                                         destLat = stop.lat,
@@ -1245,16 +1221,18 @@ fun CreateTripModal(
                                         destCity = stop.city,
                                         endPlaceType = stop.endPlaceType,
                                         businessPurpose = stopConfirmPurpose,
-                                        endedAtOverride = finalArrival,
+                                        endedAtOverride = chosenArrival,
                                         dayOverride = day,
                                         runIdOverride = stopConfirmRunId,
                                         timeZoneIdOverride = stopConfirmTimeZoneId,
                                     )
+
+                                    showSetStopConfirm = false
+                                    stopConfirmStop = null
                                 } catch (t: Throwable) {
                                     snackbarHostState.showSnackbar(t.message ?: "Failed")
                                 } finally {
                                     busy = false
-                                    stopConfirmStop = null
                                 }
                             }
                         },
@@ -1355,11 +1333,15 @@ fun CreateTripModal(
                                     }
 
                                     val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
-                                    val minArrival = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
+                                    val minArrival: Instant? = if (lastStopTrip == null) {
+                                        null
+                                    } else {
+                                        arriveLastStopAt.plusSeconds(dwellSeconds + travelSeconds)
+                                    }
 
                                     stopConfirmPurpose = pendingPurpose
                                     stopConfirmStop = stopToAdd
-                                    stopConfirmRecommendedArrival = minArrival
+                                    stopConfirmRecommendedArrival = minArrival ?: Instant.now()
                                     stopConfirmMinArrival = minArrival
                                     stopConfirmRunId = lastStopTrip?.runId ?: openRunTrips.lastOrNull()?.runId
                                     showSetStopConfirm = true
@@ -1580,6 +1562,7 @@ private fun HomeDistanceTile(
 private fun SetHomeConfirmDialog(
     enabled: Boolean,
     recommendedArrival: Instant,
+    minArrival: Instant?,
     maxArrival: Instant,
     timeZoneId: String?,
     onConfirm: (Instant) -> Unit,
@@ -1597,6 +1580,7 @@ private fun SetHomeConfirmDialog(
         if (recommendedArrival.isAfter(maxArrival)) maxArrival else recommendedArrival
     }
     val recommendedZdt = remember(effectiveRecommendedArrival, zone) { effectiveRecommendedArrival.atZone(zone) }
+    val minZdt = remember(minArrival, zone) { minArrival?.atZone(zone) }
     val timeFmt = remember { java.time.format.DateTimeFormatter.ofPattern("HH:mm") }
 
     var selectedDate by rememberSaveable(recommendedArrival) { mutableStateOf(recommendedZdt.toLocalDate()) }
@@ -1609,6 +1593,7 @@ private fun SetHomeConfirmDialog(
     }
 
     val selectedAt = remember(selectedDate, selectedTime, zone) { selectedInstant() }
+    val isBeforeMin = remember(selectedAt, minArrival) { minArrival != null && selectedAt.isBefore(minArrival) }
     val isAfterMax = remember(selectedAt, maxArrival) { selectedAt.isAfter(maxArrival) }
 
     Dialog(
@@ -1661,6 +1646,14 @@ private fun SetHomeConfirmDialog(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                 )
 
+                if (minZdt != null) {
+                    Text(
+                        text = "Earliest allowed: ${minZdt.toLocalDate()} ${minZdt.toLocalTime().format(timeFmt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1678,6 +1671,9 @@ private fun SetHomeConfirmDialog(
                                 selectedDate.dayOfMonth,
                             ).apply {
                                 datePicker.maxDate = maxArrival.toEpochMilli()
+                                if (minArrival != null) {
+                                    datePicker.minDate = minArrival.toEpochMilli()
+                                }
                             }.show()
                         },
                         tonalElevation = 0.dp,
@@ -1695,11 +1691,15 @@ private fun SetHomeConfirmDialog(
                                 context,
                                 { _, hh, mm ->
                                     val candidateTime = LocalTime.of(hh, mm)
-                                    val maxDate = maxZdt.toLocalDate()
-                                    if (selectedDate.isEqual(maxDate) && candidateTime.isAfter(maxZdt.toLocalTime())) {
-                                        selectedTime = maxZdt.toLocalTime().withSecond(0).withNano(0)
-                                    } else {
-                                        selectedTime = candidateTime
+                                    val candidateInstant = LocalDateTime.of(selectedDate, candidateTime).atZone(zone).toInstant()
+                                    selectedTime = when {
+                                        minArrival != null && candidateInstant.isBefore(minArrival) -> {
+                                            minZdt?.toLocalTime()?.withSecond(0)?.withNano(0) ?: candidateTime
+                                        }
+                                        candidateInstant.isAfter(maxArrival) -> {
+                                            maxZdt.toLocalTime().withSecond(0).withNano(0)
+                                        }
+                                        else -> candidateTime
                                     }
                                 },
                                 selectedTime.hour,
@@ -1748,7 +1748,7 @@ private fun SetHomeConfirmDialog(
                     Spacer(Modifier.width(6.dp))
                     TextButton(
                         onClick = { onConfirm(selectedAt) },
-                        enabled = enabled && !isAfterMax,
+                        enabled = enabled && !isBeforeMin && !isAfterMax,
                         colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF2E7D32)),
                     ) {
                         Text("Yes")
@@ -2934,6 +2934,8 @@ private data class PlacePick(
                                             val lastStopTrip = openRunTrips.lastOrNull()
                                             val arriveLastStopAt = lastStopTrip?.endedAt ?: Instant.now()
 
+                                            homeConfirmTimeZoneId = lastStopTrip?.timeZoneId ?: ZoneId.systemDefault().id
+
                                             val route = runCatching {
                                                 AppGraph.distanceRepository.getOrComputeDrivingRoute(
                                                     startLat = start.lat,
@@ -2948,7 +2950,9 @@ private data class PlacePick(
                                             }
 
                                             val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
-                                            homeConfirmRecommendedArrival = arriveLastStopAt.plusSeconds(dwellSeconds + travelSeconds)
+                                            val minArrival = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
+                                            homeConfirmRecommendedArrival = minArrival
+                                            homeConfirmMinArrival = minArrival
                                             showSetHomeConfirm = true
                                         } catch (t: Throwable) {
                                             snackbarHostState.showSnackbar(t.message ?: "Failed to prepare Home")

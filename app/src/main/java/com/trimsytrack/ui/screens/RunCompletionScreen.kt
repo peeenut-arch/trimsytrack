@@ -34,6 +34,7 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.LocalDateTime
 import java.time.ZoneId
 
 @Composable
@@ -45,6 +46,7 @@ fun RunCompletionScreen(
 
     val businessHomeLat by AppGraph.settings.businessHomeLat.collectAsState(initial = null)
     val businessHomeLng by AppGraph.settings.businessHomeLng.collectAsState(initial = null)
+    val dwellMinutesSetting by AppGraph.settings.dwellMinutes.collectAsState(initial = 0)
 
     var lastTripText by remember { mutableStateOf<String?>(null) }
     var lastTripId by remember { mutableStateOf<Long?>(null) }
@@ -64,6 +66,23 @@ fun RunCompletionScreen(
     var isSaving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var okMessage by remember { mutableStateOf<String?>(null) }
+
+    var homeRouteDurationMinutes by remember { mutableStateOf<Int?>(null) }
+    var homeRouteDistanceMeters by remember { mutableStateOf<Int?>(null) }
+    var homeRouteError by remember { mutableStateOf<String?>(null) }
+
+    fun tryParseArrivalLocalTime(raw: String): LocalTime? {
+        val parts = raw.trim().split(":")
+        if (parts.size != 2) return null
+        val h = parts[0].toIntOrNull() ?: return null
+        val m = parts[1].toIntOrNull() ?: return null
+        return runCatching { LocalTime.of(h, m) }.getOrNull()
+    }
+
+    fun formatHHmm(instant: Instant, zone: ZoneId): String {
+        val local = LocalDateTime.ofInstant(instant, zone).toLocalTime()
+        return String.format("%02d:%02d", local.hour, local.minute)
+    }
 
     LaunchedEffect(Unit) {
         runCatching {
@@ -87,6 +106,39 @@ fun RunCompletionScreen(
             lastTripText = "Last stop: ${last.storeNameSnapshot} (${last.storeId}) at ${String.format("%02d:%02d", endedLocal.hour, endedLocal.minute)}"
         }.onFailure {
             error = it.message ?: "Failed to load last trip"
+        }
+    }
+
+    LaunchedEffect(lastTripStoreLat, lastTripStoreLng, lastTripStoreId, businessHomeLat, businessHomeLng, lastTripIsHome) {
+        if (lastTripIsHome) return@LaunchedEffect
+
+        val startLat = lastTripStoreLat
+        val startLng = lastTripStoreLng
+        val startId = lastTripStoreId
+        val homeLat = businessHomeLat
+        val homeLng = businessHomeLng
+
+        if (startLat == null || startLng == null || homeLat == null || homeLng == null) return@LaunchedEffect
+
+        homeRouteDurationMinutes = null
+        homeRouteDistanceMeters = null
+        homeRouteError = null
+
+        runCatching {
+            val route = withContext(Dispatchers.IO) {
+                AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                    startLat = startLat,
+                    startLng = startLng,
+                    destLat = homeLat,
+                    destLng = homeLng,
+                    startLocationId = startId,
+                    endLocationId = BUSINESS_HOME_LOCATION_ID,
+                )
+            }
+            homeRouteDurationMinutes = route.durationMinutes
+            homeRouteDistanceMeters = route.distanceMeters
+        }.onFailure {
+            homeRouteError = it.message ?: "Failed to compute travel time"
         }
     }
 
@@ -141,6 +193,50 @@ fun RunCompletionScreen(
             enabled = !isSaving,
         )
 
+        run {
+            val zone = ZoneId.systemDefault()
+            val lastEnded = lastTripEndedAt
+            val travelMin = homeRouteDurationMinutes
+            val parsed = tryParseArrivalLocalTime(arrivalTimeText)
+
+            when {
+                !homeRouteError.isNullOrBlank() -> {
+                    Text(homeRouteError.orEmpty(), color = MaterialTheme.colorScheme.error)
+                }
+
+                travelMin == null -> {
+                    Text("Calculating travel time…", style = MaterialTheme.typography.bodySmall)
+                }
+
+                lastEnded != null && parsed != null -> {
+                    val endedAt = LocalDate.now().atTime(parsed).atZone(zone).toInstant()
+                    val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = travelMin)
+                    val dwellMinutes = dwellMinutesSetting.coerceAtLeast(0)
+                    val minArrive = lastEnded.plusSeconds(dwellMinutes.toLong() * 60L).plusSeconds(travelMin.toLong().coerceAtLeast(0) * 60L)
+
+                    Text(
+                        buildString {
+                            append("Estimated drive: ")
+                            append(travelMin)
+                            append(" min")
+                            homeRouteDistanceMeters?.let { meters ->
+                                val km = (meters.coerceAtLeast(0) / 100) / 10.0
+                                append(" (")
+                                append(km)
+                                append(" km)")
+                            }
+                            append("\nDepart last stop: ")
+                            append(formatHHmm(startedAt, zone))
+                            append("\nEarliest allowed arrival: ")
+                            append(formatHHmm(minArrive, zone))
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (endedAt.isBefore(minArrive)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+                    )
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.padding(2.dp))
 
         Button(
@@ -180,6 +276,8 @@ fun RunCompletionScreen(
                             throw IllegalStateException("Arrival time is before the last stop time")
                         }
 
+                        val dwellMinutes = dwellMinutesSetting.coerceAtLeast(0)
+
                         val routeResult = runCatching {
                             AppGraph.distanceRepository.getOrComputeDrivingRoute(
                                 startLat = startLat,
@@ -197,6 +295,15 @@ fun RunCompletionScreen(
 
                         val distanceMethod = DistanceMethod.MAPS
                         val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
+
+                        val minEndedAt = lastEnded
+                            .plusSeconds(dwellMinutes.toLong() * 60L)
+                            .plusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
+                        if (endedAt.isBefore(minEndedAt)) {
+                            throw IllegalStateException(
+                                "Arrival is too soon. Needs at least ${dwellMinutes} min dwell + ${route.durationMinutes} min drive time."
+                            )
+                        }
 
                         val label = "Business home"
                         val tripId = withContext(Dispatchers.IO) {

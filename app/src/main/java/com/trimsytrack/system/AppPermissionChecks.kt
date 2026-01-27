@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.location.LocationManager
 import android.os.Build
+import android.os.PowerManager
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
@@ -45,7 +46,20 @@ object AppPermissionChecks {
         }
     }
 
-    fun missingCritical(context: Context): List<CriticalMissing> {
+    /**
+     * True when Android battery optimization is disabled ("Unrestricted") for this app.
+     * On pre-M devices there is no Doze/App Standby battery optimization.
+     */
+    fun isBatteryOptimizationDisabled(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+        return pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    fun missingCritical(
+        context: Context,
+        includeBatteryOptimization: Boolean = false,
+    ): List<CriticalMissing> {
         val missing = mutableListOf<CriticalMissing>()
 
         // Location / GPS requirements
@@ -88,6 +102,17 @@ object AppPermissionChecks {
                 key = "notifications_permission",
                 title = "Notifications permission",
                 description = "Required on Android 13+ so the app can warn you and show reminders.",
+            )
+        }
+
+        // Battery optimization is important for reliability, but on OEM ROMs the user-facing
+        // "unrestricted" setting may not map cleanly to Android's Doze whitelist APIs.
+        // Keep it as a recommended warning by default; screens can opt-in to blocking.
+        if (includeBatteryOptimization && !isBatteryOptimizationDisabled(context)) {
+            missing += CriticalMissing(
+                key = "battery_optimization",
+                title = "Battery optimization",
+                description = "Set Battery to 'Unrestricted' so background pings work reliably.",
             )
         }
 

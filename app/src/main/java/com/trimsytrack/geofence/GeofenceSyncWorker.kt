@@ -170,8 +170,10 @@ class GeofenceSyncWorker(
                         append("You have ")
                         append(all.size)
                         append(" locations. Android supports up to ")
+                        append("~100")
+                        append(" active geofences. This app is currently configured to track up to ")
                         append(max)
-                        append(" active geofences; some locations may not ping.")
+                        append(" at a time; some locations may not ping.")
                     }
 
                     Notifications.notify(

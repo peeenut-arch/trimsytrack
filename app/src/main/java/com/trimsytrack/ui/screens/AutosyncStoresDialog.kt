@@ -538,6 +538,8 @@ fun AutosyncStoresDialog(onDismiss: () -> Unit) {
             var resolvedCityName: String?
             var geoError: String? = null
 
+            val typedCityFallback = regionQuery.trim().ifBlank { null }
+
             val preResolved = idToResolvedCity[place.placeId]?.trim().orEmpty().ifBlank { null }
             if (preResolved != null) {
                 resolvedCityName = preResolved
@@ -561,6 +563,16 @@ fun AutosyncStoresDialog(onDismiss: () -> Unit) {
                 if (resolvedCityName.isNullOrBlank()) {
                     geoError = geoError ?: "No city found for lat=${place.lat}, lng=${place.lng}"
                 }
+            }
+
+            // The user explicitly typed a city for this add flow. Use it for *all* newly added locations
+            // so they don't scatter into slightly different labels (e.g. locality vs municipality).
+            val looksLikeCounty = resolvedCityName?.contains(" län", ignoreCase = true) == true
+            if (typedCityFallback != null) {
+                resolvedCityName = typedCityFallback
+            } else if (resolvedCityName.isNullOrBlank() || looksLikeCounty) {
+                // Fallback if user didn't type a city (should be rare).
+                resolvedCityName = resolvedCityName.orEmpty()
             }
 
             StorePayload(

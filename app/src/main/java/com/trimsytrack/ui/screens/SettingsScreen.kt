@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -165,6 +166,8 @@ fun SettingsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val focusManager = LocalFocusManager.current
 
+    val snackbarHostState = remember { SnackbarHostState() }
+
     val auth = remember { FirebaseAuth.getInstance() }
     var signedInUser by remember { mutableStateOf<FirebaseUser?>(auth.currentUser) }
     DisposableEffect(auth) {
@@ -197,6 +200,8 @@ fun SettingsScreen(
     val vehicleRegNumber by AppGraph.settings.vehicleRegNumber.collectAsState(initial = "")
     val driverName by AppGraph.settings.driverName.collectAsState(initial = "")
     val businessHomeAddress by AppGraph.settings.businessHomeAddress.collectAsState(initial = "")
+    val businessHomeLat by AppGraph.settings.businessHomeLat.collectAsState(initial = null)
+    val businessHomeLng by AppGraph.settings.businessHomeLng.collectAsState(initial = null)
     val journalYear by AppGraph.settings.journalYear.collectAsState(initial = LocalDate.now().year)
 
     val backendBaseUrl by AppGraph.settings.backendBaseUrl.collectAsState(initial = "")
@@ -238,8 +243,10 @@ fun SettingsScreen(
     // Editable text fields: keep local state to avoid DataStore roundtrip fighting typing.
     var vehicleRegHasFocus by remember { mutableStateOf(false) }
     var driverNameHasFocus by remember { mutableStateOf(false) }
+    var businessHomeHasFocus by remember { mutableStateOf(false) }
     var vehicleRegText by rememberSaveable(uid) { mutableStateOf(vehicleRegNumber) }
     var driverNameText by rememberSaveable(uid) { mutableStateOf(driverName) }
+    var businessHomeAddressText by rememberSaveable(uid) { mutableStateOf(businessHomeAddress) }
 
     LaunchedEffect(vehicleRegNumber, vehicleRegHasFocus) {
         if (!vehicleRegHasFocus) vehicleRegText = vehicleRegNumber
@@ -247,13 +254,100 @@ fun SettingsScreen(
     LaunchedEffect(driverName, driverNameHasFocus) {
         if (!driverNameHasFocus) driverNameText = driverName
     }
+    LaunchedEffect(businessHomeAddress, businessHomeHasFocus) {
+        if (!businessHomeHasFocus) businessHomeAddressText = businessHomeAddress
+    }
+
+    suspend fun geocoderGetFromLocationNameCompat(
+        geocoder: Geocoder,
+        query: String,
+        maxResults: Int,
+    ): List<Address> {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            suspendCancellableCoroutine { cont ->
+                geocoder.getFromLocationName(
+                    query,
+                    maxResults,
+                    object : Geocoder.GeocodeListener {
+                        override fun onGeocode(addresses: MutableList<Address>) {
+                            if (!cont.isCompleted) cont.resume(addresses)
+                        }
+
+                        override fun onError(errorMessage: String?) {
+                            if (!cont.isCompleted) {
+                                cont.resumeWithException(IOException(errorMessage ?: "Geocoder failed"))
+                            }
+                        }
+                    },
+                )
+            }
+        } else {
+            withContext(Dispatchers.IO) {
+                @Suppress("DEPRECATION")
+                geocoder.getFromLocationName(query, maxResults) ?: emptyList()
+            }
+        }
+    }
+
+    suspend fun tryDeriveBusinessHomeLatLngFromAddress(address: String): Pair<Double, Double>? {
+        val q = address.trim().ifBlank { return null }
+        val geocoder = Geocoder(context)
+        val query = if (q.contains("Sweden", ignoreCase = true) || q.contains("Sverige", ignoreCase = true)) q else "$q, Sweden"
+        val first = geocoderGetFromLocationNameCompat(geocoder, query, 1).firstOrNull() ?: return null
+        return Pair(first.latitude, first.longitude)
+    }
 
     fun commitVehicleReg() {
-        scope.launch { AppGraph.settings.setVehicleRegNumber(vehicleRegText) }
+        scope.launch {
+            val v = vehicleRegText.trim()
+            AppGraph.settings.setVehicleRegNumber(v)
+            runCatching { AppGraph.trackEventEmitter.emitProfileVehicleRegNumberSet(v, reason = "settings_ui") }
+        }
     }
 
     fun commitDriverName() {
-        scope.launch { AppGraph.settings.setDriverName(driverNameText) }
+        scope.launch {
+            val v = driverNameText.trim()
+            AppGraph.settings.setDriverName(v)
+            runCatching { AppGraph.trackEventEmitter.emitProfileDriverNameSet(v, reason = "settings_ui") }
+        }
+    }
+
+    fun commitBusinessHomeAddress() {
+        scope.launch {
+            val addr = businessHomeAddressText.trim()
+            if (addr.isBlank()) {
+                AppGraph.settings.setBusinessHomeAddress("")
+                snackbarHostState.showSnackbar("Business home address cleared")
+                return@launch
+            }
+
+            AppGraph.settings.setBusinessHomeAddress(addr)
+
+            // If lat/lng aren't set yet, derive them from the entered address.
+            if (businessHomeLat == null || businessHomeLng == null) {
+                val latLng = runCatching { tryDeriveBusinessHomeLatLngFromAddress(addr) }.getOrNull()
+                if (latLng != null) {
+                    AppGraph.settings.setBusinessHomeLatLng(latLng.first, latLng.second)
+                    snackbarHostState.showSnackbar("Business home location set")
+                } else {
+                    snackbarHostState.showSnackbar("Could not derive location from that address")
+                }
+            }
+        }
+    }
+
+    // Auto-derive lat/lng once if we have an address but missing coords (covers existing users).
+    var lastAutoDerivedAddress by rememberSaveable(uid) { mutableStateOf("") }
+    LaunchedEffect(uid, businessHomeAddress, businessHomeLat, businessHomeLng) {
+        val addr = businessHomeAddress.trim()
+        if (addr.isBlank()) return@LaunchedEffect
+        if (businessHomeLat != null && businessHomeLng != null) return@LaunchedEffect
+        if (lastAutoDerivedAddress == addr) return@LaunchedEffect
+        lastAutoDerivedAddress = addr
+
+        val latLng = runCatching { tryDeriveBusinessHomeLatLngFromAddress(addr) }.getOrNull() ?: return@LaunchedEffect
+        runCatching { AppGraph.settings.setBusinessHomeLatLng(latLng.first, latLng.second) }
     }
 
     val workManager = remember { WorkManager.getInstance(context) }
@@ -616,6 +710,15 @@ fun SettingsScreen(
             ) == PackageManager.PERMISSION_GRANTED
     }
 
+    val hasBatteryUnrestricted = remember(permTick) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            true
+        } else {
+            val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
+            pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+        }
+    }
+
     fun openAppSettings() {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)
@@ -785,8 +888,6 @@ fun SettingsScreen(
             }
         },
     )
-
-    val snackbarHostState = remember { SnackbarHostState() }
     var showHiddenPlaces by rememberSaveable { mutableStateOf(false) }
 
     fun signOutGoogleBestEffort() {
@@ -1787,13 +1888,25 @@ fun SettingsScreen(
                     )
 
                     OutlinedTextField(
-                        value = businessHomeAddress,
-                        onValueChange = { scope.launch { AppGraph.settings.setBusinessHomeAddress(it) } },
+                        value = businessHomeAddressText,
+                        onValueChange = { businessHomeAddressText = it },
                         label = { Text("Business home address") },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .onFocusChanged {
+                                val hadFocus = businessHomeHasFocus
+                                businessHomeHasFocus = it.isFocused
+                                if (hadFocus && !it.isFocused) commitBusinessHomeAddress()
+                            },
                         singleLine = false,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                commitBusinessHomeAddress()
+                                focusManager.clearFocus()
+                            },
+                        ),
                     )
 
                     Spacer(Modifier.height(10.dp))
@@ -2228,6 +2341,7 @@ fun SettingsScreen(
                 val missingFine = !hasFineLocation
                 val missingBackground = !hasBackgroundLocation
                 val missingNotifications = Build.VERSION.SDK_INT >= 33 && !hasNotifications
+                val missingBattery = !hasBatteryUnrestricted
                 val permSubtitle = buildString {
                     append("Plats: ")
                     append(if (hasFineLocation) "OK" else "SAKNAS")
@@ -2236,6 +2350,10 @@ fun SettingsScreen(
                     if (Build.VERSION.SDK_INT >= 33) {
                         append(" • Notiser: ")
                         append(if (hasNotifications) "OK" else "SAKNAS")
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        append(" • Batteri: ")
+                        append(if (hasBatteryUnrestricted) "OK" else "SAKNAS")
                     }
                 }
 
@@ -2279,12 +2397,33 @@ fun SettingsScreen(
                             Text(
                                 "Plats: ${if (hasFineLocation) "OK" else "SAKNAS"}\n" +
                                     "Bakgrundsplats: ${if (hasBackgroundLocation) "OK" else "SAKNAS"}\n" +
-                                    "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}",
+                                    "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}\n" +
+                                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                        "Batteri (obegränsad): ${if (hasBatteryUnrestricted) "OK" else "SAKNAS"}"
+                                    } else {
+                                        ""
+                                    }),
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                             )
                         },
                         trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
                     )
+
+                    if (missingBattery) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        ListItem(
+                            headlineContent = { Text("Batterioptimering") },
+                            supportingContent = {
+                                Text(
+                                    "Status: ${if (hasBatteryUnrestricted) "OK" else "SAKNAS"}. " +
+                                        "Ställ in Batteri till 'Obegränsad' så pings/geofence fungerar pålitligt i bakgrunden.",
+                                    color = if (missingBattery) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                )
+                            },
+                            trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
+                        )
+                    }
 
                     if (missingFine || missingBackground || missingNotifications) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -2821,12 +2960,31 @@ fun SettingsScreen(
                                 Text(
                                     "Plats: ${if (hasFineLocation) "OK" else "SAKNAS"}\n" +
                                         "Bakgrundsplats: ${if (hasBackgroundLocation) "OK" else "SAKNAS"}\n" +
-                                        "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}",
+                                        "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}\n" +
+                                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                            "Batteri (obegränsad): ${if (hasBatteryUnrestricted) "OK" else "SAKNAS"}"
+                                        } else {
+                                            ""
+                                        }),
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                                 )
                             },
                             trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
                         )
+
+                        if (!hasBatteryUnrestricted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            ListItem(
+                                headlineContent = { Text("Batterioptimering") },
+                                supportingContent = {
+                                    Text(
+                                        "Ställ in Batteri till 'Obegränsad' så pings/geofence fungerar pålitligt i bakgrunden.",
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
+                            )
+                        }
 
                         if (permissionHint.value != null) {
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -3720,12 +3878,31 @@ fun SettingsScreen(
                                 Text(
                                     "Plats: ${if (hasFineLocation) "OK" else "SAKNAS"}\n" +
                                         "Bakgrundsplats: ${if (hasBackgroundLocation) "OK" else "SAKNAS"}\n" +
-                                        "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}",
+                                        "Notiser: ${if (hasNotifications) "OK" else "SAKNAS"}\n" +
+                                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                            "Batteri (obegränsad): ${if (hasBatteryUnrestricted) "OK" else "SAKNAS"}"
+                                        } else {
+                                            ""
+                                        }),
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                                 )
                             },
                             trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
                         )
+
+                        if (!hasBatteryUnrestricted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            ListItem(
+                                headlineContent = { Text("Batterioptimering") },
+                                supportingContent = {
+                                    Text(
+                                        "Ställ in Batteri till 'Obegränsad' så pings/geofence fungerar pålitligt i bakgrunden.",
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                trailingContent = { TextButton(onClick = { openAppSettings() }) { Text("Öppna") } },
+                            )
+                        }
 
                         if (permissionHint.value != null) {
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -4832,6 +5009,7 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                         val county = first?.adminArea?.trim().orEmpty().ifBlank { null }
 
                         // Prefer a real city/municipality name (avoid "Uppsala län") when possible.
+                        // We still store everything under the user-entered cityName for consistent grouping.
                         resolvedCityName = locality ?: municipality ?: county
                         if (resolvedCityName.isNullOrBlank()) {
                             geoError = geoError ?: "No city found for lat=${place.lat}, lng=${place.lng}"
@@ -4842,7 +5020,7 @@ private fun SyncStoresDialog(onDismiss: () -> Unit) {
                             lat = place.lat,
                             lng = place.lng,
                             radiusMeters = 120,
-                            city = resolvedCityName ?: regionName
+                            city = regionName
                         )
                     }
 
