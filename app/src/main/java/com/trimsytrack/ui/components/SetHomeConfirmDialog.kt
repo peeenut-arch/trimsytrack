@@ -29,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.trimsytrack.ui.theme.TrimsyGreen
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -229,7 +230,7 @@ fun SetHomeConfirmDialog(
                     TextButton(
                         onClick = { onConfirm(selectedAt) },
                         enabled = enabled && !isBeforeMin && !isAfterMax,
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF2E7D32)),
+                        colors = ButtonDefaults.textButtonColors(contentColor = TrimsyGreen),
                     ) {
                         Text("Yes")
                     }

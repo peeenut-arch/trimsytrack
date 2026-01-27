@@ -87,6 +87,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.trimsytrack.ui.theme.TrimsyGreen
 import com.trimsytrack.ui.components.HomeDistanceTile
 import com.trimsytrack.ui.components.SetHomeConfirmDialog
 import coil.compose.AsyncImage
@@ -1699,7 +1700,7 @@ private fun SetStopArrivalConfirmDialog(
                     TextButton(
                         onClick = { onConfirm(selectedAt) },
                         enabled = enabled && !isBeforeMin && !isAfterMax,
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF2E7D32)),
+                        colors = ButtonDefaults.textButtonColors(contentColor = TrimsyGreen),
                     ) {
                         Text("Yes")
                     }
@@ -1913,7 +1914,7 @@ private fun LocationTile(
                 // Plus: green rounded square
                 Surface(
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-                    color = Color(0xFF2E7D32),
+                    color = TrimsyGreen,
                     tonalElevation = 0.dp,
                 ) {
                     IconButton(

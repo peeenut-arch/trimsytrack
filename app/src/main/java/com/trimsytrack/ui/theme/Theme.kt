@@ -17,9 +17,9 @@ private val TrimsyLightColors = lightColorScheme(
     primaryContainer = Color(0xFFEEEEEE),
     onPrimaryContainer = Color(0xFF111111),
 
-    secondary = Color(0xFF2ECC71),
-    onSecondary = Color.Black,
-    secondaryContainer = Color(0xFF1EA85A),
+    secondary = TrimsyGreen,
+    onSecondary = Color.White,
+    secondaryContainer = TrimsyGreen,
     onSecondaryContainer = Color.White,
 
     tertiary = Color(0xFFFFC857),
@@ -49,9 +49,9 @@ private val TrimsyDarkColors = darkColorScheme(
     primaryContainer = Color(0xFF1B2130),
     onPrimaryContainer = Color(0xFFEAECEF),
 
-    secondary = Color(0xFF2ECC71),
-    onSecondary = Color.Black,
-    secondaryContainer = Color(0xFF1EA85A),
+    secondary = TrimsyGreen,
+    onSecondary = Color.White,
+    secondaryContainer = TrimsyGreen,
     onSecondaryContainer = Color.White,
 
     tertiary = Color(0xFFFFC857),

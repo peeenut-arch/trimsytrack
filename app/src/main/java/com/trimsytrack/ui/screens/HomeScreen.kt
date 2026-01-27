@@ -8,15 +8,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Divider
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -50,7 +47,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.ExpandLess
@@ -73,6 +69,7 @@ import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.ui.components.HomeDistanceTile
 import com.trimsytrack.ui.components.SetHomeConfirmDialog
 import com.trimsytrack.ui.components.HomeTileIds
+import com.trimsytrack.ui.theme.TrimsyGreen
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -96,14 +93,6 @@ fun HomeScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val homeTileIconImages by AppGraph.settings.homeTileIconImages.collectAsState(initial = emptyMap())
-
-    val accountEmail by AppGraph.settings.backendIdentityEmail.collectAsState(initial = "")
-    val uid by AppGraph.settings.uid.collectAsState(initial = "")
-    val accountPictureUri by AppGraph.settings.accountPictureUri.collectAsState(initial = null)
-
-    val accountLabel = remember(accountEmail, uid) {
-        accountEmail.trim().ifBlank { uid.trim() }
-    }
 
     val today = LocalDate.now()
     val yesterday = remember(today) { today.minusDays(1) }
@@ -136,8 +125,6 @@ fun HomeScreen(
     }
 
     // (SetHomeConfirmDialog flow computes route on-demand on click)
-
-    val menuExpanded = remember { mutableStateOf(false) }
 
     var tileMenuForId by remember { mutableStateOf<String?>(null) }
     var pendingTileIdForImage by remember { mutableStateOf<String?>(null) }
@@ -177,7 +164,7 @@ fun HomeScreen(
         val shape = RoundedCornerShape(34.dp)
         val inset = size * 0.025f // ~95% content size
 
-        val menuExpanded = tileMenuForId == tileId
+        val tileMenuExpanded = tileMenuForId == tileId
         val hasCustomImage = !iconImageUri.isNullOrBlank()
 
         Box(
@@ -214,7 +201,7 @@ fun HomeScreen(
             }
 
             DropdownMenu(
-                expanded = menuExpanded,
+                expanded = tileMenuExpanded,
                 onDismissRequest = { tileMenuForId = null },
             ) {
                 DropdownMenuItem(
@@ -253,68 +240,14 @@ fun HomeScreen(
                 .padding(top = 18.dp),
         ) {
             IconButton(
-                onClick = { menuExpanded.value = true },
+                onClick = onOpenSettings,
                 modifier = Modifier.size(44.dp),
             ) {
-                if (!accountPictureUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = accountPictureUri,
-                        contentDescription = "Account",
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape),
-                        contentScale = ContentScale.Crop,
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            accountLabel.take(1).ifBlank { "?" }.uppercase(),
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
-                        )
-                    }
-                }
-            }
-
-            DropdownMenu(
-                expanded = menuExpanded.value,
-                onDismissRequest = { menuExpanded.value = false },
-            ) {
-                val scrollState = rememberScrollState()
-                Column(
-                    modifier = Modifier
-                        .heightIn(max = 520.dp)
-                        .verticalScroll(scrollState),
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                    ) {
-                        Text(accountLabel.ifBlank { "Not signed in" })
-                    }
-
-                    Divider()
-
-                    DropdownMenuItem(
-                        text = { Text("Settings") },
-                        onClick = {
-                            menuExpanded.value = false
-                            onOpenSettings()
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.Settings,
-                                contentDescription = null,
-                            )
-                        },
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "Settings",
+                    tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                )
             }
         }
 
@@ -405,23 +338,6 @@ fun HomeScreen(
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                     HomeIconButton(
-                        tileId = HomeTileIds.ManualTrip,
-                        iconResId = R.drawable.trip,
-                        iconImageUri = homeTileIconImages[HomeTileIds.ManualTrip],
-                        onClick = { showAddTrip = true },
-                        onLongClick = onAddTripQuickLogWithPhoto,
-                    )
-
-                    HomeIconButton(
-                        tileId = HomeTileIds.ReviewPlaces,
-                        iconResId = R.drawable.notifications,
-                        iconImageUri = homeTileIconImages[HomeTileIds.ReviewPlaces],
-                        onClick = onReviewPlaces,
-                    )
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                    HomeIconButton(
                         tileId = HomeTileIds.Journal,
                         iconResId = R.drawable.journal,
                         iconImageUri = homeTileIconImages[HomeTileIds.Journal],
@@ -433,6 +349,23 @@ fun HomeScreen(
                         iconResId = R.drawable.camera,
                         iconImageUri = homeTileIconImages[HomeTileIds.Camera],
                         onClick = onCamera,
+                    )
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                    HomeIconButton(
+                        tileId = HomeTileIds.ReviewPlaces,
+                        iconResId = R.drawable.notifications,
+                        iconImageUri = homeTileIconImages[HomeTileIds.ReviewPlaces],
+                        onClick = onReviewPlaces,
+                    )
+
+                    HomeIconButton(
+                        tileId = HomeTileIds.ManualTrip,
+                        iconResId = R.drawable.trip,
+                        iconImageUri = homeTileIconImages[HomeTileIds.ManualTrip],
+                        onClick = { showAddTrip = true },
+                        onLongClick = onAddTripQuickLogWithPhoto,
                     )
                 }
             }
@@ -561,7 +494,7 @@ private fun CurrentTripCard(
 ) {
     val safeTrips = trips.orEmpty()
     val hasRun = safeTrips.isNotEmpty()
-    val green = Color(0xFF2E7D32)
+    val green = TrimsyGreen
     val startLabel = remember(safeTrips) {
         when {
             safeTrips.isNotEmpty() -> safeTrips.first().startLabelSnapshot.ifBlank { "Start" }
@@ -699,7 +632,6 @@ private fun CurrentTripCard(
                         modifier = Modifier.weight(1f),
                     )
 
-                    val green = Color(0xFF2E7D32)
                     val distanceLabel = remember(homeDistanceMeters) {
                         if (homeDistanceMeters <= 0 || homeDistanceMeters == Int.MAX_VALUE) {
                             "—"

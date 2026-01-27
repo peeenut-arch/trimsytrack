@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.trimsytrack.ui.theme.TrimsyGreen
 import java.util.Locale
 
 @Composable
@@ -35,7 +36,7 @@ fun HomeDistanceTile(
     badgeTextStyle: TextStyle? = null,
 ) {
     val shape = RoundedCornerShape(12.dp)
-    val green = Color(0xFF2E7D32)
+    val green = TrimsyGreen
 
     val kmValue = remember(distanceMeters) {
         if (distanceMeters <= 0 || distanceMeters == Int.MAX_VALUE) {
