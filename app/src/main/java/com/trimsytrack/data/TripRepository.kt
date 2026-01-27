@@ -16,7 +16,7 @@ import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.RunEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
-import com.trimsytrack.data.canonical.CanonicalWriteEnqueuer
+import com.trimsytrack.data.canonical.CanonicalWriteEnqueuerLike
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -47,6 +47,7 @@ import java.io.File
 import com.trimsytrack.util.EvidenceNaming
 import com.trimsytrack.util.PlaceNameNormalizer
 import com.trimsytrack.data.entities.PlaceType
+import com.trimsytrack.data.trackevents.TrackEventEmitterLike
 
 class TripRepository(
     private val tripDao: TripDao,
@@ -54,8 +55,8 @@ class TripRepository(
     private val runDao: RunDao,
     private val settings: SettingsStore,
     private val appContext: Context,
-    private val trackEventEmitter: com.trimsytrack.data.trackevents.TrackEventEmitter,
-    private val canonicalWriteEnqueuer: CanonicalWriteEnqueuer,
+    private val trackEventEmitter: TrackEventEmitterLike,
+    private val canonicalWriteEnqueuer: CanonicalWriteEnqueuerLike,
 ) {
     private val logTag = "TripRepository"
     // Disabled: allow creating multiple trips for the same store without a cooldown.
@@ -173,7 +174,12 @@ class TripRepository(
         val ensuredBase = entity.copy(
             uid = entity.uid.ifBlank { uid },
             clientRef = entity.clientRef ?: UUID.randomUUID().toString(),
-            syncStatus = if (entity.syncStatus == SyncStatus.LOCAL_ONLY) SyncStatus.PENDING else entity.syncStatus,
+            // We intentionally delay canonical sync of stop trips until the run is closed (HOME).
+            // This allows local re-timing (e.g. "Set home time") without racing backend canonical writes.
+            syncStatus = when (entity.syncStatus) {
+                SyncStatus.LOCAL_ONLY -> if (entity.endPlaceType == PlaceType.HOME) SyncStatus.PENDING else SyncStatus.LOCAL_ONLY
+                else -> entity.syncStatus
+            },
             businessPurpose = SettingsStore.normalizeBusinessPurpose(entity.businessPurpose)
                 .ifBlank { SettingsStore.DEFAULT_BUSINESS_PURPOSE },
             storeLocationId = entity.storeLocationId ?: derivedStoreLocationId,
@@ -206,11 +212,15 @@ class TripRepository(
 
         val tripId = tripDao.insert(ensured)
 
-        // Canonical truth write (outbox): every completed trip must be written via drivingTripCreate.
-        runCatching {
-            canonicalWriteEnqueuer.enqueueDrivingTripCreate(ensured.copy(id = tripId))
-        }.onFailure { t ->
-            Log.w(logTag, "Failed to enqueue canonical drivingTripCreate: ${t.message}")
+        // Canonical truth write (outbox):
+        // - Stop trips are kept LOCAL_ONLY while the run is open.
+        // - When HOME is created, flush/enqueue the entire run with final times.
+        if (ensured.endPlaceType == PlaceType.HOME && ensured.endedAt != null) {
+            runCatching {
+                flushCanonicalForRun(uid = ensured.uid, runId = ensured.runId, homeTripId = tripId)
+            }.onFailure { t ->
+                Log.w(logTag, "Failed to enqueue canonical drivingTripCreate (run flush): ${t.message}")
+            }
         }
 
         // Fill city snapshot in the background (once) if missing / clearly wrong.
@@ -239,6 +249,34 @@ class TripRepository(
         }
 
         return tripId
+    }
+
+    private suspend fun flushCanonicalForRun(uid: String, runId: Long?, homeTripId: Long) {
+        val rid = runId ?: return
+
+        val runTrips = runCatching { tripDao.listByRunId(uid, rid) }.getOrElse { emptyList() }
+        if (runTrips.isEmpty()) return
+
+        for (t in runTrips) {
+            val isSynced = !t.backendId.isNullOrBlank() && t.syncStatus == SyncStatus.SYNCED
+            if (isSynced) continue
+
+            val ensuredClientRef = t.clientRef?.trim().orEmpty().ifBlank { UUID.randomUUID().toString() }
+            val ensuredStatus = if (t.syncStatus == SyncStatus.LOCAL_ONLY) SyncStatus.PENDING else t.syncStatus
+            val ensuredEntity = t.copy(
+                // HOME is the trip we just inserted; keep its real ID.
+                id = if (t.endPlaceType == PlaceType.HOME) homeTripId else t.id,
+                clientRef = ensuredClientRef,
+                syncStatus = ensuredStatus,
+            )
+
+            if (ensuredEntity != t) {
+                runCatching { tripDao.update(ensuredEntity) }
+            }
+
+            // Enqueue canonical create for each trip; idempotencyKey prevents duplicates.
+            runCatching { canonicalWriteEnqueuer.enqueueDrivingTripCreate(ensuredEntity) }
+        }
     }
 
     private suspend fun ensureRunIdForNewTrip(entity: TripEntity): Long? {

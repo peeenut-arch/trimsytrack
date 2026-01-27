@@ -73,6 +73,7 @@ import com.trimsytrack.AppGraph
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.logic.RunGrouping
 import coil.compose.AsyncImage
 import androidx.compose.ui.window.Dialog
 import java.time.DayOfWeek
@@ -194,17 +195,7 @@ fun JournalScreen(
     // Trip counter policy: count only completed trips (Home→…→Home).
     // We number only runs whose last stop ends at Home.
     val completedTripNumberByKey = remember(trips) {
-        trips
-            .groupBy { it.runId ?: -it.id }
-            .mapNotNull { (key, group) ->
-                val last = group.maxWithOrNull(compareBy<TripEntity> { it.endedAt }.thenBy { it.createdAt }.thenBy { it.id })
-                    ?: return@mapNotNull null
-                if (last.endPlaceType != PlaceType.HOME) return@mapNotNull null
-                key to last.endedAt
-            }
-            .sortedWith(compareBy<Pair<Long, Instant>> { it.second }.thenBy { it.first })
-            .mapIndexed { idx, e -> e.first to (idx + 1) }
-            .toMap()
+        RunGrouping.completedTripNumberByKey(trips)
     }
 
     val allAttachments by AppGraph.tripRepository.observeAllAttachments().collectAsState(initial = emptyList())
@@ -257,15 +248,11 @@ fun JournalScreen(
 
     val displayRuns = remember(displayTrips, zone, businessHomeLabel) {
         displayTrips
-            .groupBy { it.runId ?: -it.id }
+            .groupBy { RunGrouping.key(it) }
             .mapNotNull { (key, group) ->
                 // Use endedAt ordering for stable run completion detection.
                 // startedAt can be derived/estimated and may not be monotonic across legs.
-                val ordered = group.sortedWith(
-                    compareBy<TripEntity> { it.endedAt }
-                        .thenBy { it.createdAt }
-                        .thenBy { it.id }
-                )
+                val ordered = RunGrouping.orderedForJournal(group)
                 val first = ordered.firstOrNull() ?: return@mapNotNull null
                 val last = ordered.last()
 
@@ -320,10 +307,10 @@ fun JournalScreen(
 
     val completedRuns = remember(trips, zone) {
         trips
-            .groupBy { it.runId ?: -it.id }
+            .groupBy { RunGrouping.key(it) }
             .mapNotNull { (key, group) ->
-                val last = group.maxWithOrNull(compareBy<TripEntity> { it.endedAt }.thenBy { it.createdAt }.thenBy { it.id })
-                    ?: return@mapNotNull null
+                val ordered = RunGrouping.orderedForJournal(group)
+                val last = ordered.lastOrNull() ?: return@mapNotNull null
                 if (last.endPlaceType != PlaceType.HOME) return@mapNotNull null
 
                 val day = runCatching { last.endedAt.atZone(zone).toLocalDate() }.getOrDefault(last.day)
@@ -333,7 +320,7 @@ fun JournalScreen(
                     distanceMeters = group.sumOf { it.distanceMeters.toLong() },
                     durationMinutes = group.sumOf { it.durationMinutes.toLong() },
                     // Count stops as non-home destinations; exclude the final return-to-Home leg.
-                    stops = group.count { it.endPlaceType != PlaceType.HOME },
+                    stops = RunGrouping.stopCount(group),
                 )
             }
     }
@@ -590,7 +577,7 @@ private fun RunCard(
 
     val stops = run.stopLabels.joinToString(" → ")
     val km = run.totalDistanceMeters / 1000.0
-    val stopCount = run.trips.count { it.endPlaceType != PlaceType.HOME }
+    val stopCount = RunGrouping.stopCount(run.trips)
     val meta = buildString {
         append(run.day)
         if (timeRange.isNotBlank()) append(" · ").append(timeRange)
@@ -798,7 +785,7 @@ private fun RunDetailsDialog(
                         val timeRange = runCatching {
                             "${run.start.format(timeFmt)}–${run.end.format(timeFmt)}"
                         }.getOrDefault("")
-                        val stopCount = run.trips.count { it.endPlaceType != PlaceType.HOME }
+                        val stopCount = RunGrouping.stopCount(run.trips)
 
                         Text(
                             text = run.stopLabels.joinToString(" → "),

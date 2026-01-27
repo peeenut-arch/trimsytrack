@@ -26,8 +26,29 @@ function Ensure-ToolPath {
 function Get-OnlineDeviceSerial {
     param([string]$Adb, [string]$Preferred)
 
+    # Ensure adb server is running; avoids stale/stuck server issues.
+    try {
+        & $Adb start-server | Out-Null
+    } catch {
+        # Ignore; device detection below will still fail with a clear message.
+    }
+
     $raw = & $Adb devices
     $lines = $raw | Select-String -Pattern "\tdevice$"
+    if (-not $lines) {
+        # One retry after restarting adb.
+        try {
+            & $Adb kill-server | Out-Null
+            Start-Sleep -Milliseconds 250
+            & $Adb start-server | Out-Null
+        } catch {
+            # Ignore
+        }
+
+        $raw = & $Adb devices
+        $lines = $raw | Select-String -Pattern "\tdevice$"
+    }
+
     if (-not $lines) {
         Write-Host "adb devices output:" -ForegroundColor Yellow
         $raw | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }

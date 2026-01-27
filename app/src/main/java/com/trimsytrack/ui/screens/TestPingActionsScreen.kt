@@ -92,9 +92,19 @@ fun TestPingActionsScreen(
         if (isSaving.value) return
         errorMessage.value = null
 
+        val nowInstant = Instant.now()
+        val zone = ZoneId.systemDefault()
+        val nowZdt = nowInstant.atZone(zone)
+        val today = nowZdt.toLocalDate()
+
         val day = runCatching { LocalDate.parse(dateText.trim()) }.getOrNull()
         if (day == null) {
             errorMessage.value = "Invalid date. Use YYYY-MM-DD."
+            return
+        }
+
+        if (day.isAfter(today)) {
+            errorMessage.value = "Date cannot be in the future."
             return
         }
 
@@ -110,6 +120,18 @@ fun TestPingActionsScreen(
             return
         }
 
+        if (day.isEqual(today)) {
+            val nowMinutes = nowZdt.hour * 60 + nowZdt.minute
+            if (startMinutes > nowMinutes) {
+                errorMessage.value = "Start time cannot be in the future."
+                return
+            }
+            if (stopMinutes > nowMinutes) {
+                errorMessage.value = "Stop time cannot be in the future."
+                return
+            }
+        }
+
         if (stopLocationName.trim().isBlank()) {
             errorMessage.value = "Stop location name is required."
             return
@@ -119,12 +141,30 @@ fun TestPingActionsScreen(
             return
         }
 
+        if (stopMinutes < startMinutes) {
+            errorMessage.value = "Stop time must be after start time (same day)."
+            return
+        }
+
         val startLocalTime = LocalTime.of(startMinutes / 60, startMinutes % 60)
-        val createdAt = runCatching {
+        val stopLocalTime = LocalTime.of(stopMinutes / 60, stopMinutes % 60)
+
+        val startedAt = runCatching {
             LocalDateTime.of(day, startLocalTime)
-                .atZone(ZoneId.systemDefault())
+                .atZone(zone)
                 .toInstant()
-        }.getOrDefault(Instant.now())
+        }.getOrDefault(nowInstant)
+
+        val endedAt = runCatching {
+            LocalDateTime.of(day, stopLocalTime)
+                .atZone(zone)
+                .toInstant()
+        }.getOrDefault(startedAt)
+
+        if (endedAt.isAfter(nowInstant)) {
+            errorMessage.value = "Stop time cannot be in the future."
+            return
+        }
 
         val storeLat = lat.toDoubleOrNull() ?: Double.NaN
         val storeLng = lng.toDoubleOrNull() ?: Double.NaN
@@ -136,7 +176,7 @@ fun TestPingActionsScreen(
         val startLat = if (homeLat != null && homeLat.isFinite()) homeLat else safeStoreLat
         val startLng = if (homeLng != null && homeLng.isFinite()) homeLng else safeStoreLng
 
-        val durationMinutes = computeDurationMinutes(startMinutes, stopMinutes)
+        val durationMinutes = (stopMinutes - startMinutes).coerceAtLeast(0)
 
         val notes = buildString {
             if (driverName.trim().isNotBlank()) appendLine("Driver: ${driverName.trim()}")
@@ -148,9 +188,8 @@ fun TestPingActionsScreen(
         }.trimEnd()
 
         val effectiveUid = uid.trim()
-        val tz = java.time.ZoneId.systemDefault().id
-        val endedAt = createdAt
-        val startedAt = endedAt.minusSeconds((durationMinutes.toLong().coerceAtLeast(0)) * 60L)
+        val tz = zone.id
+        val createdAt = Instant.now()
         val entity = TripEntity(
             uid = effectiveUid,
             clientRef = null,
@@ -194,71 +233,6 @@ fun TestPingActionsScreen(
         }
     }
 
-    fun seed4FakePings() {
-        if (isSaving.value) return
-        errorMessage.value = null
-
-        val effectiveUid = uid.trim()
-        if (effectiveUid.isBlank()) {
-            errorMessage.value = "No active UID. Sign in first."
-            return
-        }
-
-        val pool: List<StoreEntity> = allStores
-            .let { stores -> stores.filter { it.isActive }.ifEmpty { stores } }
-
-        val selected = pool.take(4)
-        if (selected.size < 4) {
-            errorMessage.value = "Need at least 4 saved locations to generate pings (have ${pool.size})."
-            return
-        }
-
-        val zone = ZoneId.systemDefault()
-        val today = LocalDate.now(zone)
-
-        val schedule = listOf(
-            Triple(today, LocalTime.of(9, 10), PingTransition.ENTER),
-            Triple(today, LocalTime.of(11, 35), PingTransition.DWELL),
-            Triple(today.minusDays(1), LocalTime.of(14, 20), PingTransition.ENTER),
-            Triple(today.minusDays(2), LocalTime.of(16, 50), PingTransition.EXIT),
-        )
-
-        val entities = selected.zip(schedule).mapIndexed { index, (store, slot) ->
-            val (day, time, transition) = slot
-            val occurredAt = LocalDateTime.of(day, time).atZone(zone).toInstant()
-
-            PingEventEntity(
-                uid = effectiveUid,
-                storeId = store.id,
-                storeNameSnapshot = store.name,
-                storeLatSnapshot = store.lat,
-                storeLngSnapshot = store.lng,
-                day = day,
-                occurredAt = occurredAt,
-                transition = transition,
-                source = PingSource.GEOFENCE,
-                // Add a small snapshot on a couple of rows so you can test the UI string formatting.
-                routeDistanceFromPrevMeters = if (index % 2 == 0) 12_300 else null,
-                routeDurationFromPrevMinutes = if (index % 2 == 0) 18 else null,
-                routeSource = if (index % 2 == 0) "test" else null,
-                routeComputedAt = if (index % 2 == 0) Instant.now() else null,
-                routeAnchorTripId = null,
-            )
-        }
-
-        isSaving.value = true
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    AppGraph.db.pingDao().insertAll(entities)
-                }
-            } catch (e: Exception) {
-                errorMessage.value = e.message ?: "Failed to insert fake pings"
-            } finally {
-                isSaving.value = false
-            }
-        }
-    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -278,18 +252,6 @@ fun TestPingActionsScreen(
                 .padding(padding)
                 .padding(16.dp),
         ) {
-            Text("Debug helpers", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(10.dp))
-            OutlinedButton(
-                onClick = { seed4FakePings() },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isSaving.value,
-            ) {
-                Text(if (isSaving.value) "Working…" else "Insert 4 fake pings")
-            }
-
-            Spacer(Modifier.height(18.dp))
-
             Text("Create one trip", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(10.dp))
 
@@ -321,6 +283,32 @@ fun TestPingActionsScreen(
                     modifier = Modifier.weight(1f),
                     singleLine = true,
                 )
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        val stop = parseTimeToMinutes(stopTimeText)
+                        val fallback = LocalTime.now().let { it.hour * 60 + it.minute }
+                        val base = stop ?: fallback
+                        val shifted = (base - 12 * 60).coerceAtLeast(0)
+                        startTimeText = formatMinutes(shifted)
+                    },
+                    enabled = !isSaving.value,
+                ) {
+                    Text("Start = stop − 12h")
+                }
+                OutlinedButton(
+                    onClick = { stopTimeText = formatTime(LocalTime.now()) },
+                    enabled = !isSaving.value,
+                ) {
+                    Text("Stop = now")
+                }
             }
 
             Spacer(Modifier.height(10.dp))
@@ -442,5 +430,5 @@ private fun formatTime(time: LocalTime): String = "%02d:%02d".format(time.hour, 
 
 private fun computeDurationMinutes(startMinutes: Int, stopMinutes: Int): Int {
     val raw = stopMinutes - startMinutes
-    return if (raw >= 0) raw else raw + (24 * 60)
+    return raw.coerceAtLeast(0)
 }

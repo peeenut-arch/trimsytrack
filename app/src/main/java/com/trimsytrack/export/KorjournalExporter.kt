@@ -63,7 +63,6 @@ object KorjournalExporter {
         fun exportDistanceMethodLabel(method: String): String {
             return when (method) {
                 "MAPS" -> "Karta"
-                "GPS_STRAIGHT_LINE" -> "Rak linje"
                 "MANUAL" -> "Manuell"
                 "UNKNOWN" -> "Okänd"
                 else -> method
@@ -167,13 +166,10 @@ object KorjournalExporter {
                             endLocationId = BUSINESS_HOME_LOCATION_ID,
                         )
                     }
-                    val returnRoute = returnRouteResult.getOrElse {
-                        AppGraph.distanceRepository.estimateStraightLineRoute(
-                            startLat = last.storeLatSnapshot,
-                            startLng = last.storeLngSnapshot,
-                            destLat = homeLat,
-                            destLng = homeLng,
-                        )
+                    val returnRoute = returnRouteResult.getOrNull()
+                    if (returnRoute == null) {
+                        // If Maps route is unavailable, skip the synthetic return-home row.
+                        continue
                     }
 
                     val endAddress = businessHomeAddress.ifBlank { "Verksamhetsadress" }
@@ -181,7 +177,7 @@ object KorjournalExporter {
 
                     val tz = runCatching { ZoneId.of(last.timeZoneId) }.getOrElse { ZoneId.systemDefault() }
                     val startTime = runCatching { last.endedAt.atZone(tz).toLocalTime().format(timeFormatter) }.getOrDefault("")
-                    val distanceMethod = if (returnRouteResult.isSuccess) "MAPS" else "GPS_STRAIGHT_LINE"
+                    val distanceMethod = "MAPS"
                     val distanceMethodLabel = exportDistanceMethodLabel(distanceMethod)
                     appendLine(
                         listOf(

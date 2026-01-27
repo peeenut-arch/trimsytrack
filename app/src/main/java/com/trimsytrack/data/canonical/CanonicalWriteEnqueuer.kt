@@ -3,6 +3,7 @@ package com.trimsytrack.data.canonical
 import android.util.Log
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.SettingsStore
+import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.system.SystemCallablesService
@@ -15,13 +16,13 @@ import kotlinx.serialization.json.Json
 class CanonicalWriteEnqueuer(
     private val settings: SettingsStore,
     private val outbox: CanonicalWriteOutboxDao,
-) {
+) : CanonicalWriteEnqueuerLike {
     private val json = Json {
         ignoreUnknownKeys = true
         explicitNulls = false
     }
 
-    suspend fun enqueueDrivingTripCreate(trip: TripEntity): Boolean {
+    override suspend fun enqueueDrivingTripCreate(trip: TripEntity): Boolean {
         if (trip.uid.isBlank()) return false
 
         val clientTripId = trip.clientRef?.trim().orEmpty()
@@ -147,10 +148,22 @@ class CanonicalWriteEnqueuer(
         val trips = AppGraph.db.tripDao().listAll(uid)
         if (trips.isEmpty()) return 0
 
+        // Only sync trips that are part of a closed run (i.e. run contains a HOME trip).
+        // This avoids uploading stop trips that may still be re-timed before completion.
+        val closedRunIds: Set<Long> = trips
+            .asSequence()
+            .filter { it.runId != null && it.endPlaceType == PlaceType.HOME }
+            .mapNotNull { it.runId }
+            .toSet()
+
         var enqueued = 0
         for (t in trips) {
             val needsPush = t.backendId.isNullOrBlank() || t.syncStatus != SyncStatus.SYNCED
             if (!needsPush) continue
+
+            val runId = t.runId
+            val isRunClosed = runId == null || t.endPlaceType == PlaceType.HOME || closedRunIds.contains(runId)
+            if (!isRunClosed) continue
 
             val ensuredClientRef = t.clientRef?.trim().orEmpty().ifBlank {
                 val next = UUID.randomUUID().toString()

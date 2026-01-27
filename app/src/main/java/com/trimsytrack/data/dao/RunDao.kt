@@ -27,6 +27,15 @@ interface RunDao {
     @Query("DELETE FROM runs WHERE uid = :uid AND id = :id")
     suspend fun deleteById(uid: String, id: Long)
 
+    @Query(
+        "DELETE FROM runs " +
+            "WHERE uid = :uid " +
+            "AND id NOT IN (" +
+                "SELECT DISTINCT runId FROM trips WHERE uid = :uid AND runId IS NOT NULL" +
+            ")"
+    )
+    suspend fun deleteOrphaned(uid: String): Int
+
     @Query("UPDATE runs SET uid = :uid WHERE uid = ''")
     suspend fun claimUnscoped(uid: String)
 

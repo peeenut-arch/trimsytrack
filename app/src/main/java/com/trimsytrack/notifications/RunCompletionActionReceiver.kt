@@ -9,6 +9,7 @@ import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.DistanceMethod
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.logic.TripTimes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -89,16 +90,11 @@ class RunCompletionActionReceiver : BroadcastReceiver() {
         }
 
         val route = routeResult.getOrElse {
-            AppGraph.distanceRepository.estimateStraightLineRoute(
-                startLat = last.storeLatSnapshot,
-                startLng = last.storeLngSnapshot,
-                destLat = homeLat,
-                destLng = homeLng,
-            )
+            throw it
         }
 
-        val distanceMethod = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
-        val startedAt = endedAt.minusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
+        val distanceMethod = DistanceMethod.MAPS
+    val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
 
         val tripId = AppGraph.tripRepository.createTrip(
             TripEntity(

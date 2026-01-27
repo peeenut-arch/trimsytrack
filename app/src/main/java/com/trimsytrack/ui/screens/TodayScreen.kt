@@ -43,17 +43,16 @@ import com.trimsytrack.AppGraph
 import com.trimsytrack.BuildConfig
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.entities.DistanceMethod
-import com.trimsytrack.data.entities.PingEventEntity
-import com.trimsytrack.data.entities.PingSource
-import com.trimsytrack.data.entities.PingTransition
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.PlaceType
+import com.trimsytrack.data.entities.PingEventEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.ui.vm.TodayViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -89,74 +88,6 @@ fun TodayScreen(
     var homeTripBusy by remember { mutableStateOf(false) }
     var homeTripStatus by remember { mutableStateOf<String?>(null) }
 
-    var debugSeedBusy by remember { mutableStateOf(false) }
-    var debugSeedStatus by remember { mutableStateOf<String?>(null) }
-
-    fun seed4TestPings() {
-        if (debugSeedBusy) return
-        debugSeedStatus = null
-
-        val effectiveUid = uid.trim()
-        if (effectiveUid.isBlank()) {
-            debugSeedStatus = "No active UID. Sign in first."
-            return
-        }
-
-        val pool: List<StoreEntity> = allStores
-            .let { stores -> stores.filter { it.isActive }.ifEmpty { stores } }
-
-        val selected = pool.take(4)
-        if (selected.size < 4) {
-            debugSeedStatus = "Need at least 4 saved locations (have ${pool.size})."
-            return
-        }
-
-        val zone = ZoneId.systemDefault()
-        val todayLocal = LocalDate.now(zone)
-
-        val schedule = listOf(
-            Triple(todayLocal, LocalTime.of(9, 10), PingTransition.ENTER),
-            Triple(todayLocal, LocalTime.of(11, 35), PingTransition.DWELL),
-            Triple(todayLocal.minusDays(1), LocalTime.of(14, 20), PingTransition.ENTER),
-            Triple(todayLocal.minusDays(2), LocalTime.of(16, 50), PingTransition.EXIT),
-        )
-
-        val entities = selected.zip(schedule).mapIndexed { index, (store, slot) ->
-            val (day, time, transition) = slot
-            val occurredAt = LocalDateTime.of(day, time).atZone(zone).toInstant()
-
-            PingEventEntity(
-                uid = effectiveUid,
-                storeId = store.id,
-                storeNameSnapshot = store.name,
-                storeLatSnapshot = store.lat,
-                storeLngSnapshot = store.lng,
-                day = day,
-                occurredAt = occurredAt,
-                transition = transition,
-                source = PingSource.GEOFENCE,
-                routeDistanceFromPrevMeters = if (index % 2 == 0) 12_300 else null,
-                routeDurationFromPrevMinutes = if (index % 2 == 0) 18 else null,
-                routeSource = if (index % 2 == 0) "test" else null,
-                routeComputedAt = if (index % 2 == 0) Instant.now() else null,
-                routeAnchorTripId = null,
-            )
-        }
-
-        debugSeedBusy = true
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    AppGraph.db.pingDao().insertAll(entities)
-                }
-                debugSeedStatus = "Inserted 4 test pings."
-            } catch (t: Throwable) {
-                debugSeedStatus = t.message ?: "Failed to insert test pings"
-            } finally {
-                debugSeedBusy = false
-            }
-        }
-    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -273,19 +204,10 @@ fun TodayScreen(
                                                     }
 
                                                     val route = routeResult.getOrElse {
-                                                        AppGraph.distanceRepository.estimateStraightLineRoute(
-                                                            startLat = startLat,
-                                                            startLng = startLng,
-                                                            destLat = homeLat,
-                                                            destLng = homeLng,
-                                                        )
+                                                        throw it
                                                     }
 
-                                                    val distanceMethod = if (routeResult.isSuccess) {
-                                                        DistanceMethod.MAPS
-                                                    } else {
-                                                        DistanceMethod.GPS_STRAIGHT_LINE
-                                                    }
+                                                    val distanceMethod = DistanceMethod.MAPS
 
                                                     val uid = AppGraph.settings.requireUid()
                                                     val now = Instant.now()
@@ -298,7 +220,7 @@ fun TodayScreen(
                                                                 uid = uid,
                                                                 createdAt = now,
                                                                 day = day,
-                                                                startedAt = now.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L),
+                                                                startedAt = TripTimes.deriveStartedAt(endedAt = now, durationMinutes = route.durationMinutes),
                                                                 endedAt = now,
                                                                 timeZoneId = tz.id,
                                                                 storeId = BUSINESS_HOME_LOCATION_ID,
@@ -384,11 +306,6 @@ fun TodayScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("Pings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                        if (BuildConfig.DEBUG) {
-                            TextButton(onClick = { seed4TestPings() }, enabled = !debugSeedBusy) {
-                                Text(if (debugSeedBusy) "…" else "Seed 4")
-                            }
-                        }
                         TextButton(onClick = onOpenPings) { Text("All") }
                     }
                     if (BuildConfig.DEBUG) {
@@ -397,14 +314,6 @@ fun TodayScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                         )
-                        debugSeedStatus?.let {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                it,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                            )
-                        }
                     }
                     Spacer(Modifier.height(4.dp))
                 }

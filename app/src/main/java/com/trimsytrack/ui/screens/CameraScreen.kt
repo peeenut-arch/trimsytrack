@@ -88,6 +88,7 @@ import com.trimsytrack.data.entities.DistanceMethod
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.ui.components.TrimsyWhiteRadioButton
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.util.Hashing
@@ -299,18 +300,13 @@ fun CameraScreen(
             )
         }
         val route = routeResult.getOrElse {
-            AppGraph.distanceRepository.estimateStraightLineRoute(
-                startLat = derivedStart.lat,
-                startLng = derivedStart.lng,
-                destLat = lat,
-                destLng = lng,
-            )
+            throw it
         }
-        val distanceMethod = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
+        val distanceMethod = DistanceMethod.MAPS
 
         val tz = ZoneId.systemDefault().id
         val endedAt = createdAt
-        val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
+        val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
 
         return AppGraph.tripRepository.createTrip(
             TripEntity(

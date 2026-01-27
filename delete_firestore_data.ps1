@@ -11,6 +11,13 @@ Write-Host ""
 
 $projectId = "trimsy-d12de"
 
+if (-not (Get-Command firebase -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: Firebase CLI ('firebase') not found on PATH." -ForegroundColor Red
+    Write-Host "Install it (recommended): npm install -g firebase-tools" -ForegroundColor Yellow
+    Write-Host "Then run: firebase login" -ForegroundColor Yellow
+    exit 1
+}
+
 # Collections to delete
 $paths = @(
     "uid_state/$Uid",

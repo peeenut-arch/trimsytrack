@@ -81,7 +81,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.trimsytrack.AppGraph
-import com.trimsytrack.BuildConfig
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.DistanceMethod
@@ -89,6 +88,7 @@ import com.trimsytrack.data.entities.PingEventEntity
 import com.trimsytrack.data.entities.PingTransition
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.ui.components.TrimsyWhiteRadioButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -101,6 +101,8 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -158,6 +160,10 @@ fun PingHistoryScreen(
     var builderPreviewTrips by remember { mutableStateOf<List<TripEntity>>(emptyList()) }
     var builderBusinessPurpose by rememberSaveable { mutableStateOf(SettingsStore.DEFAULT_BUSINESS_PURPOSE) }
 
+    // Builder timing window (local device timezone). Stored as epoch millis for Bundle-saveability.
+    var builderLeaveHomeAtMillis by rememberSaveable { mutableStateOf<Long?>(null) }
+    var builderArriveHomeAtMillis by rememberSaveable { mutableStateOf<Long?>(null) }
+
     // Builder always starts from Business home.
     val businessHomeLat by AppGraph.settings.businessHomeLat.collectAsState(initial = null)
     val businessHomeLng by AppGraph.settings.businessHomeLng.collectAsState(initial = null)
@@ -166,85 +172,7 @@ fun PingHistoryScreen(
     var builderBusy by remember { mutableStateOf(false) }
     var builderStatus by remember { mutableStateOf<String?>(null) }
 
-    var seedBusy by remember { mutableStateOf(false) }
 
-
-    suspend fun seedDebugPingsForBuilder() {
-        if (!BuildConfig.DEBUG) return
-        if (seedBusy) return
-
-        seedBusy = true
-        try {
-            val uidLocal = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
-            if (uidLocal.isBlank()) {
-                builderStatus = "No active UID (sign in first)"
-                return
-            }
-
-            val regionCode = runCatching { AppGraph.settings.regionCode.first() }.getOrNull().orEmpty().ifBlank { "demo" }
-
-            // Ensure we have a store pool even on a fresh install (no region loaded yet).
-            val storesNow = withContext(Dispatchers.IO) {
-                if (stores.isEmpty()) {
-                    runCatching { AppGraph.storeRepository.ensureRegionLoaded(regionCode) }
-                }
-                runCatching { AppGraph.storeRepository.observeAllStores().first() }.getOrNull().orEmpty()
-            }
-
-            if (storesNow.isEmpty()) {
-                builderStatus = "No stores available (load a region first)"
-                return
-            }
-
-            val pool = storesNow.filter { it.isActive }.ifEmpty { storesNow }
-            val count = 10
-            val selected = (0 until count).map { idx -> pool[idx % pool.size] }
-
-            val zone = ZoneId.systemDefault()
-            val now = Instant.now()
-            val firstAt = now.minusSeconds(((count - 1) * 9L).coerceAtLeast(0L) * 60L) // 9 min spacing
-
-            val entities = selected.mapIndexed { index, store ->
-                val occurredAt = firstAt.plusSeconds(index.toLong() * 9L * 60L)
-                val day = occurredAt.atZone(zone).toLocalDate()
-                PingEventEntity(
-                    uid = uidLocal,
-                    storeId = store.id,
-                    storeNameSnapshot = store.name,
-                    storeLatSnapshot = store.lat,
-                    storeLngSnapshot = store.lng,
-                    day = day,
-                    occurredAt = occurredAt,
-                    transition = when (index) {
-                        0 -> PingTransition.ENTER
-                        selected.lastIndex -> PingTransition.EXIT
-                        else -> PingTransition.DWELL
-                    },
-                    source = com.trimsytrack.data.entities.PingSource.GEOFENCE,
-                    routeDistanceFromPrevMeters = if (index == 0) null else 8_000 + index * 850,
-                    routeDurationFromPrevMinutes = if (index == 0) null else 10 + index * 2,
-                    routeSource = if (index == 0) null else "debug",
-                    routeComputedAt = if (index == 0) null else now,
-                    routeAnchorTripId = null,
-                )
-            }
-
-            withContext(Dispatchers.IO) {
-                AppGraph.db.pingDao().insertAll(entities)
-            }
-
-            builderStatus = "Inserted ${entities.size} test pings"
-        } catch (t: Throwable) {
-            builderStatus = t.message ?: "Failed to insert test pings"
-        } finally {
-            seedBusy = false
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        if (!BuildConfig.DEBUG) return@LaunchedEffect
-        seedDebugPingsForBuilder()
-    }
 
     fun clearBuilderSelection() {
         selectedPingIds.clear()
@@ -260,6 +188,8 @@ fun PingHistoryScreen(
         homeLng: Double,
         homeAddress: String,
         businessPurpose: String,
+        leaveHomeAtOverride: Instant? = null,
+        arriveHomeAtOverride: Instant? = null,
     ): List<TripEntity> {
         if (list.isEmpty()) return emptyList()
         if (list.any { it.createdTripId != null }) throw IllegalStateException("One or more selected pings already created trips")
@@ -340,21 +270,251 @@ fun PingHistoryScreen(
             }
 
             val route = routeResult.getOrElse {
-                AppGraph.distanceRepository.estimateStraightLineRoute(
-                    startLat = startLat,
-                    startLng = startLng,
-                    destLat = endLat,
-                    destLng = endLng,
-                )
+                throw it
             }
 
-            val method = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
+            val method = DistanceMethod.MAPS
 
             return RouteInfo(
                 distanceMeters = route.distanceMeters,
                 rawDurationMinutes = route.durationMinutes.coerceAtLeast(0),
                 method = method,
             )
+        }
+
+        val leaveOverride = leaveHomeAtOverride
+        val arriveOverride = arriveHomeAtOverride
+        if (leaveOverride != null && arriveOverride != null) {
+            val leaveAt = leaveOverride!!
+            val arriveAt = arriveOverride!!
+            val uniqueDays = list.map { it.day }.distinct()
+            if (uniqueDays.size != 1) throw IllegalStateException("Select pings from a single day")
+            val day = uniqueDays.first()
+
+            val startOfDay = day.atStartOfDay(tz).toInstant()
+            val endOfDayExclusive = day.plusDays(1).atStartOfDay(tz).toInstant()
+            val now = Instant.now()
+            val today = now.atZone(tz).toLocalDate()
+            val latestAllowed = if (day.isEqual(today)) minOf(now, endOfDayExclusive.minusMillis(1)) else endOfDayExclusive.minusMillis(1)
+
+            if (leaveAt.isAfter(latestAllowed) || arriveAt.isAfter(latestAllowed)) {
+                throw IllegalStateException("Times cannot be in the future")
+            }
+            if (leaveAt.isBefore(startOfDay) || arriveAt.isAfter(endOfDayExclusive.minusMillis(1))) {
+                throw IllegalStateException("Times must be within ${day}")
+            }
+            if (!leaveAt.isBefore(arriveAt)) {
+                throw IllegalStateException("Leave home must be before arrive home")
+            }
+
+            // Pre-compute all leg routes (Home -> stops -> Home) so we can allocate dwell time.
+            val legRoutes = ArrayList<RouteInfo>(stops.size + (if (returnHome) 1 else 0))
+            val legStartLabels = ArrayList<String>(stops.size + (if (returnHome) 1 else 0))
+            val legStartLat = ArrayList<Double>(stops.size + (if (returnHome) 1 else 0))
+            val legStartLng = ArrayList<Double>(stops.size + (if (returnHome) 1 else 0))
+            val legStartPlaceType = ArrayList<PlaceType>(stops.size + (if (returnHome) 1 else 0))
+            val legStartAddress = ArrayList<String?>(stops.size + (if (returnHome) 1 else 0))
+
+            var prevLat = anchor.lat
+            var prevLng = anchor.lng
+            var prevLocationId: String? = anchor.locationId
+            var prevLabel = anchor.label
+            var prevPlaceType = anchor.placeType
+            var prevAddress = anchor.address
+
+            for (stop in stops) {
+                legStartLabels += prevLabel
+                legStartLat += prevLat
+                legStartLng += prevLng
+                legStartPlaceType += prevPlaceType
+                legStartAddress += prevAddress
+
+                val route = computeRoute(
+                    startLat = prevLat,
+                    startLng = prevLng,
+                    endLat = stop.storeLatSnapshot,
+                    endLng = stop.storeLngSnapshot,
+                    startLocationId = prevLocationId,
+                    endLocationId = stop.storeId,
+                )
+                legRoutes += route
+
+                prevLat = stop.storeLatSnapshot
+                prevLng = stop.storeLngSnapshot
+                prevLocationId = stop.storeId
+                prevLabel = stop.storeNameSnapshot
+                prevPlaceType = PlaceType.STORE
+                prevAddress = null
+            }
+
+            if (returnHome) {
+                legStartLabels += prevLabel
+                legStartLat += prevLat
+                legStartLng += prevLng
+                legStartPlaceType += prevPlaceType
+                legStartAddress += prevAddress
+
+                legRoutes += computeRoute(
+                    startLat = prevLat,
+                    startLng = prevLng,
+                    endLat = homeLat,
+                    endLng = homeLng,
+                    startLocationId = prevLocationId,
+                    endLocationId = BUSINESS_HOME_LOCATION_ID,
+                )
+            }
+
+            val travelSecondsByLeg = legRoutes.map { it.rawDurationMinutes.toLong().coerceAtLeast(0L) * 60L }
+            val totalTravelSeconds = travelSecondsByLeg.sum()
+            val windowSeconds = Duration.between(leaveAt, arriveAt).seconds
+            if (windowSeconds <= 0L) throw IllegalStateException("Invalid time window")
+            val totalDwellSeconds = windowSeconds - totalTravelSeconds
+            if (totalDwellSeconds < 0L) {
+                throw IllegalStateException("Time window too short for routes (${totalTravelSeconds / 60} min travel)")
+            }
+
+            val stopCount = stops.size
+            val dwellSecondsByStop: List<Long> = if (stopCount <= 0) {
+                emptyList()
+            } else {
+                val base = totalDwellSeconds / stopCount
+                val rem = (totalDwellSeconds % stopCount).toInt().coerceAtLeast(0)
+                List(stopCount) { idx -> base + if (idx < rem) 1L else 0L }
+            }
+
+            val preview = ArrayList<TripEntity>(stops.size + (if (returnHome) 1 else 0))
+
+            var cursor = leaveAt
+            for (i in stops.indices) {
+                val stop = stops[i]
+                val route = legRoutes[i]
+                val travelSeconds = travelSecondsByLeg[i]
+
+                val startedAt = cursor
+                val arrivedAt = cursor.plusSeconds(travelSeconds)
+                val endDay = dayFor(arrivedAt)
+
+                preview.add(
+                    TripEntity(
+                        uid = uidLocal,
+                        createdAt = arrivedAt,
+                        day = endDay,
+                        startedAt = startedAt,
+                        endedAt = arrivedAt,
+                        timeZoneId = tz.id,
+                        storeId = stop.storeId,
+                        storeLocationId = null,
+                        storeNameSnapshot = stop.storeNameSnapshot,
+                        citySnapshot = cityFor(stop.storeId),
+                        storeLatSnapshot = stop.storeLatSnapshot,
+                        storeLngSnapshot = stop.storeLngSnapshot,
+                        endPlaceType = PlaceType.STORE,
+                        startLabelSnapshot = legStartLabels[i],
+                        startLat = legStartLat[i],
+                        startLng = legStartLng[i],
+                        startPlaceType = legStartPlaceType[i],
+                        startAddressSnapshot = legStartAddress[i],
+                        distanceMeters = route.distanceMeters,
+                        distanceMethod = route.method,
+                        durationMinutes = minutesBetween(startedAt, arrivedAt),
+                        notes = "",
+                        businessPurpose = businessPurpose,
+                        supplierOrArea = null,
+                        isBusiness = true,
+                        runId = null,
+                        currencyCode = null,
+                        mileageRateMicros = null,
+                    )
+                )
+
+                cursor = arrivedAt.plusSeconds(dwellSecondsByStop.getOrElse(i) { 0L })
+            }
+
+            if (returnHome && stops.isNotEmpty()) {
+                val homeLegIndex = stops.size
+                val homeRoute = legRoutes[homeLegIndex]
+                val travelSeconds = travelSecondsByLeg[homeLegIndex]
+
+                val startedAt = cursor
+                val arrivedAt = startedAt.plusSeconds(travelSeconds)
+                if (arrivedAt != arriveAt) {
+                    // Keep strict anchoring: end exactly at the requested arrive time.
+                    // Adjust the departure time if rounding caused a drift.
+                    val adjustedStartedAt = arriveAt.minusSeconds(travelSeconds)
+                    val endDay = dayFor(arriveAt)
+
+                    val lastStop = stops.last()
+                    preview.add(
+                        TripEntity(
+                            uid = uidLocal,
+                            createdAt = arriveAt,
+                            day = endDay,
+                            startedAt = adjustedStartedAt,
+                            endedAt = arriveAt,
+                            timeZoneId = tz.id,
+                            storeId = BUSINESS_HOME_LOCATION_ID,
+                            storeLocationId = BUSINESS_HOME_LOCATION_ID,
+                            storeNameSnapshot = "Business home",
+                            citySnapshot = "",
+                            storeLatSnapshot = homeLat,
+                            storeLngSnapshot = homeLng,
+                            endPlaceType = PlaceType.HOME,
+                            startLabelSnapshot = "Last stop: ${lastStop.storeNameSnapshot.ifBlank { "Stop" }}",
+                            startLat = legStartLat[homeLegIndex],
+                            startLng = legStartLng[homeLegIndex],
+                            startPlaceType = PlaceType.STORE,
+                            startAddressSnapshot = null,
+                            distanceMeters = homeRoute.distanceMeters,
+                            distanceMethod = homeRoute.method,
+                            durationMinutes = minutesBetween(adjustedStartedAt, arriveAt),
+                            notes = "",
+                            businessPurpose = businessPurpose,
+                            supplierOrArea = null,
+                            isBusiness = true,
+                            runId = null,
+                            currencyCode = null,
+                            mileageRateMicros = null,
+                        )
+                    )
+                } else {
+                    val endDay = dayFor(arrivedAt)
+                    val lastStop = stops.last()
+                    preview.add(
+                        TripEntity(
+                            uid = uidLocal,
+                            createdAt = arrivedAt,
+                            day = endDay,
+                            startedAt = startedAt,
+                            endedAt = arrivedAt,
+                            timeZoneId = tz.id,
+                            storeId = BUSINESS_HOME_LOCATION_ID,
+                            storeLocationId = BUSINESS_HOME_LOCATION_ID,
+                            storeNameSnapshot = "Business home",
+                            citySnapshot = "",
+                            storeLatSnapshot = homeLat,
+                            storeLngSnapshot = homeLng,
+                            endPlaceType = PlaceType.HOME,
+                            startLabelSnapshot = "Last stop: ${lastStop.storeNameSnapshot.ifBlank { "Stop" }}",
+                            startLat = legStartLat[homeLegIndex],
+                            startLng = legStartLng[homeLegIndex],
+                            startPlaceType = PlaceType.STORE,
+                            startAddressSnapshot = null,
+                            distanceMeters = homeRoute.distanceMeters,
+                            distanceMethod = homeRoute.method,
+                            durationMinutes = minutesBetween(startedAt, arrivedAt),
+                            notes = "",
+                            businessPurpose = businessPurpose,
+                            supplierOrArea = null,
+                            isBusiness = true,
+                            runId = null,
+                            currencyCode = null,
+                            mileageRateMicros = null,
+                        )
+                    )
+                }
+            }
+
+            return preview
         }
 
         val preview = ArrayList<TripEntity>(stops.size + (if (returnHome) 1 else 0))
@@ -543,18 +703,52 @@ fun PingHistoryScreen(
         builderPreviewTrips = emptyList()
 
         val selectedSnapshot = selectedPings.toList()
+        val selectedDays = selectedSnapshot.map { it.day }.distinct()
+        if (selectedDays.size != 1) {
+            builderPreviewBusy = false
+            builderStatus = "Select pings from a single day"
+            showBuilderConfirm = false
+            builderReturnHome = false
+            return
+        }
+
+        // Seed default timing window if missing or mismatched.
+        val zone = ZoneId.systemDefault()
+        val day = selectedDays.first()
+        val now = Instant.now()
+        val today = now.atZone(zone).toLocalDate()
+        val minOccurred = selectedSnapshot.minOf { it.occurredAt }
+        val maxOccurred = selectedSnapshot.maxOf { it.occurredAt }
+        val startOfDay = day.atStartOfDay(zone).toInstant()
+        val endOfDayExclusive = day.plusDays(1).atStartOfDay(zone).toInstant()
+        val latestAllowed = if (day.isEqual(today)) minOf(now, endOfDayExclusive.minusMillis(1)) else endOfDayExclusive.minusMillis(1)
+        val suggestedLeave = maxOf(startOfDay, minOccurred.minusSeconds(30 * 60L))
+        val suggestedArrive = minOf(latestAllowed, maxOccurred.plusSeconds(30 * 60L))
+        if (builderLeaveHomeAtMillis == null || Instant.ofEpochMilli(builderLeaveHomeAtMillis!!).atZone(zone).toLocalDate() != day) {
+            builderLeaveHomeAtMillis = suggestedLeave.toEpochMilli()
+        }
+        if (builderArriveHomeAtMillis == null || Instant.ofEpochMilli(builderArriveHomeAtMillis!!).atZone(zone).toLocalDate() != day) {
+            builderArriveHomeAtMillis = maxOf(suggestedArrive, suggestedLeave.plusSeconds(60)).toEpochMilli()
+        }
+
         val uniqueStops = selectedSnapshot.distinctBy { it.storeId }
+        val leaveSnapshot = builderLeaveHomeAtMillis
+        val arriveSnapshot = builderArriveHomeAtMillis
         scope.launch {
             try {
-                val previewTrips = withContext(Dispatchers.IO) {
-                    buildPreviewTripsFromSelectedPings(
-                        list = selectedSnapshot,
-                        returnHome = true,
-                        homeLat = businessHomeLat!!,
-                        homeLng = businessHomeLng!!,
-                        homeAddress = businessHomeAddress,
-                        businessPurpose = builderBusinessPurpose,
-                    )
+                val previewTripsResult = runCatching {
+                    withContext(Dispatchers.IO) {
+                        buildPreviewTripsFromSelectedPings(
+                            list = selectedSnapshot,
+                            returnHome = true,
+                            homeLat = businessHomeLat!!,
+                            homeLng = businessHomeLng!!,
+                            homeAddress = businessHomeAddress,
+                            businessPurpose = builderBusinessPurpose,
+                            leaveHomeAtOverride = leaveSnapshot?.let { Instant.ofEpochMilli(it) },
+                            arriveHomeAtOverride = arriveSnapshot?.let { Instant.ofEpochMilli(it) },
+                        )
+                    }
                 }
 
                 val merged = selectedSnapshot.size - uniqueStops.size
@@ -563,8 +757,16 @@ fun PingHistoryScreen(
                     add("Selected pings: ${selectedSnapshot.size}")
                     add("Stops: ${uniqueStops.size}")
                     if (merged > 0) add("Duplicates merged: ${merged} ping(s)")
-                    add("Choose Syfte then press OK to save")
+                    val err = previewTripsResult.exceptionOrNull()?.message
+                    if (!err.isNullOrBlank()) {
+                        add("Preview error: $err")
+                        add("Adjust Leave/Arrive times and try again")
+                    } else {
+                        add("Choose Syfte then press OK to save")
+                    }
                 }
+
+                val previewTrips = previewTripsResult.getOrNull().orEmpty()
                 builderPreviewTrips = previewTrips
             } finally {
                 builderPreviewBusy = false
@@ -588,20 +790,29 @@ fun PingHistoryScreen(
         val homeLngSnapshot = businessHomeLng
         val homeAddressSnapshot = businessHomeAddress
         val purposeSnapshot = builderBusinessPurpose
+        val leaveSnapshot = builderLeaveHomeAtMillis
+        val arriveSnapshot = builderArriveHomeAtMillis
 
         scope.launch {
             try {
-                val previewTrips = withContext(Dispatchers.IO) {
-                    buildPreviewTripsFromSelectedPings(
-                        list = selectedSnapshot,
-                        returnHome = true,
-                        homeLat = homeLatSnapshot!!,
-                        homeLng = homeLngSnapshot!!,
-                        homeAddress = homeAddressSnapshot,
-                        businessPurpose = purposeSnapshot,
-                    )
+                val previewTrips = runCatching {
+                    withContext(Dispatchers.IO) {
+                        buildPreviewTripsFromSelectedPings(
+                            list = selectedSnapshot,
+                            returnHome = true,
+                            homeLat = homeLatSnapshot!!,
+                            homeLng = homeLngSnapshot!!,
+                            homeAddress = homeAddressSnapshot,
+                            businessPurpose = purposeSnapshot,
+                            leaveHomeAtOverride = leaveSnapshot?.let { Instant.ofEpochMilli(it) },
+                            arriveHomeAtOverride = arriveSnapshot?.let { Instant.ofEpochMilli(it) },
+                        )
+                    }
                 }
-                builderPreviewTrips = previewTrips
+
+                val err = previewTrips.exceptionOrNull()?.message
+                if (!err.isNullOrBlank()) builderStatus = err
+                previewTrips.getOrNull()?.let { builderPreviewTrips = it }
             } finally {
                 builderPreviewBusy = false
             }
@@ -647,6 +858,8 @@ fun PingHistoryScreen(
         homeLng: Double,
         homeAddress: String,
         businessPurpose: String,
+        leaveHomeAtOverride: Instant?,
+        arriveHomeAtOverride: Instant?,
     ): List<Long> {
         if (list.isEmpty()) throw IllegalStateException("Select at least 1 ping")
         if (list.any { it.createdTripId != null }) throw IllegalStateException("One or more selected pings already created trips")
@@ -664,6 +877,8 @@ fun PingHistoryScreen(
             homeLng = homeLng,
             homeAddress = homeAddress,
             businessPurpose = businessPurpose,
+            leaveHomeAtOverride = leaveHomeAtOverride,
+            arriveHomeAtOverride = arriveHomeAtOverride,
         )
 
         // IMPORTANT: create a new run explicitly so these trips never attach to an existing open run.
@@ -745,6 +960,8 @@ fun PingHistoryScreen(
         val homeLatSnapshot = businessHomeLat
         val homeLngSnapshot = businessHomeLng
         val homeAddressSnapshot = businessHomeAddress
+        val leaveSnapshot = builderLeaveHomeAtMillis
+        val arriveSnapshot = builderArriveHomeAtMillis
 
         scope.launch {
             try {
@@ -756,6 +973,8 @@ fun PingHistoryScreen(
                         homeLng = homeLngSnapshot!!,
                         homeAddress = homeAddressSnapshot,
                         businessPurpose = builderBusinessPurpose,
+                        leaveHomeAtOverride = leaveSnapshot?.let { Instant.ofEpochMilli(it) },
+                        arriveHomeAtOverride = arriveSnapshot?.let { Instant.ofEpochMilli(it) },
                     )
                 }
                 builderCreatedTripIds = created
@@ -767,6 +986,139 @@ fun PingHistoryScreen(
                 }
             } catch (t: Throwable) {
                 builderStatus = t.message ?: "Failed"
+            } finally {
+                builderBusy = false
+            }
+        }
+    }
+
+    fun completeOpenRunToHomeNow() {
+        if (builderBusy) return
+        if (builderPreviewBusy) return
+        if (businessHomeLat == null || businessHomeLng == null) {
+            builderStatus = "Set Business home in Settings to build trips"
+            return
+        }
+
+        builderBusy = true
+        builderStatus = null
+
+        val homeLatSnapshot = businessHomeLat
+        val homeLngSnapshot = businessHomeLng
+        val homeAddressSnapshot = businessHomeAddress
+
+        scope.launch {
+            try {
+                val uid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                if (uid.isBlank()) throw IllegalStateException("Missing user")
+
+                val now = Instant.now()
+                val zone = ZoneId.systemDefault()
+                val day = now.atZone(zone).toLocalDate()
+
+                val (last, runIdToClose) = withContext(Dispatchers.IO) {
+                    val tripDao = AppGraph.db.tripDao()
+                    val lastTrip = tripDao.getLatestForDay(uid, day) ?: return@withContext (null to null)
+
+                    // Attach the Home leg to the currently open run so Journal shows:
+                    // Home → stops → Home (single run, correct stop count).
+                    val dayTrips = runCatching { tripDao.listByDay(uid, day) }.getOrElse { emptyList() }
+                    val grouped = dayTrips.groupBy { it.runId ?: -it.id }
+
+                    val key = lastTrip.runId ?: -lastTrip.id
+                    val group = grouped[key].orEmpty()
+
+                    val ensuredRunId: Long? = when {
+                        lastTrip.runId != null -> lastTrip.runId
+                        group.isNotEmpty() -> {
+                            // Legacy day trips may have null runId; backfill them into a new run.
+                            val newRunId = AppGraph.tripRepository.createRun(day = day, label = "Trip")
+                            runCatching {
+                                tripDao.setRunIdForTrips(uid = uid, runId = newRunId, ids = group.map { it.id })
+                            }
+                            newRunId
+                        }
+                        else -> null
+                    }
+
+                    (lastTrip to ensuredRunId)
+                }
+
+                val lastTrip = last ?: throw IllegalStateException("No trips yet today")
+                val runId = runIdToClose
+
+                if (lastTrip.endPlaceType == PlaceType.HOME) {
+                    builderStatus = "Already ended at Home"
+                    return@launch
+                }
+
+                val homeLat = homeLatSnapshot ?: throw IllegalStateException("Business home missing")
+                val homeLng = homeLngSnapshot ?: throw IllegalStateException("Business home missing")
+
+                val routeResult = runCatching {
+                    AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                        startLat = lastTrip.storeLatSnapshot,
+                        startLng = lastTrip.storeLngSnapshot,
+                        destLat = homeLat,
+                        destLng = homeLng,
+                        startLocationId = lastTrip.storeId,
+                        endLocationId = BUSINESS_HOME_LOCATION_ID,
+                    )
+                }
+                val endedAt = now
+
+                val route = routeResult.getOrElse {
+                    throw it
+                }
+
+                val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
+                if (startedAt.isBefore(lastTrip.endedAt)) {
+                    throw IllegalStateException("Home arrival is too soon (needs at least ${route.durationMinutes} min drive time)")
+                }
+
+                val durationMinutes = route.durationMinutes
+
+                val tripId = withContext(Dispatchers.IO) {
+                    AppGraph.tripRepository.createTrip(
+                        TripEntity(
+                            uid = uid,
+                            createdAt = endedAt,
+                            day = day,
+                            startedAt = startedAt,
+                            endedAt = endedAt,
+                            timeZoneId = zone.id,
+                            storeId = BUSINESS_HOME_LOCATION_ID,
+                            storeLocationId = BUSINESS_HOME_LOCATION_ID,
+                            storeNameSnapshot = "Business home",
+                            citySnapshot = "",
+                            storeLatSnapshot = homeLat,
+                            storeLngSnapshot = homeLng,
+                            endPlaceType = PlaceType.HOME,
+                            endAddressSnapshot = homeAddressSnapshot.trim().ifBlank { null },
+                            startLabelSnapshot = "Last stop: ${lastTrip.storeNameSnapshot.ifBlank { "Stop" }}",
+                            startLat = lastTrip.storeLatSnapshot,
+                            startLng = lastTrip.storeLngSnapshot,
+                            startPlaceType = PlaceType.STORE,
+                            startAddressSnapshot = null,
+                            distanceMeters = route.distanceMeters,
+                            distanceMethod = DistanceMethod.MAPS,
+                            durationMinutes = durationMinutes,
+                            notes = "",
+                            businessPurpose = "",
+                            supplierOrArea = null,
+                            isBusiness = true,
+                            runId = runId,
+                            currencyCode = null,
+                            mileageRateMicros = null,
+                        )
+                    )
+                }
+
+                // Take the user straight to the Home leg they just created.
+                builderStatus = "Completed to Home"
+                onOpenTrip(tripId)
+            } catch (t: Throwable) {
+                builderStatus = t.message ?: "Failed to complete to Home"
             } finally {
                 builderBusy = false
             }
@@ -836,7 +1188,16 @@ fun PingHistoryScreen(
                         selectedPings = selectedPings,
                         returnHome = builderReturnHome,
                         canReturnHome = (businessHomeLat != null && businessHomeLng != null) && !builderBusy,
-                        onToggleReturnHome = { openBuilderPreview() },
+                        onToggleReturnHome = {
+                            if (selectedPings.isEmpty()) {
+                                // User expectation: Home icon closes the current open run.
+                                // If they are building a trip (selected stops), Home opens the builder preview.
+                                builderReturnHome = false
+                                completeOpenRunToHomeNow()
+                            } else {
+                                openBuilderPreview()
+                            }
+                        },
                         onRemove = { ping -> selectedPingIds.remove(ping.id) },
                         onMove = { from, to -> moveSelected(from, to) },
                     )
@@ -847,8 +1208,9 @@ fun PingHistoryScreen(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        val uniqueStopCount = remember(selectedPings) { selectedPings.distinctBy { it.storeId }.size }
                         Text(
-                            text = if (selectedPings.isEmpty()) "Tap pings to add stops" else "Stops: ${selectedPings.size}",
+                            text = if (selectedPings.isEmpty()) "Tap pings to add stops" else "Stops: ${uniqueStopCount}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                             modifier = Modifier.weight(1f),
@@ -884,6 +1246,7 @@ fun PingHistoryScreen(
                         val zone = ZoneId.systemDefault()
                         val timeFmt = remember { DateTimeFormatter.ofPattern("HH:mm") }
                         val previewTrips = builderPreviewTrips
+                        val context = LocalContext.current
 
                         Column(
                             modifier = Modifier
@@ -893,6 +1256,99 @@ fun PingHistoryScreen(
                         ) {
                             builderPreviewLines.forEach { line ->
                                 Text(line, style = MaterialTheme.typography.bodySmall)
+                            }
+
+                            val selectedDay = selectedPings.firstOrNull()?.day
+                                ?: previewTrips.firstOrNull()?.day
+
+                            if (selectedDay != null) {
+                                val now = Instant.now()
+                                val today = now.atZone(zone).toLocalDate()
+                                val startOfDay = selectedDay.atStartOfDay(zone).toInstant()
+                                val endOfDayExclusive = selectedDay.plusDays(1).atStartOfDay(zone).toInstant()
+                                val latestAllowed = if (selectedDay.isEqual(today)) minOf(now, endOfDayExclusive.minusMillis(1)) else endOfDayExclusive.minusMillis(1)
+
+                                val leaveInstant = builderLeaveHomeAtMillis?.let { Instant.ofEpochMilli(it) } ?: startOfDay
+                                val arriveInstant = builderArriveHomeAtMillis?.let { Instant.ofEpochMilli(it) } ?: latestAllowed
+
+                                Spacer(Modifier.height(2.dp))
+                                Text("Time window", style = MaterialTheme.typography.titleSmall)
+
+                                fun formatLocal(at: Instant): String = at.atZone(zone).toLocalTime().format(timeFmt)
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "Leave home",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    OutlinedButton(
+                                        onClick = {
+                                            val initial = leaveInstant.atZone(zone).toLocalTime()
+                                            android.app.TimePickerDialog(
+                                                context,
+                                                { _, hour, minute ->
+                                                    val chosen = selectedDay.atTime(hour, minute).atZone(zone).toInstant()
+                                                    val clamped = minOf(chosen, latestAllowed)
+
+                                                    builderLeaveHomeAtMillis = clamped.toEpochMilli()
+
+                                                    val currentArrive = builderArriveHomeAtMillis?.let { Instant.ofEpochMilli(it) } ?: arriveInstant
+                                                    if (!currentArrive.isAfter(clamped)) {
+                                                        val bumped = minOf(clamped.plusSeconds(60), latestAllowed)
+                                                        builderArriveHomeAtMillis = bumped.toEpochMilli()
+                                                    }
+
+                                                    refreshBuilderPreviewTrips()
+                                                },
+                                                initial.hour,
+                                                initial.minute,
+                                                true,
+                                            ).show()
+                                        },
+                                    ) { Text(formatLocal(leaveInstant)) }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "Arrive home",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    OutlinedButton(
+                                        onClick = {
+                                            val initial = arriveInstant.atZone(zone).toLocalTime()
+                                            android.app.TimePickerDialog(
+                                                context,
+                                                { _, hour, minute ->
+                                                    val chosen = selectedDay.atTime(hour, minute).atZone(zone).toInstant()
+                                                    val clamped = minOf(chosen, latestAllowed)
+
+                                                    builderArriveHomeAtMillis = clamped.toEpochMilli()
+
+                                                    val currentLeave = builderLeaveHomeAtMillis?.let { Instant.ofEpochMilli(it) } ?: leaveInstant
+                                                    if (!currentLeave.isBefore(clamped)) {
+                                                        val pulled = maxOf(startOfDay, clamped.minusSeconds(60))
+                                                        builderLeaveHomeAtMillis = pulled.toEpochMilli()
+                                                    }
+
+                                                    refreshBuilderPreviewTrips()
+                                                },
+                                                initial.hour,
+                                                initial.minute,
+                                                true,
+                                            ).show()
+                                        },
+                                    ) { Text(formatLocal(arriveInstant)) }
+                                }
                             }
 
                             Spacer(Modifier.height(2.dp))
@@ -1068,16 +1524,22 @@ fun PingHistoryScreen(
             groups.forEach { (day, dayPings) ->
                 val dayKey = day.toString()
                 val isCollapsed = collapsedDays.contains(dayKey)
+                val dow = runCatching { day.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.getDefault()) }
+                    .getOrNull()
+                    .orEmpty()
+                val dayLabel = if (dow.isBlank()) day.toString() else "${day} ($dow)"
+                val selectedCountForDay = dayPings.count { selectedPingIds.contains(it.id) }
 
                 item(key = "dayHeader-$dayKey") {
                     Surface(
-                        color = MaterialTheme.colorScheme.background,
-                        tonalElevation = 0.dp,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 2.dp,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
                                 if (isCollapsed) collapsedDays.remove(dayKey) else collapsedDays.add(dayKey)
-                            },
+                            }
+                            .padding(top = 6.dp),
                     ) {
                         Row(
                             modifier = Modifier
@@ -1086,19 +1548,24 @@ fun PingHistoryScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                text = dayKey,
+                                text = dayLabel,
                                 style = MaterialTheme.typography.titleMedium,
                                 modifier = Modifier.weight(1f),
                             )
+                            val meta = if (selectedCountForDay > 0) {
+                                "${dayPings.size} · ${selectedCountForDay} selected"
+                            } else {
+                                "${dayPings.size}"
+                            }
                             Text(
-                                text = "${dayPings.size}",
+                                text = meta,
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                             )
                             Icon(
                                 imageVector = if (isCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                                 modifier = Modifier.padding(start = 8.dp),
                             )
                         }
@@ -1141,6 +1608,15 @@ fun PingHistoryScreen(
                             }
                         }
                     }
+                }
+
+                item(key = "dayDivider-$dayKey") {
+                    HorizontalDivider(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
                 }
             }
 
@@ -1639,15 +2115,10 @@ private fun CreateTripFromPingDialog(
                             }
 
                             val route = routeResult.getOrElse {
-                                AppGraph.distanceRepository.estimateStraightLineRoute(
-                                    startLat = anchor.lat,
-                                    startLng = anchor.lng,
-                                    destLat = ping.storeLatSnapshot,
-                                    destLng = ping.storeLngSnapshot,
-                                )
+                                throw it
                             }
 
-                            val distanceMethod = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
+                            val distanceMethod = DistanceMethod.MAPS
 
                             val tripId = withContext(Dispatchers.IO) {
                                 AppGraph.tripRepository.createTrip(

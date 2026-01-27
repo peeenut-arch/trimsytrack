@@ -88,16 +88,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.trimsytrack.BuildConfig
 import com.google.android.gms.location.LocationServices
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.SettingsStore
+import com.trimsytrack.data.entities.DistanceMethod
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.distance.MapsKeyProvider
+import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.ui.components.TrimsyWhiteRadioButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -206,6 +210,9 @@ fun CreateTripModal(
     val regionCode by AppGraph.settings.regionCode.collectAsState(initial = "demo")
 
     var refreshStoresBusy by remember { mutableStateOf(false) }
+    var debugSeedBusy by remember { mutableStateOf(false) }
+
+    val addTripSeedNotesPrefix = "ADD_TRIP_DEBUG_SEED"
 
     fun resolvedName(storeId: String, fallback: String): String {
         val o = storeDisplayOverrides[storeId]
@@ -289,6 +296,15 @@ fun CreateTripModal(
     var showCurrentTripDialog by remember { mutableStateOf(false) }
     var showSetHomeConfirm by remember { mutableStateOf(false) }
     var homeConfirmRecommendedArrival by remember { mutableStateOf<Instant?>(null) }
+    var homeConfirmTimeZoneId by remember { mutableStateOf<String?>(null) }
+
+    var showSetStopConfirm by remember { mutableStateOf(false) }
+    var stopConfirmRecommendedArrival by remember { mutableStateOf<Instant?>(null) }
+    var stopConfirmMinArrival by remember { mutableStateOf<Instant?>(null) }
+    var stopConfirmStop by remember { mutableStateOf<PendingStop?>(null) }
+    var stopConfirmPurpose by remember { mutableStateOf(SettingsStore.DEFAULT_BUSINESS_PURPOSE) }
+    var stopConfirmRunId by remember { mutableStateOf<Long?>(null) }
+    var stopConfirmTimeZoneId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(businessHomeLat, businessHomeLng, deviceLocation) {
         if (startAnchor != null) return@LaunchedEffect
@@ -406,6 +422,9 @@ fun CreateTripModal(
         endPlaceType: PlaceType,
         businessPurpose: String,
         endedAtOverride: Instant? = null,
+        dayOverride: LocalDate? = null,
+        runIdOverride: Long? = null,
+        timeZoneIdOverride: String? = null,
     ) {
         val start = startAnchor
         if (start == null || !start.lat.isFinite() || !start.lng.isFinite()) {
@@ -426,9 +445,12 @@ fun CreateTripModal(
         // createdAt is when the user logged it; endedAt is when it occurred.
         val createdAt = Instant.now()
         val uid = AppGraph.settings.requireUid()
-        val zone = ZoneId.systemDefault()
-        val day = endedAt.atZone(zone).toLocalDate()
-        val startedAt = endedAt.minusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
+        val zone = runCatching {
+            val raw = timeZoneIdOverride.orEmpty().trim()
+            if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
+        }.getOrElse { ZoneId.systemDefault() }
+        val day = dayOverride ?: endedAt.atZone(zone).toLocalDate()
+        val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
         val trip = TripEntity(
             uid = uid,
             createdAt = createdAt,
@@ -453,7 +475,7 @@ fun CreateTripModal(
             durationMinutes = route.durationMinutes,
             notes = "",
             businessPurpose = businessPurpose.trim().ifBlank { SettingsStore.DEFAULT_BUSINESS_PURPOSE },
-            runId = null,
+            runId = runIdOverride,
             currencyCode = null,
             mileageRateMicros = null,
         )
@@ -487,21 +509,42 @@ fun CreateTripModal(
             snackbarHostState.showSnackbar("Start location unavailable")
             return
         }
-        if (start != null && start.placeType == PlaceType.HOME) {
+        if (start.placeType == PlaceType.HOME) {
             onSaved(createdTripIds.toList())
             onDismiss()
             return
         }
         busy = true
-        runCatching {
+        try {
             val uid = AppGraph.settings.requireUid()
-            val day = LocalDate.now()
-            val lastForDay = withContext(Dispatchers.IO) {
-                runCatching { AppGraph.db.tripDao().getLatestForDay(uid, day) }.getOrNull()
-            }
+            val tripDao = AppGraph.db.tripDao()
+            val zone = runCatching {
+                val raw = homeConfirmTimeZoneId.orEmpty().trim()
+                if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
+            }.getOrElse { ZoneId.systemDefault() }
 
-            // Anchor Home arrival to the last recorded stop for the day.
-            val departAt = lastForDay?.endedAt ?: Instant.now()
+            // Anchor completion to the current open run's day (when available).
+            // This matters because the dialog lets the user pick a date, but the run we're closing
+            // should be the one containing the already-added stop trips.
+            val openRunDay: LocalDate = withContext(Dispatchers.IO) {
+                val lastCreatedId = createdTripIds.lastOrNull()
+                if (lastCreatedId != null) {
+                    tripDao.getById(uid, lastCreatedId)?.day
+                } else {
+                    null
+                }
+            } ?: arrivedHomeAt.atZone(zone).toLocalDate()
+
+            val dwellMinutes = AppGraph.settings.dwellMinutes.first().coerceAtLeast(0)
+            val dwellSeconds = dwellMinutes.toLong() * 60L
+
+            val dayTrips = withContext(Dispatchers.IO) { tripDao.listByDay(uid, openRunDay) }
+            val lastHomeIdx = dayTrips.indexOfLast { it.endPlaceType == PlaceType.HOME }
+            val openRunTrips = if (lastHomeIdx >= 0) dayTrips.drop(lastHomeIdx + 1) else dayTrips
+
+            // Anchor to the last stop in the current open run (not a previous Home leg).
+            val lastStopTrip = openRunTrips.lastOrNull()
+            val arriveLastStopAt = lastStopTrip?.endedAt ?: Instant.now()
 
             val route = runCatching {
                 AppGraph.distanceRepository.getOrComputeDrivingRoute(
@@ -513,21 +556,43 @@ fun CreateTripModal(
                     endLocationId = BUSINESS_HOME_LOCATION_ID,
                 )
             }.getOrElse {
-                AppGraph.distanceRepository.estimateStraightLineRoute(
-                    startLat = start.lat,
-                    startLng = start.lng,
-                    destLat = homeLat,
-                    destLng = homeLng,
-                )
+                throw it
             }
 
-            val minArriveHomeAt = departAt.plusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
+            val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
+            // Only count dwell if we actually have a stop we are leaving.
+            val minArriveHomeAt = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
             val finalArriveHomeAt = if (arrivedHomeAt.isBefore(minArriveHomeAt)) {
                 snackbarHostState.showSnackbar("Adjusted Home time to fit after last stop")
                 minArriveHomeAt
             } else {
                 arrivedHomeAt
             }
+
+            // Re-time the open run backwards so dwell time is included and times never go backwards.
+            if (openRunTrips.isNotEmpty()) {
+                val homeStartedAt = finalArriveHomeAt.minusSeconds(travelSeconds)
+                withContext(Dispatchers.IO) {
+                    var cursorNextStart = homeStartedAt
+                    openRunTrips
+                        .asReversed()
+                        .forEach { existing ->
+                            val legTravelSeconds = existing.durationMinutes.toLong().coerceAtLeast(0) * 60L
+                            val newEndedAt = cursorNextStart.minusSeconds(dwellSeconds)
+                            val newStartedAt = newEndedAt.minusSeconds(legTravelSeconds)
+                            tripDao.update(
+                                existing.copy(
+                                    startedAt = newStartedAt,
+                                    endedAt = newEndedAt,
+                                    day = openRunDay,
+                                ),
+                            )
+                            cursorNextStart = newStartedAt
+                        }
+                }
+            }
+
+            val openRunId = openRunTrips.lastOrNull()?.runId
 
             addStopTo(
                 destLabel = homeAnchor.label,
@@ -538,11 +603,16 @@ fun CreateTripModal(
                 endPlaceType = PlaceType.HOME,
                 businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
                 endedAtOverride = finalArriveHomeAt,
+                dayOverride = openRunDay,
+                runIdOverride = openRunId,
+                timeZoneIdOverride = homeConfirmTimeZoneId,
             )
-        }.onFailure { t ->
+        } catch (t: Throwable) {
             snackbarHostState.showSnackbar(t.message ?: "Failed to add Home")
+        } finally {
+            busy = false
         }
-        busy = false
+
         onSaved(createdTripIds.toList())
         onDismiss()
     }
@@ -753,6 +823,157 @@ fun CreateTripModal(
                         .fillMaxSize()
                         .padding(padding),
                 ) {
+                    if (BuildConfig.DEBUG) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp)
+                                .padding(top = 8.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TextButton(
+                                enabled = !busy && !debugSeedBusy,
+                                onClick = {
+                                    if (debugSeedBusy) return@TextButton
+                                    debugSeedBusy = true
+                                    val seedHomeLat = businessHomeLat ?: 59.3326
+                                    val seedHomeLng = businessHomeLng ?: 18.0649
+                                    val seedHomeLabel = businessHomeAddress.trim().ifBlank { "Business home" }
+
+                                    scope.launch {
+                                        try {
+                                            val (createdTrips, runId) = withContext(Dispatchers.IO) {
+                                                val uid = AppGraph.settings.requireUid()
+                                                runCatching { AppGraph.db.tripDao().deleteByNotesPrefix(uid, addTripSeedNotesPrefix) }
+                                                runCatching { AppGraph.db.runDao().deleteOrphaned(uid) }
+
+                                                val zone = ZoneId.systemDefault()
+                                                val now = Instant.now()
+                                                val day = now.atZone(zone).toLocalDate()
+                                                val createdRunId = AppGraph.tripRepository.createRun(day = day, label = "AddTripSeed")
+
+                                                var tripsCreated = 0
+
+                                                var prevLabel = "Home"
+                                                var prevLat = seedHomeLat
+                                                var prevLng = seedHomeLng
+                                                var prevPlaceType = PlaceType.HOME
+
+                                                fun makeTrip(
+                                                    endedAt: Instant,
+                                                    durationMinutes: Int,
+                                                    endPlaceType: PlaceType,
+                                                    storeId: String,
+                                                    storeName: String,
+                                                    lat: Double,
+                                                    lng: Double,
+                                                ): TripEntity {
+                                                    val safeDuration = durationMinutes.coerceIn(1, 180)
+                                                    val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = safeDuration)
+                                                    return TripEntity(
+                                                        uid = "", // TripRepository fills from settings
+                                                        createdAt = endedAt.plusSeconds(30),
+                                                        day = day,
+                                                        startedAt = startedAt,
+                                                        endedAt = endedAt,
+                                                        timeZoneId = zone.id,
+                                                        storeId = storeId,
+                                                        storeLocationId = null,
+                                                        storeNameSnapshot = storeName,
+                                                        citySnapshot = "",
+                                                        storeLatSnapshot = lat,
+                                                        storeLngSnapshot = lng,
+                                                        endPlaceType = endPlaceType,
+                                                        endAddressSnapshot = null,
+                                                        startLabelSnapshot = prevLabel,
+                                                        startLat = prevLat,
+                                                        startLng = prevLng,
+                                                        startPlaceType = prevPlaceType,
+                                                        startAddressSnapshot = null,
+                                                        distanceMeters = 0,
+                                                        distanceMethod = DistanceMethod.UNKNOWN,
+                                                        durationMinutes = safeDuration,
+                                                        notes = "$addTripSeedNotesPrefix|v1",
+                                                        businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                                                        supplierOrArea = null,
+                                                        isBusiness = true,
+                                                        runId = createdRunId,
+                                                        currencyCode = null,
+                                                        mileageRateMicros = null,
+                                                        parkingTrafficFeeMinor = null,
+                                                        parkingTicketId = null,
+                                                    )
+                                                }
+
+                                                val stopCount = 14
+                                                val firstEnd = now.plusSeconds(90)
+                                                for (i in 1..stopCount) {
+                                                    val endedAt = firstEnd.plusSeconds((i * 17L) * 60L)
+                                                    val name = if (i % 5 == 0) "Repeat" else "Seed Stop $i"
+                                                    val lat = seedHomeLat + (i * 0.001)
+                                                    val lng = seedHomeLng + (i * 0.0006)
+
+                                                    AppGraph.tripRepository.createTrip(
+                                                        makeTrip(
+                                                            endedAt = endedAt,
+                                                            durationMinutes = 7 + (i % 8),
+                                                            endPlaceType = PlaceType.STORE,
+                                                            storeId = "seed:$createdRunId:$i",
+                                                            storeName = name,
+                                                            lat = lat,
+                                                            lng = lng,
+                                                        )
+                                                    )
+                                                    tripsCreated += 1
+
+                                                    prevLabel = "Last stop: $name"
+                                                    prevLat = lat
+                                                    prevLng = lng
+                                                    prevPlaceType = PlaceType.STORE
+                                                }
+
+                                                // Close run with HOME.
+                                                AppGraph.tripRepository.createTrip(
+                                                    makeTrip(
+                                                        endedAt = firstEnd.plusSeconds(((stopCount + 1L) * 17L) * 60L),
+                                                        durationMinutes = 12,
+                                                        endPlaceType = PlaceType.HOME,
+                                                        storeId = BUSINESS_HOME_LOCATION_ID,
+                                                        storeName = seedHomeLabel,
+                                                        lat = seedHomeLat,
+                                                        lng = seedHomeLng,
+                                                    )
+                                                )
+                                                tripsCreated += 1
+
+                                                tripsCreated to createdRunId
+                                            }
+
+                                            snackbarHostState.showSnackbar(
+                                                "Seeded $createdTrips trips into 1 run. Open Journal to verify multi-stop Home→…→Home (runId=$runId)."
+                                            )
+                                        } catch (t: Throwable) {
+                                            snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                                        } finally {
+                                            debugSeedBusy = false
+                                        }
+                                    }
+                                },
+                            ) {
+                                Text(if (debugSeedBusy) "Seeding…" else "Seed debug run (14 stops)")
+                            }
+
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = "(replaces prior seeds)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                            )
+                        }
+
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 14.dp))
+                    }
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -880,12 +1101,27 @@ fun CreateTripModal(
                                             busy = true
                                             try {
                                                 val uid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
-                                                val day = LocalDate.now()
-                                                val lastForDay = withContext(Dispatchers.IO) {
-                                                    runCatching { AppGraph.db.tripDao().getLatestForDay(uid, day) }.getOrNull()
+                                                val tripDao = AppGraph.db.tripDao()
+                                                val dwellMinutes = runCatching { AppGraph.settings.dwellMinutes.first() }.getOrNull()?.coerceAtLeast(0) ?: 0
+                                                val dwellSeconds = dwellMinutes.toLong() * 60L
+
+                                                val lastCreatedTrip: TripEntity? = withContext(Dispatchers.IO) {
+                                                    val lastCreatedId = createdTripIds.lastOrNull() ?: return@withContext null
+                                                    runCatching { tripDao.getById(uid, lastCreatedId) }.getOrNull()
                                                 }
 
-                                                val departAt = lastForDay?.endedAt ?: Instant.now()
+                                                val openRunDay: LocalDate = lastCreatedTrip?.day ?: LocalDate.now()
+
+                                                val dayTrips = withContext(Dispatchers.IO) {
+                                                    runCatching { tripDao.listByDay(uid, openRunDay) }.getOrNull().orEmpty()
+                                                }
+                                                val lastHomeIdx = dayTrips.indexOfLast { it.endPlaceType == PlaceType.HOME }
+                                                val openRunTrips = if (lastHomeIdx >= 0) dayTrips.drop(lastHomeIdx + 1) else dayTrips
+
+                                                val lastStopTrip = lastCreatedTrip ?: openRunTrips.lastOrNull()
+                                                val arriveLastStopAt = lastStopTrip?.endedAt ?: Instant.now()
+
+                                                homeConfirmTimeZoneId = lastStopTrip?.timeZoneId ?: ZoneId.systemDefault().id
 
                                                 val route = runCatching {
                                                     AppGraph.distanceRepository.getOrComputeDrivingRoute(
@@ -897,17 +1133,11 @@ fun CreateTripModal(
                                                         endLocationId = BUSINESS_HOME_LOCATION_ID,
                                                     )
                                                 }.getOrElse {
-                                                    AppGraph.distanceRepository.estimateStraightLineRoute(
-                                                        startLat = start.lat,
-                                                        startLng = start.lng,
-                                                        destLat = homeLat,
-                                                        destLng = homeLng,
-                                                    )
+                                                    throw it
                                                 }
 
-                                                homeConfirmRecommendedArrival = departAt.plusSeconds(
-                                                    route.durationMinutes.toLong().coerceAtLeast(0) * 60L,
-                                                )
+                                                val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
+                                                homeConfirmRecommendedArrival = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
                                                 showSetHomeConfirm = true
                                             } finally {
                                                 busy = false
@@ -967,12 +1197,76 @@ fun CreateTripModal(
                 SetHomeConfirmDialog(
                     enabled = !busy,
                     recommendedArrival = homeConfirmRecommendedArrival ?: Instant.now(),
+                    maxArrival = Instant.now(),
+                    timeZoneId = homeConfirmTimeZoneId,
                     onConfirm = { chosenArrival ->
                         showSetHomeConfirm = false
                         scope.launch { completeTripToHome(chosenArrival) }
                     },
                     onDismiss = { showSetHomeConfirm = false },
                 )
+            }
+
+            if (showSetStopConfirm) {
+                val stop = stopConfirmStop
+                if (stop == null) {
+                    showSetStopConfirm = false
+                } else {
+                    SetStopArrivalConfirmDialog(
+                        enabled = !busy,
+                        recommendedArrival = stopConfirmRecommendedArrival ?: Instant.now(),
+                        minArrival = stopConfirmMinArrival,
+                        maxArrival = Instant.now(),
+                        timeZoneId = stopConfirmTimeZoneId,
+                        stopLabel = stop.label,
+                        onConfirm = { chosenArrival ->
+                            showSetStopConfirm = false
+                            scope.launch {
+                                if (busy) return@launch
+                                busy = true
+                                try {
+                                    val minAt = stopConfirmMinArrival
+                                    val finalArrival = if (minAt != null && chosenArrival.isBefore(minAt)) {
+                                        snackbarHostState.showSnackbar("Adjusted arrival time to fit after last stop")
+                                        minAt
+                                    } else {
+                                        chosenArrival
+                                    }
+                                    val zone = runCatching {
+                                        val raw = stopConfirmTimeZoneId.orEmpty().trim()
+                                        if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
+                                    }.getOrElse { ZoneId.systemDefault() }
+                                    val day = finalArrival.atZone(zone).toLocalDate()
+                                    addStopTo(
+                                        destLabel = stop.label,
+                                        destLat = stop.lat,
+                                        destLng = stop.lng,
+                                        destStoreId = stop.storeId,
+                                        destCity = stop.city,
+                                        endPlaceType = stop.endPlaceType,
+                                        businessPurpose = stopConfirmPurpose,
+                                        endedAtOverride = finalArrival,
+                                        dayOverride = day,
+                                        runIdOverride = stopConfirmRunId,
+                                        timeZoneIdOverride = stopConfirmTimeZoneId,
+                                    )
+                                } catch (t: Throwable) {
+                                    snackbarHostState.showSnackbar(t.message ?: "Failed")
+                                } finally {
+                                    busy = false
+                                    stopConfirmStop = null
+                                }
+                            }
+                        },
+                        onDismiss = {
+                            showSetStopConfirm = false
+                            // Bounce back to the purpose dialog.
+                            pendingPurpose = stopConfirmPurpose
+                            pendingStop = stopConfirmStop
+                            stopConfirmStop = null
+                        },
+                    )
+                }
             }
         }
 
@@ -1011,23 +1305,73 @@ fun CreateTripModal(
                         enabled = !busy,
                         onClick = {
                             scope.launch {
+                                if (busy) return@launch
                                 busy = true
-                                runCatching {
-                                    addStopTo(
-                                        destLabel = stopToAdd.label,
-                                        destLat = stopToAdd.lat,
-                                        destLng = stopToAdd.lng,
-                                        destStoreId = stopToAdd.storeId,
-                                        destCity = stopToAdd.city,
-                                        endPlaceType = stopToAdd.endPlaceType,
-                                        businessPurpose = pendingPurpose,
-                                    )
-                                }.onFailure { t ->
+                                try {
+                                    val start = startAnchor
+                                    if (start == null || !start.lat.isFinite() || !start.lng.isFinite()) {
+                                        snackbarHostState.showSnackbar("Start location unavailable")
+                                        return@launch
+                                    }
+
+                                    val uid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                    if (uid.isBlank()) {
+                                        snackbarHostState.showSnackbar("Missing user")
+                                        return@launch
+                                    }
+
+                                    val tripDao = AppGraph.db.tripDao()
+                                    val lastCreatedTrip: TripEntity? = withContext(Dispatchers.IO) {
+                                        val lastCreatedId = createdTripIds.lastOrNull() ?: return@withContext null
+                                        runCatching { tripDao.getById(uid, lastCreatedId) }.getOrNull()
+                                    }
+
+                                    val openRunDay: LocalDate = lastCreatedTrip?.day ?: LocalDate.now()
+
+                                    val dwellMinutes = runCatching { AppGraph.settings.dwellMinutes.first() }.getOrNull()?.coerceAtLeast(0) ?: 0
+                                    val dwellSeconds = dwellMinutes.toLong() * 60L
+
+                                    val dayTrips = withContext(Dispatchers.IO) {
+                                        runCatching { tripDao.listByDay(uid, openRunDay) }.getOrNull().orEmpty()
+                                    }
+                                    val lastHomeIdx = dayTrips.indexOfLast { it.endPlaceType == PlaceType.HOME }
+                                    val openRunTrips = if (lastHomeIdx >= 0) dayTrips.drop(lastHomeIdx + 1) else dayTrips
+                                    val lastStopTrip = lastCreatedTrip ?: openRunTrips.lastOrNull()
+                                    val arriveLastStopAt = lastStopTrip?.endedAt ?: Instant.now()
+
+                                    stopConfirmTimeZoneId = lastStopTrip?.timeZoneId ?: ZoneId.systemDefault().id
+
+                                    val route = runCatching {
+                                        AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                                            startLat = start.lat,
+                                            startLng = start.lng,
+                                            destLat = stopToAdd.lat,
+                                            destLng = stopToAdd.lng,
+                                            startLocationId = start.locationId,
+                                            endLocationId = stopToAdd.storeId,
+                                        )
+                                    }.getOrElse {
+                                        throw it
+                                    }
+
+                                    val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
+                                    val minArrival = arriveLastStopAt.plusSeconds((if (lastStopTrip != null) dwellSeconds else 0L) + travelSeconds)
+
+                                    stopConfirmPurpose = pendingPurpose
+                                    stopConfirmStop = stopToAdd
+                                    stopConfirmRecommendedArrival = minArrival
+                                    stopConfirmMinArrival = minArrival
+                                    stopConfirmRunId = lastStopTrip?.runId ?: openRunTrips.lastOrNull()?.runId
+                                    showSetStopConfirm = true
+
+                                    // Close purpose dialog while we show the time picker.
+                                    pendingStop = null
+                                    searchText = ""
+                                } catch (t: Throwable) {
                                     snackbarHostState.showSnackbar(t.message ?: "Failed")
+                                } finally {
+                                    busy = false
                                 }
-                                busy = false
-                                pendingStop = null
-                                searchText = ""
                             }
                         },
                     ) {
@@ -1236,12 +1580,23 @@ private fun HomeDistanceTile(
 private fun SetHomeConfirmDialog(
     enabled: Boolean,
     recommendedArrival: Instant,
+    maxArrival: Instant,
+    timeZoneId: String?,
     onConfirm: (Instant) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    val zone = remember { ZoneId.systemDefault() }
-    val recommendedZdt = remember(recommendedArrival) { recommendedArrival.atZone(zone) }
+    val zone = remember(timeZoneId) {
+        runCatching {
+            val raw = timeZoneId.orEmpty().trim()
+            if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
+        }.getOrElse { ZoneId.systemDefault() }
+    }
+    val maxZdt = remember(maxArrival, zone) { maxArrival.atZone(zone) }
+    val effectiveRecommendedArrival = remember(recommendedArrival, maxArrival) {
+        if (recommendedArrival.isAfter(maxArrival)) maxArrival else recommendedArrival
+    }
+    val recommendedZdt = remember(effectiveRecommendedArrival, zone) { effectiveRecommendedArrival.atZone(zone) }
     val timeFmt = remember { java.time.format.DateTimeFormatter.ofPattern("HH:mm") }
 
     var selectedDate by rememberSaveable(recommendedArrival) { mutableStateOf(recommendedZdt.toLocalDate()) }
@@ -1252,6 +1607,9 @@ private fun SetHomeConfirmDialog(
     fun selectedInstant(): Instant {
         return LocalDateTime.of(selectedDate, selectedTime).atZone(zone).toInstant()
     }
+
+    val selectedAt = remember(selectedDate, selectedTime, zone) { selectedInstant() }
+    val isAfterMax = remember(selectedAt, maxArrival) { selectedAt.isAfter(maxArrival) }
 
     Dialog(
         onDismissRequest = { if (enabled) onDismiss() },
@@ -1318,7 +1676,9 @@ private fun SetHomeConfirmDialog(
                                 selectedDate.year,
                                 selectedDate.monthValue - 1,
                                 selectedDate.dayOfMonth,
-                            ).show()
+                            ).apply {
+                                datePicker.maxDate = maxArrival.toEpochMilli()
+                            }.show()
                         },
                         tonalElevation = 0.dp,
                         shape = RoundedCornerShape(12.dp),
@@ -1334,7 +1694,13 @@ private fun SetHomeConfirmDialog(
                             TimePickerDialog(
                                 context,
                                 { _, hh, mm ->
-                                    selectedTime = LocalTime.of(hh, mm)
+                                    val candidateTime = LocalTime.of(hh, mm)
+                                    val maxDate = maxZdt.toLocalDate()
+                                    if (selectedDate.isEqual(maxDate) && candidateTime.isAfter(maxZdt.toLocalTime())) {
+                                        selectedTime = maxZdt.toLocalTime().withSecond(0).withNano(0)
+                                    } else {
+                                        selectedTime = candidateTime
+                                    }
                                 },
                                 selectedTime.hour,
                                 selectedTime.minute,
@@ -1349,6 +1715,20 @@ private fun SetHomeConfirmDialog(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                         )
                     }
+                }
+
+                if (isAfterMax) {
+                    Text(
+                        text = "Time cannot be in the future.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Text(
+                        text = "Latest allowed: ${maxZdt.toLocalDate()} ${maxZdt.toLocalTime().withSecond(0).withNano(0).format(timeFmt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -1367,8 +1747,210 @@ private fun SetHomeConfirmDialog(
                     }
                     Spacer(Modifier.width(6.dp))
                     TextButton(
-                        onClick = { onConfirm(selectedInstant()) },
+                        onClick = { onConfirm(selectedAt) },
+                        enabled = enabled && !isAfterMax,
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF2E7D32)),
+                    ) {
+                        Text("Yes")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SetStopArrivalConfirmDialog(
+    enabled: Boolean,
+    recommendedArrival: Instant,
+    minArrival: Instant?,
+    maxArrival: Instant,
+    timeZoneId: String?,
+    stopLabel: String,
+    onConfirm: (Instant) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val zone = remember(timeZoneId) {
+        runCatching {
+            val raw = timeZoneId.orEmpty().trim()
+            if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
+        }.getOrElse { ZoneId.systemDefault() }
+    }
+    val maxZdt = remember(maxArrival, zone) { maxArrival.atZone(zone) }
+    val effectiveRecommendedArrival = remember(recommendedArrival, maxArrival) {
+        if (recommendedArrival.isAfter(maxArrival)) maxArrival else recommendedArrival
+    }
+    val recommendedZdt = remember(effectiveRecommendedArrival, zone) { effectiveRecommendedArrival.atZone(zone) }
+    val minZdt = remember(minArrival, zone) { minArrival?.atZone(zone) }
+    val timeFmt = remember { java.time.format.DateTimeFormatter.ofPattern("HH:mm") }
+
+    var selectedDate by rememberSaveable(recommendedArrival) { mutableStateOf(recommendedZdt.toLocalDate()) }
+    var selectedTime by rememberSaveable(recommendedArrival) {
+        mutableStateOf(recommendedZdt.toLocalTime().withSecond(0).withNano(0))
+    }
+
+    fun selectedInstant(): Instant {
+        return LocalDateTime.of(selectedDate, selectedTime).atZone(zone).toInstant()
+    }
+
+    val selectedAt = remember(selectedDate, selectedTime, zone) { selectedInstant() }
+    val isBeforeMin = remember(selectedAt, minArrival) { minArrival != null && selectedAt.isBefore(minArrival) }
+    val isAfterMax = remember(selectedAt, maxArrival) { selectedAt.isAfter(maxArrival) }
+
+    Dialog(
+        onDismissRequest = { if (enabled) onDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        val shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            shape = shape,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            androidx.compose.foundation.layout.Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Set arrival time?",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = onDismiss,
                         enabled = enabled,
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+                    ) {
+                        Text("Close")
+                    }
+                }
+
+                Text(
+                    text = "Stop: ${stopLabel.trim().ifBlank { "Stop" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                )
+
+                Text(
+                    text = "Recommended: ${recommendedZdt.toLocalDate()} ${recommendedZdt.toLocalTime().format(timeFmt)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                )
+
+                if (minZdt != null) {
+                    Text(
+                        text = "Earliest allowed: ${minZdt.toLocalDate()} ${minZdt.toLocalTime().format(timeFmt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Surface(
+                        onClick = {
+                            DatePickerDialog(
+                                context,
+                                { _, y, m, d ->
+                                    selectedDate = LocalDate.of(y, m + 1, d)
+                                },
+                                selectedDate.year,
+                                selectedDate.monthValue - 1,
+                                selectedDate.dayOfMonth,
+                            ).apply {
+                                datePicker.maxDate = maxArrival.toEpochMilli()
+                                if (minArrival != null) {
+                                    datePicker.minDate = minArrival.toEpochMilli()
+                                }
+                            }.show()
+                        },
+                        tonalElevation = 0.dp,
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(
+                            text = selectedDate.toString(),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        )
+                    }
+
+                    Surface(
+                        onClick = {
+                            TimePickerDialog(
+                                context,
+                                { _, hh, mm ->
+                                    val candidateTime = LocalTime.of(hh, mm)
+                                    val candidateInstant = LocalDateTime.of(selectedDate, candidateTime).atZone(zone).toInstant()
+                                    selectedTime = when {
+                                        minArrival != null && candidateInstant.isBefore(minArrival) -> {
+                                            minZdt?.toLocalTime()?.withSecond(0)?.withNano(0) ?: candidateTime
+                                        }
+                                        candidateInstant.isAfter(maxArrival) -> {
+                                            maxZdt.toLocalTime().withSecond(0).withNano(0)
+                                        }
+                                        else -> candidateTime
+                                    }
+                                },
+                                selectedTime.hour,
+                                selectedTime.minute,
+                                true,
+                            ).show()
+                        },
+                        tonalElevation = 0.dp,
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(
+                            text = selectedTime.format(timeFmt),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+
+                if (isAfterMax) {
+                    Text(
+                        text = "Time cannot be in the future.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Text(
+                        text = "Latest allowed: ${maxZdt.toLocalDate()} ${maxZdt.toLocalTime().withSecond(0).withNano(0).format(timeFmt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        enabled = enabled,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)),
+                    ) {
+                        Text("No")
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    TextButton(
+                        onClick = { onConfirm(selectedAt) },
+                        enabled = enabled && !isBeforeMin && !isAfterMax,
                         colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF2E7D32)),
                     ) {
                         Text("Yes")
@@ -2107,7 +2689,7 @@ private data class PlacePick(
             val uid = AppGraph.settings.requireUid()
             val zone = ZoneId.systemDefault()
             val day = endedAt.atZone(zone).toLocalDate()
-            val startedAt = endedAt.minusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)
+            val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
             val trip = TripEntity(
                 uid = uid,
                 createdAt = createdAt,
@@ -2327,27 +2909,52 @@ private data class PlacePick(
                                             snackbarHostState.showSnackbar("Business home is not configured")
                                             return@launch
                                         }
-                                        if (start != null && start.placeType == PlaceType.HOME) {
+                                        if (start == null || !start.lat.isFinite() || !start.lng.isFinite()) {
+                                            snackbarHostState.showSnackbar("Start location unavailable")
+                                            return@launch
+                                        }
+                                        if (start.placeType == PlaceType.HOME) {
                                             onSaved(createdTripIds.toList())
                                             onDismiss()
                                             return@launch
                                         }
                                         busy = true
-                                        runCatching {
-                                            addStopTo(
-                                                destLabel = homeAnchor.label,
-                                                destLat = homeLat,
-                                                destLng = homeLng,
-                                                destStoreId = BUSINESS_HOME_LOCATION_ID,
-                                                destCity = "",
-                                                endPlaceType = PlaceType.HOME,
-                                            )
-                                        }.onFailure { t ->
-                                            snackbarHostState.showSnackbar(t.message ?: "Failed to add Home")
+                                        try {
+                                            val uid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                            val day = LocalDate.now()
+                                            val tripDao = AppGraph.db.tripDao()
+                                            val dwellMinutes = runCatching { AppGraph.settings.dwellMinutes.first() }.getOrNull()?.coerceAtLeast(0) ?: 0
+                                            val dwellSeconds = dwellMinutes.toLong() * 60L
+
+                                            val dayTrips = withContext(Dispatchers.IO) {
+                                                runCatching { tripDao.listByDay(uid, day) }.getOrNull().orEmpty()
+                                            }
+                                            val lastHomeIdx = dayTrips.indexOfLast { it.endPlaceType == PlaceType.HOME }
+                                            val openRunTrips = if (lastHomeIdx >= 0) dayTrips.drop(lastHomeIdx + 1) else dayTrips
+                                            val lastStopTrip = openRunTrips.lastOrNull()
+                                            val arriveLastStopAt = lastStopTrip?.endedAt ?: Instant.now()
+
+                                            val route = runCatching {
+                                                AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                                                    startLat = start.lat,
+                                                    startLng = start.lng,
+                                                    destLat = homeLat,
+                                                    destLng = homeLng,
+                                                    startLocationId = start.locationId,
+                                                    endLocationId = BUSINESS_HOME_LOCATION_ID,
+                                                )
+                                            }.getOrElse {
+                                                throw it
+                                            }
+
+                                            val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
+                                            homeConfirmRecommendedArrival = arriveLastStopAt.plusSeconds(dwellSeconds + travelSeconds)
+                                            showSetHomeConfirm = true
+                                        } catch (t: Throwable) {
+                                            snackbarHostState.showSnackbar(t.message ?: "Failed to prepare Home")
+                                        } finally {
+                                            busy = false
                                         }
-                                        busy = false
-                                        onSaved(createdTripIds.toList())
-                                        onDismiss()
                                     }
                                 },
                             ) {
@@ -3048,12 +3655,7 @@ private data class PlacePick(
                                             endLocationId = locationIdFor(to),
                                         )
                                     }.getOrElse {
-                                        AppGraph.distanceRepository.estimateStraightLineRoute(
-                                            startLat = from.lat,
-                                            startLng = from.lng,
-                                            destLat = to.lat,
-                                            destLng = to.lng,
-                                        )
+                                        throw it
                                     }
 
                                 val arrival = cursorDepart.plusSeconds(route.durationMinutes.toLong().coerceAtLeast(0) * 60L)

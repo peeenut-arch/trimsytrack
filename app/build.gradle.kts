@@ -118,6 +118,12 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -168,4 +174,14 @@ dependencies {
     implementation(libs.firebase.functions.ktx)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    testImplementation(kotlin("test"))
+    testImplementation(kotlin("test-junit"))
+    testImplementation("junit:junit:4.13.2")
+
+    // JVM "ghost" tests with in-memory Room DB.
+    testImplementation("org.robolectric:robolectric:4.12.2")
+    testImplementation("androidx.test:core:1.5.0")
+    testImplementation("androidx.test.ext:junit:1.1.5")
+    testImplementation("androidx.room:room-testing:2.6.1")
 }

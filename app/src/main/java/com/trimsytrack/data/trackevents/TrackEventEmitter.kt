@@ -12,7 +12,7 @@ import kotlinx.serialization.json.putJsonArray
 class TrackEventEmitter(
     private val outbox: TrackEventOutboxDao,
     private val syncManager: TrackEventsSyncManager,
-) {
+) : TrackEventEmitterLike {
 
     suspend fun emitDebugNoop(index: Int, reason: String = "debug_noop") {
         emit(
@@ -25,11 +25,11 @@ class TrackEventEmitter(
         )
     }
 
-    suspend fun emitRunCompleted(
+    override suspend fun emitRunCompleted(
         runId: Long?,
         tripId: Long,
         endedAt: Instant,
-        reason: String = "run_completed",
+        reason: String,
     ) {
         val eventId = UUID.randomUUID().toString()
         val payloadJson = buildJsonObject {

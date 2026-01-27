@@ -68,6 +68,9 @@ interface TripDao {
     @Query("SELECT * FROM trips WHERE uid = :uid AND day = :day ORDER BY createdAt ASC")
     suspend fun listByDay(uid: String, day: LocalDate): List<TripEntity>
 
+    @Query("SELECT * FROM trips WHERE uid = :uid AND runId = :runId ORDER BY createdAt ASC")
+    suspend fun listByRunId(uid: String, runId: Long): List<TripEntity>
+
     @Query("UPDATE trips SET runId = :runId WHERE uid = :uid AND id IN (:ids)")
     suspend fun setRunIdForTrips(uid: String, runId: Long, ids: List<Long>)
 
@@ -112,6 +115,12 @@ interface TripDao {
 
     @Query("DELETE FROM trips WHERE uid = :uid AND id = :id")
     suspend fun deleteById(uid: String, id: Long)
+
+    @Query("DELETE FROM trips WHERE uid = :uid AND notes = :notes")
+    suspend fun deleteByNotes(uid: String, notes: String): Int
+
+    @Query("DELETE FROM trips WHERE uid = :uid AND notes LIKE (:notesPrefix || '%')")
+    suspend fun deleteByNotesPrefix(uid: String, notesPrefix: String): Int
 
     @Query("UPDATE trips SET uid = :uid WHERE uid = ''")
     suspend fun claimUnscoped(uid: String)

@@ -38,13 +38,7 @@ class RoutesDistanceService(
     ): RouteResult {
         val key = MapsKeyProvider.getKey(context).trim()
         if (key.isBlank()) {
-            // Privacy/compat fallback: no external API calls.
-            return RouteResult(
-                distanceMeters = haversineMeters(startLat, startLng, destLat, destLng),
-                durationSeconds = 0L,
-                routePolyline = null,
-                source = "STRAIGHT_LINE_NO_KEY",
-            )
+            throw IllegalStateException("Google Maps key missing; cannot compute driving time")
         }
 
         val body = """
@@ -55,8 +49,6 @@ class RoutesDistanceService(
             "routingPreference": "TRAFFIC_AWARE"
           }
         """.trimIndent()
-
-        val fallbackDistanceMeters = haversineMeters(startLat, startLng, destLat, destLng)
 
         return try {
             val response = api.computeRoutes(
@@ -70,13 +62,7 @@ class RoutesDistanceService(
             val first = routes?.firstOrNull()?.jsonObject
 
             if (routes == null || first == null) {
-                Log.w(tag, "Routes API: no/empty routes; falling back to straight-line")
-                return RouteResult(
-                    distanceMeters = fallbackDistanceMeters,
-                    durationSeconds = 0L,
-                    routePolyline = null,
-                    source = "STRAIGHT_LINE_NO_ROUTES",
-                )
+                throw IllegalStateException("Routes API returned no routes")
             }
 
             val distanceMeters = first["distanceMeters"]
@@ -91,13 +77,7 @@ class RoutesDistanceService(
             val polyline = first["polyline"]?.jsonObject?.get("encodedPolyline")?.jsonPrimitive?.content
 
             if (distanceMeters == null) {
-                Log.w(tag, "Routes API: missing distanceMeters; falling back to straight-line")
-                return RouteResult(
-                    distanceMeters = fallbackDistanceMeters,
-                    durationSeconds = durationSeconds,
-                    routePolyline = null,
-                    source = "STRAIGHT_LINE_MISSING_DISTANCE_METERS",
-                )
+                throw IllegalStateException("Routes API missing distanceMeters")
             }
 
             RouteResult(
@@ -107,13 +87,10 @@ class RoutesDistanceService(
                 source = "GOOGLE",
             )
         } catch (t: Throwable) {
-            Log.w(tag, "Routes API: compute failed; falling back to straight-line", t)
-            RouteResult(
-                distanceMeters = fallbackDistanceMeters,
-                durationSeconds = 0L,
-                routePolyline = null,
-                source = "STRAIGHT_LINE_API_ERROR",
-            )
+            Log.w(tag, "Routes API: compute failed", t)
+            val detail = t.message?.trim().orEmpty()
+            val suffix = if (detail.isNotBlank()) ": $detail" else ""
+            throw IllegalStateException("Google Maps route failed$suffix", t)
         }
     }
 

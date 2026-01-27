@@ -212,9 +212,21 @@ fun TripDetailScreen(
             Spacer(Modifier.height(8.dp))
 
             if (t != null) {
-                val dt = runCatching { LocalDateTime.ofInstant(t.createdAt, zone).format(dateTimeFmt) }.getOrDefault("")
+                val started = runCatching { LocalDateTime.ofInstant(t.startedAt, zone).format(dateTimeFmt) }.getOrDefault("")
+                val ended = runCatching { LocalDateTime.ofInstant(t.endedAt, zone).format(dateTimeFmt) }.getOrDefault("")
+                val created = runCatching { LocalDateTime.ofInstant(t.createdAt, zone).format(dateTimeFmt) }.getOrDefault("")
                 Text(
-                    dt,
+                    buildString {
+                        if (started.isNotBlank()) append("Start: ").append(started)
+                        if (ended.isNotBlank()) {
+                            if (isNotEmpty()) append("\n")
+                            append("End: ").append(ended)
+                        }
+                        if (created.isNotBlank()) {
+                            if (isNotEmpty()) append("\n")
+                            append("Created: ").append(created)
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )

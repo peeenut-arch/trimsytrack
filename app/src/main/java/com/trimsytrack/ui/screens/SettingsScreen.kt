@@ -108,18 +108,26 @@ import com.google.firebase.auth.FirebaseUser
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.trimsytrack.AppGraph
+import com.trimsytrack.BuildConfig
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.data.RegionPayload
 import com.trimsytrack.data.StorePayload
+import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.canonical.CanonicalWriteOutboxWorker
 import com.trimsytrack.data.driverdata.DriverDataSnapshotUploadWorker
+import com.trimsytrack.data.entities.DistanceMethod
+import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.StoreEntity
+import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.data.trackevents.TrackEventsOutboxWorker
 import com.trimsytrack.data.trackevents.TrackEventsCapabilityProbeWorker
 import com.trimsytrack.export.KorjournalExporter
 import com.trimsytrack.ui.components.HomeTileIds
 import java.io.File
 import java.time.LocalDate
+import java.time.Instant
+import java.time.ZoneId
 import kotlin.math.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -517,6 +525,31 @@ fun SettingsScreen(
     var showStartOverConfirm by remember { mutableStateOf(false) }
     var startOverBusy by remember { mutableStateOf(false) }
 
+    var showPurgeBackendConfirm by remember { mutableStateOf(false) }
+    var purgeBackendBusy by remember { mutableStateOf(false) }
+    var purgeBackendConfirmText by rememberSaveable { mutableStateOf("") }
+
+    var showDeleteMeConfirm by remember { mutableStateOf(false) }
+    var deleteMeBusy by remember { mutableStateOf(false) }
+    var deleteMeConfirmText by rememberSaveable { mutableStateOf("") }
+
+    val sampleTripSeedNotesPrefix = "SAMPLE_TRIP_SEED"
+
+    val stressTripSeedNotesPrefix = "STRESS_TRIP_SEED"
+
+    var showGenerateSampleTripsConfirm by remember { mutableStateOf(false) }
+    var generateSampleTripsBusy by remember { mutableStateOf(false) }
+
+    var showGenerateStressTripsConfirm by remember { mutableStateOf(false) }
+    var generateStressTripsBusy by remember { mutableStateOf(false) }
+
+    var showDeleteStressTripsConfirm by remember { mutableStateOf(false) }
+    var deleteStressTripsBusy by remember { mutableStateOf(false) }
+
+    var showDeleteSampleTripsConfirm by remember { mutableStateOf(false) }
+    var deleteSampleTripsBusy by remember { mutableStateOf(false) }
+    var deleteSampleTripsConfirmText by rememberSaveable { mutableStateOf("") }
+
     var showForceCloudRestoreConfirm by remember { mutableStateOf(false) }
     var forceCloudRestoreBusy by remember { mutableStateOf(false) }
     var forceCloudRestoreConfirmText by rememberSaveable { mutableStateOf("") }
@@ -841,6 +874,706 @@ fun SettingsScreen(
                 ) {
                     Text("Cancel")
                 }
+            },
+        )
+    }
+
+    if (showPurgeBackendConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!purgeBackendBusy) showPurgeBackendConfirm = false },
+            title = { Text("Purge backend data") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "This deletes ALL synced backend data for your current account (but keeps the account itself). " +
+                            "It then clears local data and signs you out. Type PURGE_MY_DATA_FOREVER to confirm.",
+                    )
+
+                    OutlinedTextField(
+                        value = purgeBackendConfirmText,
+                        onValueChange = { purgeBackendConfirmText = it },
+                        label = { Text("Type PURGE_MY_DATA_FOREVER") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !purgeBackendBusy && purgeBackendConfirmText.trim() == "PURGE_MY_DATA_FOREVER",
+                    onClick = {
+                        scope.launch {
+                            purgeBackendBusy = true
+                            try {
+                                val result = withContext(Dispatchers.IO) {
+                                    AppGraph.driverDataRepository.purgeBackendUserData("PURGE_MY_DATA_FOREVER")
+                                }
+
+                                withContext(Dispatchers.IO) {
+                                    val wm = WorkManager.getInstance(context)
+                                    wm.cancelUniqueWork("backend-sync")
+                                    wm.cancelUniqueWork("backend-sync-hourly")
+                                    wm.cancelUniqueWork("backend-sync-daily")
+                                    wm.cancelUniqueWork("geofence-sync")
+                                    wm.cancelUniqueWork("geofence-disable")
+                                    wm.cancelUniqueWork("driverdata-snapshot-upload-daily")
+                                    wm.cancelAllWorkByTag("driverdata-snapshot-upload")
+                                    wm.cancelAllWorkByTag("receipt-reminder")
+                                    wm.pruneWork()
+
+                                    AppGraph.db.clearAllTables()
+                                    java.io.File(context.filesDir, "regions").deleteRecursively()
+                                    java.io.File(context.filesDir, "evidence").deleteRecursively()
+                                    java.io.File(context.filesDir, "store_images").deleteRecursively()
+                                    java.io.File(context.filesDir, "home_tile_icons").deleteRecursively()
+                                    java.io.File(context.filesDir, "profiles").deleteRecursively()
+                                }
+                                AppGraph.settings.clearAll()
+                                signOutGoogleBestEffort()
+                                FirebaseAuth.getInstance().signOut()
+
+                                snackbarHostState.showSnackbar("Backend purged. Local reset complete.")
+                                runCatching { snackbarHostState.showSnackbar(result.take(200)) }
+                                showPurgeBackendConfirm = false
+                                onOpenOnboarding()
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                            } finally {
+                                purgeBackendBusy = false
+                            }
+                        }
+                    },
+                ) { Text("Purge + reset") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!purgeBackendBusy) showPurgeBackendConfirm = false },
+                    enabled = !purgeBackendBusy,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showDeleteMeConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!deleteMeBusy) showDeleteMeConfirm = false },
+            title = { Text("Delete account (backend + auth)") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "This deletes ALL synced backend data AND deletes your Firebase Auth user. " +
+                            "It then clears local data and signs you out. Type DELETE_MY_AUTH_ACCOUNT_FOREVER to confirm.",
+                    )
+
+                    OutlinedTextField(
+                        value = deleteMeConfirmText,
+                        onValueChange = { deleteMeConfirmText = it },
+                        label = { Text("Type DELETE_MY_AUTH_ACCOUNT_FOREVER") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !deleteMeBusy && deleteMeConfirmText.trim() == "DELETE_MY_AUTH_ACCOUNT_FOREVER",
+                    onClick = {
+                        scope.launch {
+                            deleteMeBusy = true
+                            try {
+                                val result = withContext(Dispatchers.IO) {
+                                    AppGraph.driverDataRepository.deleteBackendAuthUser("DELETE_MY_AUTH_ACCOUNT_FOREVER")
+                                }
+
+                                withContext(Dispatchers.IO) {
+                                    val wm = WorkManager.getInstance(context)
+                                    wm.cancelUniqueWork("backend-sync")
+                                    wm.cancelUniqueWork("backend-sync-hourly")
+                                    wm.cancelUniqueWork("backend-sync-daily")
+                                    wm.cancelUniqueWork("geofence-sync")
+                                    wm.cancelUniqueWork("geofence-disable")
+                                    wm.cancelUniqueWork("driverdata-snapshot-upload-daily")
+                                    wm.cancelAllWorkByTag("driverdata-snapshot-upload")
+                                    wm.cancelAllWorkByTag("receipt-reminder")
+                                    wm.pruneWork()
+
+                                    AppGraph.db.clearAllTables()
+                                    java.io.File(context.filesDir, "regions").deleteRecursively()
+                                    java.io.File(context.filesDir, "evidence").deleteRecursively()
+                                    java.io.File(context.filesDir, "store_images").deleteRecursively()
+                                    java.io.File(context.filesDir, "home_tile_icons").deleteRecursively()
+                                    java.io.File(context.filesDir, "profiles").deleteRecursively()
+                                }
+                                AppGraph.settings.clearAll()
+                                signOutGoogleBestEffort()
+                                FirebaseAuth.getInstance().signOut()
+
+                                snackbarHostState.showSnackbar("Account deleted. Local reset complete.")
+                                runCatching { snackbarHostState.showSnackbar(result.take(200)) }
+                                showDeleteMeConfirm = false
+                                onOpenOnboarding()
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                            } finally {
+                                deleteMeBusy = false
+                            }
+                        }
+                    },
+                ) { Text("Delete + reset") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!deleteMeBusy) showDeleteMeConfirm = false },
+                    enabled = !deleteMeBusy,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showDeleteSampleTripsConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!deleteSampleTripsBusy) showDeleteSampleTripsConfirm = false },
+            title = { Text("Delete sample trips") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Deletes only trips created by the debug sample-trip generator (notes starts with $sampleTripSeedNotesPrefix). " +
+                            "Type DELETE_SAMPLE_TRIPS to confirm.",
+                    )
+
+                    OutlinedTextField(
+                        value = deleteSampleTripsConfirmText,
+                        onValueChange = { deleteSampleTripsConfirmText = it },
+                        label = { Text("Type DELETE_SAMPLE_TRIPS") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !deleteSampleTripsBusy && deleteSampleTripsConfirmText.trim() == "DELETE_SAMPLE_TRIPS",
+                    onClick = {
+                        scope.launch {
+                            deleteSampleTripsBusy = true
+                            try {
+                                val (deletedTrips, deletedOrphanRuns) = withContext(Dispatchers.IO) {
+                                    val u = AppGraph.settings.requireUid()
+                                    val tripsDeleted = AppGraph.db.tripDao().deleteByNotesPrefix(u, sampleTripSeedNotesPrefix)
+                                    val runsDeleted = AppGraph.db.runDao().deleteOrphaned(u)
+                                    tripsDeleted to runsDeleted
+                                }
+
+                                storedDataError = null
+                                val refreshedUid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                runCatching { loadStoredDataCounts(refreshedUid) }
+                                    .onSuccess { storedDataCounts = it }
+                                    .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+
+                                snackbarHostState.showSnackbar("Deleted $deletedTrips sample trips ($deletedOrphanRuns orphan runs).")
+                                showDeleteSampleTripsConfirm = false
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                            } finally {
+                                deleteSampleTripsBusy = false
+                            }
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!deleteSampleTripsBusy) showDeleteSampleTripsConfirm = false },
+                    enabled = !deleteSampleTripsBusy,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showGenerateSampleTripsConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!generateSampleTripsBusy) showGenerateSampleTripsConfirm = false },
+            title = { Text("Generate sample trips") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Creates a few sample trips (yesterday + today) so you can open Journal and inspect timelines (start/end/created). " +
+                            "Any existing sample trips will be replaced. " +
+                            "Requires that you are signed in and handshake has completed.",
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !generateSampleTripsBusy,
+                    onClick = {
+                        if (generateSampleTripsBusy) return@Button
+                        generateSampleTripsBusy = true
+                        scope.launch {
+                            try {
+                                val (createdTrips, createdRuns) = withContext(Dispatchers.IO) {
+                                    // Keep this idempotent: replace any previous sample generation runs.
+                                    val u = AppGraph.settings.requireUid()
+                                    runCatching { AppGraph.db.tripDao().deleteByNotesPrefix(u, sampleTripSeedNotesPrefix) }
+                                    runCatching { AppGraph.db.runDao().deleteOrphaned(u) }
+
+                                    val zone = ZoneId.systemDefault()
+                                    val now = Instant.now()
+
+                                    fun makeTrip(
+                                        endedAt: Instant,
+                                        durationMinutes: Int,
+                                        endPlaceType: PlaceType,
+                                        storeId: String,
+                                        storeName: String,
+                                        lat: Double,
+                                        lng: Double,
+                                        startLabel: String,
+                                        startLat: Double,
+                                        startLng: Double,
+                                        startPlaceType: PlaceType,
+                                        runId: Long,
+                                    ): TripEntity {
+                                        val day = endedAt.atZone(zone).toLocalDate()
+                                        val safeDuration = durationMinutes.coerceIn(3, 180)
+                                        val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = safeDuration)
+                                        return TripEntity(
+                                            uid = "", // TripRepository fills from settings
+                                            createdAt = endedAt.plusSeconds(45),
+                                            day = day,
+                                            startedAt = startedAt,
+                                            endedAt = endedAt,
+                                            timeZoneId = zone.id,
+                                            storeId = storeId,
+                                            storeLocationId = null,
+                                            storeNameSnapshot = storeName,
+                                            citySnapshot = "",
+                                            storeLatSnapshot = lat,
+                                            storeLngSnapshot = lng,
+                                            endPlaceType = endPlaceType,
+                                            endAddressSnapshot = null,
+                                            startLabelSnapshot = startLabel,
+                                            startLat = startLat,
+                                            startLng = startLng,
+                                            startPlaceType = startPlaceType,
+                                            startAddressSnapshot = null,
+                                            distanceMeters = 0,
+                                            distanceMethod = DistanceMethod.UNKNOWN,
+                                            durationMinutes = safeDuration,
+                                            notes = "$sampleTripSeedNotesPrefix|v1",
+                                            businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                                            supplierOrArea = null,
+                                            isBusiness = true,
+                                            runId = runId,
+                                            currencyCode = null,
+                                            mileageRateMicros = null,
+                                            parkingTrafficFeeMinor = null,
+                                            parkingTicketId = null,
+                                        )
+                                    }
+
+                                    // Two completed runs: yesterday and today (spread across the day).
+                                    val yesterday = now.atZone(zone).toLocalDate().minusDays(1)
+                                    val today = now.atZone(zone).toLocalDate()
+
+                                    // Yesterday: late morning -> mid afternoon -> evening -> home
+                                    val y1 = yesterday.atTime(10, 5).atZone(zone).toInstant()
+                                    val y2 = yesterday.atTime(14, 30).atZone(zone).toInstant()
+                                    val yHome = yesterday.atTime(19, 15).atZone(zone).toInstant()
+
+                                    // Today: morning -> lunch-ish -> late afternoon -> late evening -> home
+                                    val t1 = today.atTime(8, 20).atZone(zone).toInstant()
+                                    val t2 = today.atTime(12, 10).atZone(zone).toInstant()
+                                    val t3 = today.atTime(16, 55).atZone(zone).toInstant()
+                                    val tHome = today.atTime(21, 10).atZone(zone).toInstant()
+
+                                    val ids = mutableListOf<Long>()
+
+                                    // Create explicit runs so sample trips are grouped correctly even if the user
+                                    // already has newer trips on the same day.
+                                    val runYesterday = AppGraph.tripRepository.createRun(day = yesterday, label = "Sample")
+                                    val runToday = AppGraph.tripRepository.createRun(day = today, label = "Sample")
+                                    val runCount = listOf(runYesterday, runToday).distinct().size
+
+                                    // Yesterday: Home -> Client -> Supplier -> Home
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = y1,
+                                            durationMinutes = 23,
+                                            endPlaceType = PlaceType.STORE,
+                                            storeId = "sample:client_a",
+                                            storeName = "Client A",
+                                            lat = 59.3340,
+                                            lng = 18.0300,
+                                            startLabel = "Home",
+                                            startLat = 59.3326,
+                                            startLng = 18.0649,
+                                            startPlaceType = PlaceType.HOME,
+                                            runId = runYesterday,
+                                        )
+                                    )
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = y2,
+                                            durationMinutes = 18,
+                                            endPlaceType = PlaceType.STORE,
+                                            storeId = "sample:supplier_b",
+                                            storeName = "Supplier B",
+                                            lat = 59.8586,
+                                            lng = 17.6389,
+                                            startLabel = "Last stop: Client A",
+                                            startLat = 59.3340,
+                                            startLng = 18.0300,
+                                            startPlaceType = PlaceType.STORE,
+                                            runId = runYesterday,
+                                        )
+                                    )
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = yHome,
+                                            durationMinutes = 35,
+                                            endPlaceType = PlaceType.HOME,
+                                            storeId = BUSINESS_HOME_LOCATION_ID,
+                                            storeName = "Business home",
+                                            lat = 59.3326,
+                                            lng = 18.0649,
+                                            startLabel = "Last stop: Supplier B",
+                                            startLat = 59.8586,
+                                            startLng = 17.6389,
+                                            startPlaceType = PlaceType.STORE,
+                                            runId = runYesterday,
+                                        )
+                                    )
+
+                                    // Today: Home -> Client -> Post -> Client -> Home (late)
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = t1,
+                                            durationMinutes = 16,
+                                            endPlaceType = PlaceType.STORE,
+                                            storeId = "sample:client_c",
+                                            storeName = "Client C",
+                                            lat = 59.6519,
+                                            lng = 17.9186,
+                                            startLabel = "Home",
+                                            startLat = 59.3326,
+                                            startLng = 18.0649,
+                                            startPlaceType = PlaceType.HOME,
+                                            runId = runToday,
+                                        )
+                                    )
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = t2,
+                                            durationMinutes = 9,
+                                            endPlaceType = PlaceType.STORE,
+                                            storeId = "sample:post",
+                                            storeName = "Post",
+                                            lat = 59.3326,
+                                            lng = 18.0649,
+                                            startLabel = "Last stop: Client C",
+                                            startLat = 59.6519,
+                                            startLng = 17.9186,
+                                            startPlaceType = PlaceType.STORE,
+                                            runId = runToday,
+                                        )
+                                    )
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = t3,
+                                            durationMinutes = 22,
+                                            endPlaceType = PlaceType.STORE,
+                                            storeId = "sample:client_d",
+                                            storeName = "Client D",
+                                            lat = 59.8586,
+                                            lng = 17.6389,
+                                            startLabel = "Last stop: Post",
+                                            startLat = 59.3326,
+                                            startLng = 18.0649,
+                                            startPlaceType = PlaceType.STORE,
+                                            runId = runToday,
+                                        )
+                                    )
+                                    ids += AppGraph.tripRepository.createTrip(
+                                        makeTrip(
+                                            endedAt = tHome,
+                                            durationMinutes = 41,
+                                            endPlaceType = PlaceType.HOME,
+                                            storeId = BUSINESS_HOME_LOCATION_ID,
+                                            storeName = "Business home",
+                                            lat = 59.3326,
+                                            lng = 18.0649,
+                                            startLabel = "Last stop: Client D",
+                                            startLat = 59.8586,
+                                            startLng = 17.6389,
+                                            startPlaceType = PlaceType.STORE,
+                                            runId = runToday,
+                                        )
+                                    )
+
+                                    ids.size to runCount
+                                }
+
+                                storedDataError = null
+                                val refreshedUid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                runCatching { loadStoredDataCounts(refreshedUid) }
+                                    .onSuccess { storedDataCounts = it }
+                                    .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+
+                                snackbarHostState.showSnackbar(
+                                    "Generated $createdTrips sample trips ($createdRuns runs). Journal shows runs; switch to Week to see yesterday."
+                                )
+                                showGenerateSampleTripsConfirm = false
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                            } finally {
+                                generateSampleTripsBusy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text("Generate")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!generateSampleTripsBusy) showGenerateSampleTripsConfirm = false },
+                    enabled = !generateSampleTripsBusy,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showGenerateStressTripsConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!generateStressTripsBusy) showGenerateStressTripsConfirm = false },
+            title = { Text("Generate stress trips") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Generates multiple runs with many stops across several days to stress test Journal grouping, " +
+                            "trip numbering, and Home→…→Home formatting. Existing stress trips will be replaced.",
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !generateStressTripsBusy,
+                    onClick = {
+                        if (generateStressTripsBusy) return@Button
+                        generateStressTripsBusy = true
+                        scope.launch {
+                            try {
+                                val (createdTrips, createdRuns, days) = withContext(Dispatchers.IO) {
+                                    val u = AppGraph.settings.requireUid()
+                                    runCatching { AppGraph.db.tripDao().deleteByNotesPrefix(u, stressTripSeedNotesPrefix) }
+                                    runCatching { AppGraph.db.runDao().deleteOrphaned(u) }
+
+                                    val zone = ZoneId.systemDefault()
+                                    val now = Instant.now()
+                                    val today = now.atZone(zone).toLocalDate()
+                                    val daysToSeed = listOf(today.minusDays(2), today.minusDays(1), today)
+
+                                    fun makeTrip(
+                                        endedAt: Instant,
+                                        durationMinutes: Int,
+                                        endPlaceType: PlaceType,
+                                        storeId: String,
+                                        storeName: String,
+                                        lat: Double,
+                                        lng: Double,
+                                        startLabel: String,
+                                        startLat: Double,
+                                        startLng: Double,
+                                        startPlaceType: PlaceType,
+                                        runId: Long,
+                                    ): TripEntity {
+                                        val day = endedAt.atZone(zone).toLocalDate()
+                                        val safeDuration = durationMinutes.coerceIn(1, 180)
+                                        val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = safeDuration)
+                                        return TripEntity(
+                                            uid = "", // TripRepository fills from settings
+                                            createdAt = endedAt.plusSeconds(30),
+                                            day = day,
+                                            startedAt = startedAt,
+                                            endedAt = endedAt,
+                                            timeZoneId = zone.id,
+                                            storeId = storeId,
+                                            storeLocationId = null,
+                                            storeNameSnapshot = storeName,
+                                            citySnapshot = "",
+                                            storeLatSnapshot = lat,
+                                            storeLngSnapshot = lng,
+                                            endPlaceType = endPlaceType,
+                                            endAddressSnapshot = null,
+                                            startLabelSnapshot = startLabel,
+                                            startLat = startLat,
+                                            startLng = startLng,
+                                            startPlaceType = startPlaceType,
+                                            startAddressSnapshot = null,
+                                            distanceMeters = 0,
+                                            distanceMethod = DistanceMethod.UNKNOWN,
+                                            durationMinutes = safeDuration,
+                                            notes = "$stressTripSeedNotesPrefix|v1",
+                                            businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                                            supplierOrArea = null,
+                                            isBusiness = true,
+                                            runId = runId,
+                                            currencyCode = null,
+                                            mileageRateMicros = null,
+                                            parkingTrafficFeeMinor = null,
+                                            parkingTicketId = null,
+                                        )
+                                    }
+
+                                    // Use a stable-ish anchor around Stockholm so distances are reasonable if routed later.
+                                    val homeLat = 59.3326
+                                    val homeLng = 18.0649
+
+                                    var totalTrips = 0
+                                    var totalRuns = 0
+
+                                    for ((dayIdx, day) in daysToSeed.withIndex()) {
+                                        // Two runs on "today" to stress numbering and grouping.
+                                        val runsToday = if (dayIdx == daysToSeed.lastIndex) 2 else 1
+                                        for (runN in 0 until runsToday) {
+                                            val runId = AppGraph.tripRepository.createRun(day = day, label = "Stress")
+                                            totalRuns += 1
+
+                                            val stopCount = if (runN == 0) 18 else 28
+                                            val baseHour = if (runN == 0) 9 else 15
+                                            val firstEnd = day.atTime(baseHour, 10).atZone(zone).toInstant()
+
+                                            var prevLabel = "Home"
+                                            var prevLat = homeLat
+                                            var prevLng = homeLng
+                                            var prevPlaceType = PlaceType.HOME
+
+                                            for (i in 1..stopCount) {
+                                                val endedAt = firstEnd.plusSeconds((i * 23L) * 60L)
+                                                val name = if (i % 7 == 0) "Repeat" else "Stop $i"
+                                                val lat = homeLat + (i * 0.0011)
+                                                val lng = homeLng + (i * 0.0007)
+
+                                                AppGraph.tripRepository.createTrip(
+                                                    makeTrip(
+                                                        endedAt = endedAt,
+                                                        durationMinutes = 6 + (i % 10),
+                                                        endPlaceType = PlaceType.STORE,
+                                                        storeId = "stress:$dayIdx:$runN:$i",
+                                                        storeName = name,
+                                                        lat = lat,
+                                                        lng = lng,
+                                                        startLabel = prevLabel,
+                                                        startLat = prevLat,
+                                                        startLng = prevLng,
+                                                        startPlaceType = prevPlaceType,
+                                                        runId = runId,
+                                                    )
+                                                )
+                                                totalTrips += 1
+
+                                                prevLabel = "Last stop: $name"
+                                                prevLat = lat
+                                                prevLng = lng
+                                                prevPlaceType = PlaceType.STORE
+                                            }
+
+                                            // Close run with HOME.
+                                            val homeEndedAt = firstEnd.plusSeconds(((stopCount + 1L) * 23L) * 60L)
+                                            AppGraph.tripRepository.createTrip(
+                                                makeTrip(
+                                                    endedAt = homeEndedAt,
+                                                    durationMinutes = 15,
+                                                    endPlaceType = PlaceType.HOME,
+                                                    storeId = BUSINESS_HOME_LOCATION_ID,
+                                                    storeName = "Business home",
+                                                    lat = homeLat,
+                                                    lng = homeLng,
+                                                    startLabel = prevLabel,
+                                                    startLat = prevLat,
+                                                    startLng = prevLng,
+                                                    startPlaceType = prevPlaceType,
+                                                    runId = runId,
+                                                )
+                                            )
+                                            totalTrips += 1
+                                        }
+                                    }
+
+                                    Triple(totalTrips, totalRuns, daysToSeed.size)
+                                }
+
+                                storedDataError = null
+                                val refreshedUid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                runCatching { loadStoredDataCounts(refreshedUid) }
+                                    .onSuccess { storedDataCounts = it }
+                                    .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+
+                                snackbarHostState.showSnackbar(
+                                    "Generated $createdTrips stress trips ($createdRuns runs over $days days). Open Journal and switch period if needed."
+                                )
+                                showGenerateStressTripsConfirm = false
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                            } finally {
+                                generateStressTripsBusy = false
+                            }
+                        }
+                    },
+                ) { Text("Generate") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!generateStressTripsBusy) showGenerateStressTripsConfirm = false },
+                    enabled = !generateStressTripsBusy,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showDeleteStressTripsConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!deleteStressTripsBusy) showDeleteStressTripsConfirm = false },
+            title = { Text("Delete stress trips") },
+            text = { Text("Deletes only trips created by the stress generator ($stressTripSeedNotesPrefix).") },
+            confirmButton = {
+                Button(
+                    enabled = !deleteStressTripsBusy,
+                    onClick = {
+                        if (deleteStressTripsBusy) return@Button
+                        deleteStressTripsBusy = true
+                        scope.launch {
+                            try {
+                                val (deletedTrips, deletedOrphanRuns) = withContext(Dispatchers.IO) {
+                                    val u = AppGraph.settings.requireUid()
+                                    val tripsDeleted = AppGraph.db.tripDao().deleteByNotesPrefix(u, stressTripSeedNotesPrefix)
+                                    val runsDeleted = AppGraph.db.runDao().deleteOrphaned(u)
+                                    tripsDeleted to runsDeleted
+                                }
+
+                                storedDataError = null
+                                val refreshedUid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                                runCatching { loadStoredDataCounts(refreshedUid) }
+                                    .onSuccess { storedDataCounts = it }
+                                    .onFailure { storedDataError = it.message ?: it.javaClass.simpleName }
+
+                                snackbarHostState.showSnackbar("Deleted $deletedTrips stress trips ($deletedOrphanRuns orphan runs).")
+                                showDeleteStressTripsConfirm = false
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
+                            } finally {
+                                deleteStressTripsBusy = false
+                            }
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!deleteStressTripsBusy) showDeleteStressTripsConfirm = false },
+                    enabled = !deleteStressTripsBusy,
+                ) { Text("Cancel") }
             },
         )
     }
@@ -1409,6 +2142,83 @@ fun SettingsScreen(
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                     ) {
                         Text("Start over (new user)")
+                    }
+
+                    if (BuildConfig.DEBUG) {
+                        OutlinedButton(
+                            onClick = {
+                                showGenerateSampleTripsConfirm = true
+                            },
+                            enabled = !generateSampleTripsBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text("Generate sample trips (debug)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showGenerateStressTripsConfirm = true
+                            },
+                            enabled = !generateStressTripsBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text("Generate stress trips (debug)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                deleteSampleTripsConfirmText = ""
+                                showDeleteSampleTripsConfirm = true
+                            },
+                            enabled = !deleteSampleTripsBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text("Delete sample trips (debug)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showDeleteStressTripsConfirm = true
+                            },
+                            enabled = !deleteStressTripsBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text("Delete stress trips (debug)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                purgeBackendConfirmText = ""
+                                showPurgeBackendConfirm = true
+                            },
+                            enabled = !purgeBackendBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text("Purge backend + reset (debug)")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                deleteMeConfirmText = ""
+                                showDeleteMeConfirm = true
+                            },
+                            enabled = !deleteMeBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text("Delete account + reset (debug)")
+                        }
                     }
                     Spacer(Modifier.height(10.dp))
                 }

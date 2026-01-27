@@ -12,6 +12,7 @@ import com.trimsytrack.data.entities.DistanceMethod
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.PromptStatus
 import com.trimsytrack.data.entities.TripEntity
+import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.util.PlaceNameNormalizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -202,20 +203,15 @@ class TripConfirmViewModel(
                 }
 
                 val route = routeResult.getOrElse {
-                    AppGraph.distanceRepository.estimateStraightLineRoute(
-                        startLat = startLat,
-                        startLng = startLng,
-                        destLat = destLat,
-                        destLng = destLng,
-                    )
+                    throw it
                 }
-                val distanceMethod = if (routeResult.isSuccess) DistanceMethod.MAPS else DistanceMethod.GPS_STRAIGHT_LINE
+                val distanceMethod = DistanceMethod.MAPS
 
                 val now = Instant.now()
                 val createdAt = promptTriggeredAt ?: now
                 val day = promptDay ?: LocalDate.now()
                 val endedAt = createdAt
-                val startedAt = endedAt.minusSeconds((route.durationMinutes.toLong().coerceAtLeast(0)) * 60L)
+                val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = route.durationMinutes)
                 val tz = ZoneId.systemDefault().id
                 val uid = AppGraph.settings.requireUid()
                 val citySnapshot = runCatching {

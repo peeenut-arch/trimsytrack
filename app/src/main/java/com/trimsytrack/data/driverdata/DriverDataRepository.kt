@@ -35,6 +35,7 @@ import retrofit2.HttpException
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import java.util.UUID
 import com.trimsytrack.system.SystemCallablesService
+import com.trimsytrack.backend.PurgeApi
 
 class DriverDataRepository(
     private val context: Context,
@@ -81,6 +82,14 @@ class DriverDataRepository(
         val app_id: String,
     )
 
+    @Serializable
+    private data class PurgeMeRequest(
+        val confirm: String,
+        val clientProtocolVersion: Int,
+        val clientRequestId: String,
+        val app_id: String,
+    )
+
     suspend fun deleteBackendAuthUser(confirm: String): String = withContext(Dispatchers.IO) {
         val handshakeMarker = settings.backendProtocolVersion.first()
             ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
@@ -104,6 +113,33 @@ class DriverDataRepository(
 
         api.deleteMe(
             body = json.encodeToString(DeleteMeRequest.serializer(), req).toRequestBody(jsonMediaType)
+        )
+    }
+
+    suspend fun purgeBackendUserData(confirm: String): String = withContext(Dispatchers.IO) {
+        val handshakeMarker = settings.backendProtocolVersion.first()
+            ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
+        @Suppress("UNUSED_VARIABLE")
+        val _handshakeMarker = handshakeMarker
+
+        val baseUrl = normalizeBaseUrl(BuildConfig.BACKEND_API_BASE)
+        val retrofit = Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(AppGraph.backendHttpClient)
+            .addConverterFactory(ScalarsConverterFactory.create())
+            .build()
+
+        val api = retrofit.create(PurgeApi::class.java)
+
+        val req = PurgeMeRequest(
+            confirm = confirm,
+            clientProtocolVersion = handshakeMarker,
+            clientRequestId = UUID.randomUUID().toString(),
+            app_id = "trimsytrack",
+        )
+
+        api.purgeMe(
+            body = json.encodeToString(PurgeMeRequest.serializer(), req).toRequestBody(jsonMediaType)
         )
     }
 

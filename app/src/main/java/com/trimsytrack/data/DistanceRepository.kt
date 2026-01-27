@@ -86,6 +86,9 @@ class DistanceRepository(
 
             // 3) Cache miss => compute externally ONCE and persist.
             val computed = routes.computeDrivingRoute(startLat, startLng, destLat, destLng)
+            if (computed.source != "GOOGLE") {
+                throw IllegalStateException("Google Maps route unavailable")
+            }
             val minutes = ceil(computed.durationSeconds / 60.0).toInt().coerceAtLeast(0)
 
             // Only persist true Google results. Fallback estimates should be re-attempted later,
