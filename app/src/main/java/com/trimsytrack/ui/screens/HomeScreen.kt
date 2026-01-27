@@ -6,6 +6,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,10 +65,13 @@ import android.webkit.MimeTypeMap
 import com.trimsytrack.AppGraph
 import com.trimsytrack.R
 import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
+import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.DistanceMethod
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.logic.TripTimes
+import com.trimsytrack.ui.components.HomeDistanceTile
+import com.trimsytrack.ui.components.SetHomeConfirmDialog
 import com.trimsytrack.ui.components.HomeTileIds
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -101,9 +105,11 @@ fun HomeScreen(
         accountEmail.trim().ifBlank { uid.trim() }
     }
 
-    val today = remember { LocalDate.now() }
+    val today = LocalDate.now()
+    val yesterday = remember(today) { today.minusDays(1) }
     val todayTrips by AppGraph.tripRepository.observeToday(today).collectAsState(initial = emptyList())
-    val currentRun = rememberCurrentRun(todayTrips)
+    val yesterdayTrips by AppGraph.tripRepository.observeToday(yesterday).collectAsState(initial = emptyList())
+    val currentRun = rememberCurrentRun(yesterdayTrips + todayTrips)
 
     val businessHomeLat by AppGraph.settings.businessHomeLat.collectAsState(initial = null)
     val businessHomeLng by AppGraph.settings.businessHomeLng.collectAsState(initial = null)
@@ -112,15 +118,12 @@ fun HomeScreen(
     var homeTripBusy by remember { mutableStateOf(false) }
     var homeTripStatus by remember { mutableStateOf<String?>(null) }
 
-    var showHomeArrivalDialog by remember { mutableStateOf(false) }
-    var arrivalTimeText by remember {
-        val local = Instant.now().atZone(ZoneId.systemDefault()).toLocalTime()
-        mutableStateOf(String.format("%02d:%02d", local.hour, local.minute))
-    }
-
-    var homeRouteDurationMinutes by remember { mutableStateOf<Int?>(null) }
-    var homeRouteDistanceMeters by remember { mutableStateOf<Int?>(null) }
-    var homeRouteError by remember { mutableStateOf<String?>(null) }
+    var showSetHomeConfirm by remember { mutableStateOf(false) }
+    var homeConfirmRecommendedArrival by remember { mutableStateOf<Instant?>(null) }
+    var homeConfirmMinArrival by remember { mutableStateOf<Instant?>(null) }
+    var homeConfirmTimeZoneId by remember { mutableStateOf<String?>(null) }
+    var homeConfirmTravelMinutes by remember { mutableStateOf<Int?>(null) }
+    var homeConfirmTravelMeters by remember { mutableStateOf<Int?>(null) }
 
     var currentTripExpanded by rememberSaveable { mutableStateOf(true) }
     var hadActiveRun by rememberSaveable { mutableStateOf(false) }
@@ -132,35 +135,7 @@ fun HomeScreen(
         hadActiveRun = hasRun
     }
 
-    LaunchedEffect(showHomeArrivalDialog, currentRun, businessHomeLat, businessHomeLng) {
-        if (!showHomeArrivalDialog) return@LaunchedEffect
-        val last = currentRun?.lastOrNull() ?: return@LaunchedEffect
-        val homeLat = businessHomeLat
-        val homeLng = businessHomeLng
-        if (homeLat == null || homeLng == null) return@LaunchedEffect
-        if (last.endPlaceType == PlaceType.HOME) return@LaunchedEffect
-
-        homeRouteDurationMinutes = null
-        homeRouteDistanceMeters = null
-        homeRouteError = null
-
-        runCatching {
-            val route = withContext(Dispatchers.IO) {
-                AppGraph.distanceRepository.getOrComputeDrivingRoute(
-                    startLat = last.storeLatSnapshot,
-                    startLng = last.storeLngSnapshot,
-                    destLat = homeLat,
-                    destLng = homeLng,
-                    startLocationId = last.storeId,
-                    endLocationId = BUSINESS_HOME_LOCATION_ID,
-                )
-            }
-            homeRouteDurationMinutes = route.durationMinutes
-            homeRouteDistanceMeters = route.distanceMeters
-        }.onFailure {
-            homeRouteError = it.message ?: "Failed to compute travel time"
-        }
-    }
+    // (SetHomeConfirmDialog flow computes route on-demand on click)
 
     val menuExpanded = remember { mutableStateOf(false) }
 
@@ -349,23 +324,78 @@ fun HomeScreen(
                 .padding(top = 74.dp, bottom = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            if (currentRun != null) {
-                CurrentTripCard(
-                    trips = currentRun,
-                    expanded = currentTripExpanded,
-                    status = homeTripStatus,
-                    homeTripBusy = homeTripBusy,
-                    onToggleExpanded = { currentTripExpanded = !currentTripExpanded },
-                    onCompleteToHome = {
-                        if (homeTripBusy) return@CurrentTripCard
-                        val local = Instant.now().atZone(ZoneId.systemDefault()).toLocalTime()
-                        arrivalTimeText = String.format("%02d:%02d", local.hour, local.minute)
-                        showHomeArrivalDialog = true
-                    },
-                )
+            CurrentTripCard(
+                trips = currentRun,
+                expanded = currentTripExpanded,
+                status = homeTripStatus,
+                homeTripBusy = homeTripBusy,
+                homeDistanceMeters = remember(currentRun, businessHomeLat, businessHomeLng) {
+                    val last = currentRun?.lastOrNull() ?: return@remember Int.MAX_VALUE
+                    val homeLat = businessHomeLat ?: return@remember Int.MAX_VALUE
+                    val homeLng = businessHomeLng ?: return@remember Int.MAX_VALUE
+                    haversineMeters(last.storeLatSnapshot, last.storeLngSnapshot, homeLat, homeLng)
+                },
+                onToggleExpanded = { currentTripExpanded = !currentTripExpanded },
+                onCompleteToHome = {
+                    if (homeTripBusy) return@CurrentTripCard
+                    if (currentRun.isNullOrEmpty()) {
+                        homeTripStatus = "No current trip found."
+                        return@CurrentTripCard
+                    }
 
-                Spacer(Modifier.height(18.dp))
-            }
+                    val last = currentRun.lastOrNull() ?: run {
+                        homeTripStatus = "No current trip found."
+                        return@CurrentTripCard
+                    }
+                    val homeLat = businessHomeLat
+                    val homeLng = businessHomeLng
+                    if (homeLat == null || homeLng == null) {
+                        homeTripStatus = "Business home is not set (open Settings)."
+                        return@CurrentTripCard
+                    }
+                    if (last.endPlaceType == PlaceType.HOME) {
+                        homeTripStatus = "Already ended at Home."
+                        return@CurrentTripCard
+                    }
+
+                    scope.launch {
+                        if (homeTripBusy) return@launch
+                        homeTripBusy = true
+                        homeTripStatus = null
+                        try {
+                            homeConfirmTimeZoneId = last.timeZoneId
+
+                            val route = withContext(Dispatchers.IO) {
+                                AppGraph.distanceRepository.getOrComputeDrivingRoute(
+                                    startLat = last.storeLatSnapshot,
+                                    startLng = last.storeLngSnapshot,
+                                    destLat = homeLat,
+                                    destLng = homeLng,
+                                    startLocationId = last.storeId,
+                                    endLocationId = BUSINESS_HOME_LOCATION_ID,
+                                )
+                            }
+
+                            homeConfirmTravelMinutes = route.durationMinutes
+                            homeConfirmTravelMeters = route.distanceMeters
+
+                            val dwellSeconds = dwellMinutesSetting.coerceAtLeast(0).toLong() * 60L
+                            val travelSeconds = route.durationMinutes.toLong().coerceAtLeast(0) * 60L
+                            val minArrival = last.endedAt.plusSeconds(dwellSeconds + travelSeconds)
+
+                            homeConfirmRecommendedArrival = minArrival
+                            homeConfirmMinArrival = minArrival
+                            showSetHomeConfirm = true
+                        } catch (t: Throwable) {
+                            homeTripStatus = t.message ?: "Failed to add Home"
+                        } finally {
+                            homeTripBusy = false
+                        }
+                    }
+                },
+            )
+
+            Spacer(Modifier.height(18.dp))
 
             Spacer(Modifier.weight(1f))
 
@@ -410,175 +440,103 @@ fun HomeScreen(
             Spacer(Modifier.weight(1f))
         }
 
-        if (showHomeArrivalDialog) {
-            val last = currentRun?.lastOrNull()
-            val homeLat = businessHomeLat
-            val homeLng = businessHomeLng
+        if (showSetHomeConfirm) {
+            SetHomeConfirmDialog(
+                enabled = !homeTripBusy,
+                recommendedArrival = homeConfirmRecommendedArrival ?: Instant.now(),
+                minArrival = homeConfirmMinArrival,
+                maxArrival = Instant.now(),
+                timeZoneId = homeConfirmTimeZoneId,
+                onConfirm = { chosenArrival ->
+                    showSetHomeConfirm = false
 
-            fun tryParseArrivalLocalTime(raw: String): LocalTime? {
-                val parts = raw.trim().split(":")
-                if (parts.size != 2) return null
-                val h = parts[0].toIntOrNull() ?: return null
-                val m = parts[1].toIntOrNull() ?: return null
-                return runCatching { LocalTime.of(h, m) }.getOrNull()
-            }
+                    scope.launch {
+                        if (homeTripBusy) return@launch
+                        homeTripBusy = true
+                        homeTripStatus = null
+                        try {
+                            val currentLast = currentRun?.lastOrNull()
+                                ?: throw IllegalStateException("No current trip found")
 
-            AlertDialog(
-                onDismissRequest = { if (!homeTripBusy) showHomeArrivalDialog = false },
-                title = { Text("Arrive home") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedTextField(
-                            value = arrivalTimeText,
-                            onValueChange = { arrivalTimeText = it },
-                            label = { Text("Arrival time (HH:mm)") },
-                            singleLine = true,
-                            enabled = !homeTripBusy,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-
-                        when {
-                            last == null -> Text("No current trip found.")
-                            homeLat == null || homeLng == null -> Text("Business home is not set (open Settings).")
-                            last.endPlaceType == PlaceType.HOME -> Text("Already ended at Home.")
-                            !homeRouteError.isNullOrBlank() -> Text(homeRouteError.orEmpty(), color = MaterialTheme.colorScheme.error)
-                            homeRouteDurationMinutes == null -> Text("Calculating travel time…", style = MaterialTheme.typography.bodySmall)
-                            else -> {
-                                val parsed = tryParseArrivalLocalTime(arrivalTimeText)
-                                if (parsed == null) {
-                                    Text("Enter time like 18:45", style = MaterialTheme.typography.bodySmall)
-                                } else {
-                                    val zone = ZoneId.systemDefault()
-                                    val travelMin = homeRouteDurationMinutes ?: 0
-                                    val endedAt = LocalDate.now().atTime(parsed).atZone(zone).toInstant()
-                                    val dwellMin = dwellMinutesSetting.coerceAtLeast(0)
-                                    val minArrive = last.endedAt
-                                        .plusSeconds(dwellMin.toLong() * 60L)
-                                        .plusSeconds(travelMin.toLong().coerceAtLeast(0) * 60L)
-
-                                    val startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = travelMin)
-
-                                    Text(
-                                        text = "Drive: ${formatTotalMinutes(travelMin)} • Depart: ${formatTime(startedAt, zone.id)}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
-                                    )
-
-                                    if (endedAt.isBefore(minArrive)) {
-                                        Text(
-                                            text = "Arrival is too soon. Earliest: ${formatTime(minArrive, zone.id)}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.error,
-                                        )
-                                    }
-                                }
+                            val homeLat = businessHomeLat
+                            val homeLng = businessHomeLng
+                            if (homeLat == null || homeLng == null) {
+                                homeTripStatus = "Business home is not set (open Settings)."
+                                return@launch
                             }
+
+                            val zone = runCatching {
+                                val raw = (homeConfirmTimeZoneId ?: currentLast.timeZoneId).trim()
+                                if (raw.isBlank()) ZoneId.systemDefault() else ZoneId.of(raw)
+                            }.getOrElse { ZoneId.systemDefault() }
+
+                            val openRunDay = currentLast.day
+                            val runId = currentLast.runId
+
+                            val travelMin = homeConfirmTravelMinutes
+                            val travelMeters = homeConfirmTravelMeters
+                            if (travelMin == null || travelMeters == null) {
+                                throw IllegalStateException("Missing travel time")
+                            }
+
+                            val dwellSeconds = dwellMinutesSetting.coerceAtLeast(0).toLong() * 60L
+                            val travelSeconds = travelMin.toLong().coerceAtLeast(0) * 60L
+                            val minArriveHomeAt = currentLast.endedAt.plusSeconds(dwellSeconds + travelSeconds)
+                            if (chosenArrival.isBefore(minArriveHomeAt)) {
+                                homeTripStatus = "Home arrival must be after previous stop"
+                                return@launch
+                            }
+
+                            val now = Instant.now()
+                            val trip = TripEntity(
+                                uid = AppGraph.settings.requireUid(),
+                                createdAt = now,
+                                day = openRunDay,
+                                startedAt = TripTimes.deriveStartedAt(endedAt = chosenArrival, durationMinutes = travelMin),
+                                endedAt = chosenArrival,
+                                timeZoneId = zone.id,
+                                storeId = BUSINESS_HOME_LOCATION_ID,
+                                storeLocationId = BUSINESS_HOME_LOCATION_ID,
+                                storeNameSnapshot = "Business home",
+                                citySnapshot = "",
+                                storeLatSnapshot = homeLat,
+                                storeLngSnapshot = homeLng,
+                                endPlaceType = PlaceType.HOME,
+                                endAddressSnapshot = null,
+                                startLabelSnapshot = currentLast.storeNameSnapshot.ifBlank { "Last stop" },
+                                startLat = currentLast.storeLatSnapshot,
+                                startLng = currentLast.storeLngSnapshot,
+                                startPlaceType = currentLast.endPlaceType,
+                                startAddressSnapshot = currentLast.endAddressSnapshot,
+                                distanceMeters = travelMeters,
+                                distanceMethod = DistanceMethod.MAPS,
+                                durationMinutes = travelMin,
+                                notes = "",
+                                businessPurpose = SettingsStore.DEFAULT_BUSINESS_PURPOSE,
+                                supplierOrArea = null,
+                                isBusiness = true,
+                                runId = runId,
+                                currencyCode = null,
+                                mileageRateMicros = null,
+                            )
+
+                            withContext(Dispatchers.IO) {
+                                AppGraph.tripRepository.createTrip(trip)
+                            }
+
+                            runCatching {
+                                AppGraph.geofenceSyncManager.scheduleSync("home_current_trip_complete_to_home")
+                            }
+
+                            homeTripStatus = "Completed to Home."
+                        } catch (t: Throwable) {
+                            homeTripStatus = t.message ?: "Failed to add Home"
+                        } finally {
+                            homeTripBusy = false
                         }
                     }
                 },
-                confirmButton = {
-                    TextButton(
-                        enabled = !homeTripBusy,
-                        onClick = {
-                            if (homeTripBusy) return@TextButton
-                            val currentLast = last ?: return@TextButton
-                            if (homeLat == null || homeLng == null) {
-                                homeTripStatus = "Business home is not set (open Settings)."
-                                return@TextButton
-                            }
-                            if (currentLast.endPlaceType == PlaceType.HOME) {
-                                homeTripStatus = "Already ended at Home."
-                                return@TextButton
-                            }
-
-                            val parsed = tryParseArrivalLocalTime(arrivalTimeText)
-                            if (parsed == null) {
-                                homeTripStatus = "Invalid time. Use HH:mm"
-                                return@TextButton
-                            }
-
-                            val travelMin = homeRouteDurationMinutes
-                            val travelMeters = homeRouteDistanceMeters
-                            if (travelMin == null || travelMeters == null) {
-                                homeTripStatus = homeRouteError ?: "Still computing travel time"
-                                return@TextButton
-                            }
-
-                            val zone = ZoneId.systemDefault()
-                            val endedAt = LocalDate.now().atTime(parsed).atZone(zone).toInstant()
-                            val dwellMin = dwellMinutesSetting.coerceAtLeast(0)
-                            val minArrive = currentLast.endedAt
-                                .plusSeconds(dwellMin.toLong() * 60L)
-                                .plusSeconds(travelMin.toLong().coerceAtLeast(0) * 60L)
-                            if (endedAt.isBefore(minArrive)) {
-                                homeTripStatus = "Arrival is too soon. Earliest: ${formatTime(minArrive, zone.id)}"
-                                return@TextButton
-                            }
-
-                            homeTripBusy = true
-                            homeTripStatus = null
-
-                            scope.launch {
-                                try {
-                                    val distanceMethod = DistanceMethod.MAPS
-                                    val now = Instant.now()
-                                    val day: LocalDate = endedAt.atZone(zone).toLocalDate()
-                                    val uidLocal = AppGraph.settings.requireUid()
-
-                                    withContext(Dispatchers.IO) {
-                                        AppGraph.tripRepository.createTrip(
-                                            TripEntity(
-                                                uid = uidLocal,
-                                                createdAt = now,
-                                                day = day,
-                                                startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = travelMin),
-                                                endedAt = endedAt,
-                                                timeZoneId = zone.id,
-                                                storeId = BUSINESS_HOME_LOCATION_ID,
-                                                storeNameSnapshot = "Business home",
-                                                citySnapshot = "",
-                                                storeLatSnapshot = homeLat,
-                                                storeLngSnapshot = homeLng,
-                                                endPlaceType = PlaceType.HOME,
-                                                endAddressSnapshot = null,
-                                                startLabelSnapshot = "Last stop: ${currentLast.storeNameSnapshot}",
-                                                startLat = currentLast.storeLatSnapshot,
-                                                startLng = currentLast.storeLngSnapshot,
-                                                startPlaceType = PlaceType.STORE,
-                                                distanceMeters = travelMeters,
-                                                distanceMethod = distanceMethod,
-                                                durationMinutes = travelMin,
-                                                notes = "",
-                                                businessPurpose = "",
-                                                supplierOrArea = null,
-                                                isBusiness = true,
-                                                runId = null,
-                                                currencyCode = null,
-                                                mileageRateMicros = null,
-                                            )
-                                        )
-                                    }
-
-                                    runCatching { AppGraph.geofenceSyncManager.scheduleSync("home_current_trip_complete_to_home") }
-
-                                    homeTripStatus = "Completed to Home."
-                                    showHomeArrivalDialog = false
-                                } catch (e: Exception) {
-                                    homeTripStatus = e.message ?: "Failed to complete to Home"
-                                } finally {
-                                    homeTripBusy = false
-                                }
-                            }
-                        },
-                    ) {
-                        Text("Complete")
-                    }
-                },
-                dismissButton = {
-                    TextButton(enabled = !homeTripBusy, onClick = { showHomeArrivalDialog = false }) {
-                        Text("Cancel")
-                    }
-                },
+                onDismiss = { showSetHomeConfirm = false },
             )
         }
 
@@ -593,22 +551,25 @@ fun HomeScreen(
 
 @Composable
 private fun CurrentTripCard(
-    trips: List<TripEntity>,
+    trips: List<TripEntity>?,
     expanded: Boolean,
     status: String?,
     homeTripBusy: Boolean,
+    homeDistanceMeters: Int,
     onToggleExpanded: () -> Unit,
     onCompleteToHome: () -> Unit,
 ) {
+    val safeTrips = trips.orEmpty()
+    val hasRun = safeTrips.isNotEmpty()
     val green = Color(0xFF2E7D32)
-    val startLabel = remember(trips) {
+    val startLabel = remember(safeTrips) {
         when {
-            trips.isNotEmpty() -> trips.first().startLabelSnapshot.ifBlank { "Start" }
+            safeTrips.isNotEmpty() -> safeTrips.first().startLabelSnapshot.ifBlank { "Start" }
             else -> "Start"
         }
     }
-    val totalDistanceMeters = remember(trips) { trips.sumOf { it.distanceMeters.coerceAtLeast(0) } }
-    val totalMinutes = remember(trips) { trips.sumOf { it.durationMinutes.coerceAtLeast(0) } }
+    val totalDistanceMeters = remember(safeTrips) { safeTrips.sumOf { it.distanceMeters.coerceAtLeast(0) } }
+    val totalMinutes = remember(safeTrips) { safeTrips.sumOf { it.durationMinutes.coerceAtLeast(0) } }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -662,7 +623,7 @@ private fun CurrentTripCard(
                 }
             }
 
-            Column(modifier = Modifier.padding(12.dp)) {
+            Column(modifier = Modifier.padding(12.dp)) content@{
                 if (status != null) {
                     Text(
                         text = status,
@@ -672,7 +633,16 @@ private fun CurrentTripCard(
                     Spacer(Modifier.height(6.dp))
                 }
 
-                if (!expanded) return@Column
+                if (!expanded) return@content
+
+                if (!hasRun) {
+                    Text(
+                        text = "No current trip found.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                    return@content
+                }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(Modifier.height(6.dp))
@@ -685,7 +655,7 @@ private fun CurrentTripCard(
                         maxLines = 2,
                     )
                     Text(
-                        text = trips.firstOrNull()?.let { formatTime(it.startedAt, it.timeZoneId) }.orEmpty(),
+                        text = safeTrips.firstOrNull()?.let { formatTime(it.startedAt, it.timeZoneId) }.orEmpty(),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                         maxLines = 1,
@@ -694,7 +664,7 @@ private fun CurrentTripCard(
 
                 Spacer(Modifier.height(6.dp))
 
-                trips.forEachIndexed { idx, t ->
+                safeTrips.forEachIndexed { idx, t ->
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                         Text(
                             text = t.storeNameSnapshot.ifBlank { "Stop" },
@@ -710,7 +680,7 @@ private fun CurrentTripCard(
                         )
                     }
 
-                    if (idx != trips.lastIndex) {
+                    if (idx != safeTrips.lastIndex) {
                         Spacer(Modifier.height(6.dp))
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         Spacer(Modifier.height(6.dp))
@@ -729,33 +699,49 @@ private fun CurrentTripCard(
                         modifier = Modifier.weight(1f),
                     )
 
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = green,
-                        tonalElevation = 0.dp,
-                    ) {
-                        IconButton(
-                            onClick = onCompleteToHome,
-                            enabled = !homeTripBusy,
-                            modifier = Modifier.size(40.dp),
-                        ) {
-                            Box(modifier = Modifier.size(24.dp)) {
-                                Icon(
-                                    imageVector = Icons.Filled.Home,
-                                    contentDescription = "Complete to Home",
-                                    tint = Color.White,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                                Icon(
-                                    imageVector = Icons.Filled.Add,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .size(12.dp),
-                                )
-                            }
+                    val green = Color(0xFF2E7D32)
+                    val distanceLabel = remember(homeDistanceMeters) {
+                        if (homeDistanceMeters <= 0 || homeDistanceMeters == Int.MAX_VALUE) {
+                            "—"
+                        } else {
+                            val km = homeDistanceMeters / 1000.0
+                            if (km < 10) String.format(java.util.Locale.getDefault(), "%.1f", km)
+                            else String.format(java.util.Locale.getDefault(), "%.0f", km)
                         }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(39.dp)
+                            .clickable(
+                                enabled = !homeTripBusy && hasRun,
+                                onClick = onCompleteToHome,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Home,
+                            contentDescription = "Home",
+                            tint = green,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+
+                        // Some Material home glyphs have a door cutout; cover it so the icon reads as solid.
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 6.dp)
+                                .size(width = 14.dp, height = 10.dp)
+                                .background(green),
+                        )
+
+                        Text(
+                            text = distanceLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
@@ -772,14 +758,13 @@ private fun rememberCurrentRun(trips: List<TripEntity>): List<TripEntity>? {
             .groupBy { it.runId ?: -it.id }
             .mapValues { (_, g) -> g.sortedBy { it.startedAt } }
 
-        val mostRecentGroup = groups.values
-            .maxByOrNull { g -> g.maxOfOrNull { it.endedAt } ?: Instant.EPOCH }
-            ?: return@remember null
+        val openGroups = groups.values.mapNotNull { g ->
+            val last = g.maxByOrNull { it.endedAt } ?: return@mapNotNull null
+            if (last.endPlaceType == PlaceType.HOME) return@mapNotNull null
+            g
+        }
 
-        val last = mostRecentGroup.maxByOrNull { it.endedAt } ?: return@remember null
-        if (last.endPlaceType == PlaceType.HOME) return@remember null
-
-        mostRecentGroup
+        openGroups.maxByOrNull { g -> g.maxOfOrNull { it.endedAt } ?: Instant.EPOCH }
     }
 }
 
@@ -801,6 +786,23 @@ private fun formatTotalMinutes(mins: Int): String {
     val h = safe / 60
     val m = safe % 60
     return if (h <= 0) "${m}m" else "${h}h ${m}m"
+}
+
+private fun haversineMeters(
+    lat1: Double,
+    lon1: Double,
+    lat2: Double,
+    lon2: Double,
+): Int {
+    val r = 6_371_000.0
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return (r * c).toInt().coerceAtLeast(0)
 }
 
 private suspend fun importHomeTileIconToAppFiles(

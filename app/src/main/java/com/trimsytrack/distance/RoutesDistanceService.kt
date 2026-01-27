@@ -65,26 +65,38 @@ class RoutesDistanceService(
                 throw IllegalStateException("Routes API returned no routes")
             }
 
-            val distanceMeters = first["distanceMeters"]
-                ?.jsonPrimitive
-                ?.content
-                ?.toIntOrNull()
+            val distanceMetersRaw = first["distanceMeters"]?.jsonPrimitive?.content
+            val distanceMetersParsed = distanceMetersRaw?.toIntOrNull()
 
             // duration is typically a string like "123s"
             val durationRaw = first["duration"]?.jsonPrimitive?.content
-            val durationSeconds = durationRaw?.removeSuffix("s")?.toLongOrNull() ?: 0L
+            val durationSecondsParsed = durationRaw?.removeSuffix("s")?.toLongOrNull()
 
             val polyline = first["polyline"]?.jsonObject?.get("encodedPolyline")?.jsonPrimitive?.content
 
-            if (distanceMeters == null) {
-                throw IllegalStateException("Routes API missing distanceMeters")
+            val fallbackDistanceMeters = haversineMeters(startLat, startLng, destLat, destLng)
+            val distanceMeters = (distanceMetersParsed ?: fallbackDistanceMeters).coerceAtLeast(0)
+
+            // If duration is missing, estimate from distance (use a conservative city-driving speed).
+            // 40 km/h ~= 11.11 m/s
+            val durationSeconds = (durationSecondsParsed
+                ?: if (distanceMeters > 0) (distanceMeters / 11.11).toLong().coerceAtLeast(1L) else 0L
+                ).coerceAtLeast(0L)
+
+            val usedFallback = (distanceMetersParsed == null) || (durationSecondsParsed == null)
+            if (usedFallback) {
+                Log.w(
+                    tag,
+                    "Routes API missing fields (distanceMeters=$distanceMetersRaw, duration=$durationRaw). " +
+                        "Using fallback distance=${fallbackDistanceMeters}m and duration=${durationSeconds}s",
+                )
             }
 
             RouteResult(
                 distanceMeters = distanceMeters.coerceAtLeast(0),
                 durationSeconds = durationSeconds.coerceAtLeast(0L),
                 routePolyline = polyline,
-                source = "GOOGLE",
+                source = if (usedFallback) "GOOGLE_FALLBACK" else "GOOGLE",
             )
         } catch (t: Throwable) {
             Log.w(tag, "Routes API: compute failed", t)
