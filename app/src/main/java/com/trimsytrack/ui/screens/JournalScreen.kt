@@ -74,6 +74,7 @@ import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.logic.RunGrouping
+import com.trimsytrack.ui.theme.TrimsyGreen
 import coil.compose.AsyncImage
 import androidx.compose.ui.window.Dialog
 import java.time.DayOfWeek
@@ -325,10 +326,6 @@ fun JournalScreen(
             }
     }
 
-    val buckets = remember(completedRuns, today, period) {
-        buildPeriodBuckets(today = today, period = period, runs = completedRuns)
-    }
-
     val periodRuns = remember(completedRuns, today, period) {
         val start = when (period) {
             JournalPeriod.Week -> today.minusDays(6)
@@ -381,40 +378,26 @@ fun JournalScreen(
             item {
                 val headerShape = RoundedCornerShape(12.dp)
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    colors = CardDefaults.cardColors(containerColor = TrimsyGreen),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                     shape = headerShape,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, headerShape),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text("Trips", style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(8.dp))
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            TripListPeriodButton(label = "Today", selected = tripListPeriod == TripListPeriod.Today) {
-                                tripListPeriod = TripListPeriod.Today
-                            }
-                            TripListPeriodButton(label = "Week", selected = tripListPeriod == TripListPeriod.Week) {
-                                tripListPeriod = TripListPeriod.Week
-                            }
-                            TripListPeriodButton(label = "Month", selected = tripListPeriod == TripListPeriod.Month) {
-                                tripListPeriod = TripListPeriod.Month
-                            }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        TripListPeriodButton(label = "Today", selected = tripListPeriod == TripListPeriod.Today) {
+                            tripListPeriod = TripListPeriod.Today
                         }
-
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "Showing: ${displayRuns.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                        )
+                        TripListPeriodButton(label = "Week", selected = tripListPeriod == TripListPeriod.Week) {
+                            tripListPeriod = TripListPeriod.Week
+                        }
+                        TripListPeriodButton(label = "Month", selected = tripListPeriod == TripListPeriod.Month) {
+                            tripListPeriod = TripListPeriod.Month
+                        }
                     }
                 }
 
@@ -480,52 +463,7 @@ fun JournalScreen(
             }
 
             item {
-                if (buckets.any { it.tripCount > 0 }) {
-                    SimpleBarChart(
-                        title = "Distance (km)",
-                        values = buckets.map { it.km.toFloat() },
-                        labels = buckets.map { it.label },
-                        barColor = MaterialTheme.colorScheme.primary,
-                    )
-
-                    Spacer(Modifier.height(14.dp))
-
-                    SimpleBarChart(
-                        title = "Trips",
-                        values = buckets.map { it.tripCount.toFloat() },
-                        labels = buckets.map { it.label },
-                        barColor = MaterialTheme.colorScheme.secondary,
-                    )
-
-                    if (buckets.any { it.stopCount > 0 }) {
-                        Spacer(Modifier.height(14.dp))
-
-                        SimpleBarChart(
-                            title = "Stops",
-                            values = buckets.map { it.stopCount.toFloat() },
-                            labels = buckets.map { it.label },
-                            barColor = MaterialTheme.colorScheme.tertiary,
-                        )
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-                } else {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            "No graph data yet — create a few trips and the graphs will appear here.",
-                            modifier = Modifier.padding(14.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                        )
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-                }
+                // Graphs removed.
             }
         }
     }
@@ -1027,13 +965,6 @@ private fun FullscreenPhotoViewer(
     }
 }
 
-private data class DayStat(
-    val label: String,
-    val tripCount: Int,
-    val km: Double,
-    val stopCount: Int = 0,
-)
-
 private data class CompletedRunStat(
     val key: Long,
     val day: LocalDate,
@@ -1062,12 +993,10 @@ private fun PeriodPickerRow(
 ) {
     val shape = RoundedCornerShape(12.dp)
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(containerColor = TrimsyGreen),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         shape = shape,
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
             modifier = Modifier
@@ -1102,186 +1031,14 @@ private fun TripListPeriodButton(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    if (selected) {
-        OutlinedButton(
-            onClick = onClick,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.65f)),
-        ) {
-            Text(label)
-        }
-    } else {
-        TextButton(
-            onClick = onClick,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-            colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
-        ) {
-            Text(label)
-        }
-    }
-}
-
-private fun buildPeriodBuckets(
-    today: LocalDate,
-    period: JournalPeriod,
-    runs: List<CompletedRunStat>,
-): List<DayStat> {
-    return when (period) {
-        JournalPeriod.Week -> buildDailyBuckets(today = today, days = 7, runs = runs)
-        JournalPeriod.Month -> buildDailyBuckets(today = today, days = 30, runs = runs)
-        JournalPeriod.Quarter -> buildWeeklyBuckets(today = today, weeks = 13, runs = runs)
-        JournalPeriod.Year -> buildMonthlyBuckets(today = today, months = 12, runs = runs)
-    }
-}
-
-private fun buildDailyBuckets(today: LocalDate, days: Int, runs: List<CompletedRunStat>): List<DayStat> {
-    val byDay = runs.groupBy { it.day }
-    val count = max(1, days)
-    val daysList = (count - 1 downTo 0).map { today.minusDays(it.toLong()) }
-    return daysList.map { day ->
-        val dayRuns = byDay[day].orEmpty()
-        DayStat(
-            label = day.dayOfMonth.toString(),
-            tripCount = dayRuns.size,
-            km = dayRuns.sumOf { it.distanceMeters } / 1000.0,
-            stopCount = dayRuns.sumOf { it.stops },
-        )
-    }
-}
-
-private fun buildWeeklyBuckets(today: LocalDate, weeks: Int, runs: List<CompletedRunStat>): List<DayStat> {
-    val count = max(1, weeks)
-    val start = today.minusDays((count * 7L) - 1L)
-    val startWeek = start.startOfWeek()
-    val endWeek = today.startOfWeek()
-
-    val byWeek = runs
-        .filter { it.day >= start && it.day <= today }
-        .groupBy { it.day.startOfWeek() }
-
-    val weeksList = generateSequence(startWeek) { prev ->
-        val next = prev.plusWeeks(1)
-        if (next.isAfter(endWeek)) null else next
-    }.toList()
-
-    return weeksList.map { ws ->
-        val weekRuns = byWeek[ws].orEmpty()
-        DayStat(
-            label = "${ws.monthValue}/${ws.dayOfMonth}",
-            tripCount = weekRuns.size,
-            km = weekRuns.sumOf { it.distanceMeters } / 1000.0,
-            stopCount = weekRuns.sumOf { it.stops },
-        )
-    }
-}
-
-private fun buildMonthlyBuckets(today: LocalDate, months: Int, runs: List<CompletedRunStat>): List<DayStat> {
-    val count = max(1, months)
-    val endYm = YearMonth.from(today)
-    val startYm = endYm.minusMonths((count - 1).toLong())
-
-    val byMonth = runs
-        .filter { it.day >= startYm.atDay(1) && it.day <= today }
-        .groupBy { YearMonth.from(it.day) }
-
-    val monthsList = generateSequence(startYm) { prev ->
-        val next = prev.plusMonths(1)
-        if (next.isAfter(endYm)) null else next
-    }.toList()
-
-    val locale = Locale.getDefault()
-    return monthsList.map { ym ->
-        val mRuns = byMonth[ym].orEmpty()
-        val label = ym.month.getDisplayName(TextStyle.SHORT, locale)
-        DayStat(
-            label = label,
-            tripCount = mRuns.size,
-            km = mRuns.sumOf { it.distanceMeters } / 1000.0,
-            stopCount = mRuns.sumOf { it.stops },
-        )
-    }
-}
-
-private fun LocalDate.startOfWeek(): LocalDate {
-    val dow = dayOfWeek
-    val delta = (dow.value - DayOfWeek.MONDAY.value).toLong()
-    return this.minusDays(delta)
-}
-
-@Composable
-private fun SimpleBarChart(
-    title: String,
-    values: List<Float>,
-    labels: List<String>,
-    barColor: Color,
-) {
-    val shape = RoundedCornerShape(18.dp)
-    val maxValue = values.maxOrNull()?.coerceAtLeast(0f) ?: 0f
-    val safeMax = if (maxValue <= 0f) 1f else maxValue
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        shape = shape,
-        modifier = Modifier.fillMaxWidth(),
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(10.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 120.dp)
-                    .clip(RoundedCornerShape(14.dp)),
-            ) {
-                Canvas(modifier = Modifier.matchParentSize()) {
-                    val n = values.size.coerceAtLeast(1)
-                    val gap = size.width * 0.015f
-                    val totalGap = gap * (n + 1)
-                    val barWidth = ((size.width - totalGap) / n).coerceAtLeast(1f)
-
-                    val baselineY = size.height
-                    values.forEachIndexed { i, v ->
-                        val h = (v.coerceAtLeast(0f) / safeMax) * (size.height * 0.92f)
-                        val left = gap + i * (barWidth + gap)
-                        val top = baselineY - h
-                        drawRoundRect(
-                            color = barColor,
-                            topLeft = androidx.compose.ui.geometry.Offset(left, top),
-                            size = androidx.compose.ui.geometry.Size(barWidth, h),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(
-                                x = barWidth * 0.35f,
-                                y = barWidth * 0.35f,
-                            ),
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            // Minimal x-axis labels: aim for ~7 labels total.
-            val step = max(1, labels.size / 7)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                labels.forEachIndexed { idx, l ->
-                    if (idx % step == 0 || idx == labels.lastIndex) {
-                        Text(
-                            l,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.weight(1f, fill = true),
-                        )
-                    } else {
-                        Spacer(Modifier.weight(1f, fill = true))
-                    }
-                }
-            }
-        }
+        Text(
+            label,
+            color = if (selected) Color.White else Color.White.copy(alpha = 0.75f),
+        )
     }
 }

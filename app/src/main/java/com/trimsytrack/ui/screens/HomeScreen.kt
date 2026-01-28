@@ -48,8 +48,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Palette
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.Home
 import coil.compose.AsyncImage
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -234,23 +232,6 @@ fun HomeScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(horizontal = 22.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 18.dp),
-        ) {
-            IconButton(
-                onClick = onOpenSettings,
-                modifier = Modifier.size(44.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Settings,
-                    contentDescription = "Settings",
-                    tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
-                )
-            }
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -269,6 +250,7 @@ fun HomeScreen(
                     haversineMeters(last.storeLatSnapshot, last.storeLngSnapshot, homeLat, homeLng)
                 },
                 onToggleExpanded = { currentTripExpanded = !currentTripExpanded },
+                onOpenSettings = onOpenSettings,
                 onCompleteToHome = {
                     if (homeTripBusy) return@CurrentTripCard
                     if (currentRun.isNullOrEmpty()) {
@@ -490,6 +472,7 @@ private fun CurrentTripCard(
     homeTripBusy: Boolean,
     homeDistanceMeters: Int,
     onToggleExpanded: () -> Unit,
+    onOpenSettings: () -> Unit,
     onCompleteToHome: () -> Unit,
 ) {
     val safeTrips = trips.orEmpty()
@@ -521,6 +504,7 @@ private fun CurrentTripCard(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .clickable { onToggleExpanded() }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -544,12 +528,12 @@ private fun CurrentTripCard(
                     )
 
                     IconButton(
-                        onClick = onToggleExpanded,
+                        onClick = onOpenSettings,
                         modifier = Modifier.size(40.dp),
                     ) {
                         Icon(
-                            imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                            contentDescription = if (expanded) "Collapse" else "Expand",
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "Settings",
                             tint = Color.White,
                         )
                     }

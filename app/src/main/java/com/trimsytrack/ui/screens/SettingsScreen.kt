@@ -182,10 +182,6 @@ fun SettingsScreen(
 
     val uid by AppGraph.settings.uid.collectAsState(initial = "")
     val trackingEnabled by AppGraph.settings.trackingEnabled.collectAsState(initial = false)
-    val dwell by AppGraph.settings.dwellMinutes.collectAsState(initial = 5)
-    val radius by AppGraph.settings.radiusMeters.collectAsState(initial = 120)
-    val limit by AppGraph.settings.dailyPromptLimit.collectAsState(initial = 20)
-    val suppression by AppGraph.settings.suppressionMinutes.collectAsState(initial = 240)
 
     val activeStartMinutes by AppGraph.settings.activeStartMinutes.collectAsState(initial = 7 * 60)
     val activeEndMinutes by AppGraph.settings.activeEndMinutes.collectAsState(initial = 18 * 60)
@@ -227,10 +223,6 @@ fun SettingsScreen(
     val trackEventsBackendSupported by AppGraph.settings.trackEventsBackendSupported.collectAsState(initial = true)
 
     val dataStoreLoaded by AppGraph.settings.dataStoreLoaded.collectAsState(initial = false)
-    val manualTripSearchRadiusKm by AppGraph.settings.manualTripSearchRadiusKm.collectAsState(initial = 50)
-    val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
-    val manualTripEnabledCategoryLabels by AppGraph.settings.manualTripEnabledCategoryLabels.collectAsState(initial = emptySet())
-    val manualTripCategoriesInitialized by AppGraph.settings.manualTripCategoriesInitialized.collectAsState(initial = false)
 
     val receiptReminderMinutes by AppGraph.settings.receiptReminderMinutes.collectAsState(initial = 17 * 60)
     val receiptReminderMessage by AppGraph.settings.receiptReminderMessage.collectAsState(initial = "Don't forget to add the media")
@@ -716,6 +708,18 @@ fun SettingsScreen(
         } else {
             val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
             pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+        }
+    }
+
+    // Tracking is required for the app to function as intended; keep it enabled.
+    LaunchedEffect(dataStoreLoaded, trackingEnabled, hasFineLocation, hasBackgroundLocation, hasNotifications) {
+        if (!dataStoreLoaded) return@LaunchedEffect
+        if (!trackingEnabled) {
+            AppGraph.settings.setTrackingEnabled(true)
+            val notificationsOk = Build.VERSION.SDK_INT < 33 || hasNotifications
+            if (hasFineLocation && hasBackgroundLocation && notificationsOk) {
+                AppGraph.geofenceSyncManager.scheduleSync("tracking_forced_on")
+            }
         }
     }
 
@@ -1913,11 +1917,12 @@ fun SettingsScreen(
                 }
             }
 
-            item {
-                SettingsAccordionCard(
-                    title = "Backend och data",
-                    subtitle = "Synk, ID och lagrad data",
-                ) {
+            if (BuildConfig.DEBUG) {
+                item {
+                    SettingsAccordionCard(
+                        title = "Backend och data",
+                        subtitle = "Synk, ID och lagrad data",
+                    ) {
                     Text(
                         "Backend",
                         style = MaterialTheme.typography.bodySmall,
@@ -2333,7 +2338,8 @@ fun SettingsScreen(
                             Text("Delete account + reset (debug)")
                         }
                     }
-                    Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(10.dp))
+                    }
                 }
             }
 
@@ -2361,36 +2367,6 @@ fun SettingsScreen(
                     title = "Spårning och behörigheter",
                     subtitle = permSubtitle,
                 ) {
-                    ListItem(
-                        headlineContent = { Text("Spårning") },
-                        supportingContent = { Text("Använder Android geofence (ingen GPS-pollning).") },
-                        trailingContent = {
-                            Switch(
-                                checked = trackingEnabled,
-                                onCheckedChange = { enabled ->
-                                    scope.launch {
-                                        if (enabled) {
-                                            val notificationsOk = Build.VERSION.SDK_INT < 33 || hasNotifications
-                                            if (!hasFineLocation || !hasBackgroundLocation || !notificationsOk) {
-                                                permissionHint.value = "Ge behörigheter först."
-                                                requestNeededPermissions()
-                                                return@launch
-                                            }
-                                            permissionHint.value = null
-                                            AppGraph.settings.setTrackingEnabled(true)
-                                            AppGraph.geofenceSyncManager.scheduleSync("user_enabled")
-                                        } else {
-                                            AppGraph.settings.setTrackingEnabled(false)
-                                            AppGraph.geofenceSyncManager.scheduleDisable("user_disabled")
-                                        }
-                                    }
-                                },
-                            )
-                        },
-                    )
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
                     ListItem(
                         headlineContent = { Text("Behörigheter") },
                         supportingContent = {
@@ -2454,72 +2430,6 @@ fun SettingsScreen(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                         )
                     }
-                }
-            }
-
-            item {
-                SettingsAccordionCard(
-                    title = "Automatiska frågor",
-                    subtitle = "Tid ${dwell}m • Radie ${radius}m",
-                ) {
-                    SettingStepper(
-                        label = "Tid innan fråga (minuter)",
-                        description = "Vänta så här länge innan en fråga visas.",
-                        value = dwell,
-                        min = 1,
-                        max = 60,
-                        onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
-                    )
-                    SettingStepper(
-                        label = "Upptäcktsradie (meter)",
-                        description = "Hur nära du måste vara för att räknas som 'där'.",
-                        value = radius,
-                        min = 75,
-                        max = 150,
-                        onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
-                    )
-                    SettingStepper(
-                        label = "Max frågor per dag",
-                        description = "Högsta antal frågor per dag.",
-                        value = limit,
-                        min = 1,
-                        max = 200,
-                        onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
-                    )
-                    SettingStepper(
-                        label = "Tystnad efter Avfärda (minuter)",
-                        description = "Efter Avfärda väntar den så här länge.",
-                        value = suppression,
-                        min = 0,
-                        max = 24 * 60,
-                        onChange = { scope.launch { AppGraph.settings.setSuppressionMinutes(it) } },
-                    )
-
-                    OutlinedButton(
-                        onClick = { scope.launch { AppGraph.geofenceSyncManager.scheduleSync("manual_sync") } },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                    ) { Text("Update places") }
-
-                    Spacer(Modifier.height(10.dp))
-                }
-            }
-
-            item {
-                SettingsAccordionCard(
-                    title = "Manual trip",
-                    subtitle = "Default search distance: ${manualTripSearchRadiusKm} km",
-                ) {
-                    SettingStepper(
-                        label = "Default search distance (km)",
-                        description = "Used on the manual trip search screen.",
-                        value = manualTripSearchRadiusKm,
-                        min = 1,
-                        max = 500,
-                        onChange = { km -> scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) } },
-                    )
-                    Spacer(Modifier.height(10.dp))
                 }
             }
 
@@ -2928,33 +2838,6 @@ fun SettingsScreen(
                 item {
                     SettingsSectionCard(title = "Spårning och behörigheter") {
                         ListItem(
-                            headlineContent = { Text("Spårning") },
-                            supportingContent = { Text("Använder Android geofence (ingen GPS-pollning).") },
-                            trailingContent = {
-                                Switch(
-                                    checked = trackingEnabled,
-                                    onCheckedChange = { enabled ->
-                                        scope.launch {
-                                            if (enabled) {
-                                                if (!hasFineLocation || !hasBackgroundLocation) {
-                                                    permissionHint.value = "Ge behörigheter först."
-                                                    requestNeededPermissions()
-                                                    return@launch
-                                                }
-                                                permissionHint.value = null
-                                                AppGraph.settings.setTrackingEnabled(true)
-                                                AppGraph.geofenceSyncManager.scheduleSync("user_enabled")
-                                            } else {
-                                                AppGraph.settings.setTrackingEnabled(false)
-                                                AppGraph.geofenceSyncManager.scheduleDisable("user_disabled")
-                                            }
-                                        }
-                                    }
-                                )
-                            }
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        ListItem(
                             headlineContent = { Text("Behörigheter") },
                             supportingContent = {
                                 Text(
@@ -2994,88 +2877,6 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             )
-                        }
-                    }
-                }
-
-                item {
-                    SettingsSectionCard(title = "Automatiska frågor") {
-                        ListItem(
-                            headlineContent = { Text("Automatiska frågor") },
-                            supportingContent = {
-                                Text(
-                                    "Frågar automatiskt när du stannar. Tid ${dwell}m • Radie ${radius}m",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = if (automationExpanded) "Collapse" else "Expand",
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { automationExpanded = !automationExpanded },
-                        )
-
-                        if (automationExpanded) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                            Text(
-                                "Tid = hur länge du måste stanna innan den frågar.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            )
-
-                            SettingStepper(
-                                label = "Tid innan fråga (minuter)",
-                                description = "Vänta så här länge innan en fråga visas.",
-                                value = dwell,
-                                min = 1,
-                                max = 60,
-                                onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
-                            )
-                            SettingStepper(
-                                label = "Upptäcktsradie (meter)",
-                                description = "Hur nära du måste vara för att räknas som 'där'.",
-                                value = radius,
-                                min = 75,
-                                max = 150,
-                                onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
-                            )
-                            SettingStepper(
-                                label = "Max frågor per dag",
-                                description = "Högsta antal frågor per dag.",
-                                value = limit,
-                                min = 1,
-                                max = 200,
-                                onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
-                            )
-                            SettingStepper(
-                                label = "Tystnad efter Avfärda (minuter)",
-                                description = "Efter Avfärda väntar den så här länge.",
-                                value = suppression,
-                                min = 0,
-                                max = 24 * 60,
-                                onChange = { scope.launch { AppGraph.settings.setSuppressionMinutes(it) } },
-                            )
-
-                            OutlinedButton(
-                                onClick = { scope.launch { AppGraph.geofenceSyncManager.scheduleSync("manual_sync") } },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                            ) { Text("Update places") }
-                            Text(
-                                "Uppdaterar telefonens 'geofence'-lista.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                            )
-
-                            Spacer(Modifier.height(12.dp))
                         }
                     }
                 }
@@ -3300,63 +3101,6 @@ fun SettingsScreen(
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-
-                item {
-                    SettingsSectionCard(title = "Manual trip") {
-                        SettingStepper(
-                            label = "Default search distance (km)",
-                            description = "Used on the manual trip search screen.",
-                            value = manualTripSearchRadiusKm,
-                            min = 1,
-                            max = 500,
-                            onChange = { km -> scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) } },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Places bar categories") },
-                            supportingContent = {
-                                Text(
-                                    "Choose what shows up in the Places menu.",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                )
-                            },
-                        )
-
-                        manualTripCategoryConfigs.forEach { cfg ->
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            val enabled = manualTripEnabledCategoryLabels.contains(cfg.label)
-                            ListItem(
-                                headlineContent = { Text(cfg.label) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val next = if (enabled) {
-                                            manualTripEnabledCategoryLabels - cfg.label
-                                        } else {
-                                            manualTripEnabledCategoryLabels + cfg.label
-                                        }
-                                        scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
-                                    },
-                                trailingContent = {
-                                    Checkbox(checked = enabled, onCheckedChange = null)
-                                },
-                            )
-                        }
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        OutlinedButton(
-                            onClick = { scope.launch { AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId) } },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                        ) {
-                            Text("Reset categories to profile defaults")
                         }
                     }
                 }
@@ -3786,92 +3530,8 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Manual trip") {
-                        SettingStepper(
-                            label = "Default search distance (km)",
-                            description = "Used on the manual trip search screen.",
-                            value = manualTripSearchRadiusKm,
-                            min = 1,
-                            max = 500,
-                            onChange = { km -> scope.launch { AppGraph.settings.setManualTripSearchRadiusKm(km) } },
-                        )
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        ListItem(
-                            headlineContent = { Text("Places bar categories") },
-                            supportingContent = {
-                                Text(
-                                    "Choose what shows up in the Places menu.",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                )
-                            },
-                        )
-
-                        manualTripCategoryConfigs.forEach { cfg ->
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            val enabled = manualTripEnabledCategoryLabels.contains(cfg.label)
-                            ListItem(
-                                headlineContent = { Text(cfg.label) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val next = if (enabled) {
-                                            manualTripEnabledCategoryLabels - cfg.label
-                                        } else {
-                                            manualTripEnabledCategoryLabels + cfg.label
-                                        }
-                                        scope.launch { AppGraph.settings.setManualTripEnabledCategoryLabels(next) }
-                                    },
-                                trailingContent = {
-                                    Checkbox(checked = enabled, onCheckedChange = null)
-                                },
-                            )
-                        }
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                        OutlinedButton(
-                            onClick = { scope.launch { AppGraph.settings.resetManualTripCategoriesToDefaults(subProfileIdOverride = subProfileId) } },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                        ) {
-                            Text("Reset categories to profile defaults")
-                        }
-                    }
-                }
-
-                item {
                     SettingsSectionCard(title = "Spårning och behörigheter") {
                         // Reuse the existing card content by showing the same controls as in the legacy GPS tab.
-                        ListItem(
-                            headlineContent = { Text("Spårning") },
-                            supportingContent = { Text("Använder Android geofence (ingen GPS-pollning).") },
-                            trailingContent = {
-                                Switch(
-                                    checked = trackingEnabled,
-                                    onCheckedChange = { enabled ->
-                                        scope.launch {
-                                            if (enabled) {
-                                                if (!hasFineLocation || !hasBackgroundLocation) {
-                                                    permissionHint.value = "Ge behörigheter först."
-                                                    requestNeededPermissions()
-                                                    return@launch
-                                                }
-                                                permissionHint.value = null
-                                                AppGraph.settings.setTrackingEnabled(true)
-                                                AppGraph.geofenceSyncManager.scheduleSync("user_enabled")
-                                            } else {
-                                                AppGraph.settings.setTrackingEnabled(false)
-                                                AppGraph.geofenceSyncManager.scheduleDisable("user_disabled")
-                                            }
-                                        }
-                                    }
-                                )
-                            }
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         ListItem(
                             headlineContent = { Text("Behörigheter") },
                             supportingContent = {
@@ -3912,88 +3572,6 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             )
-                        }
-                    }
-                }
-
-                item {
-                    SettingsSectionCard(title = "Automatiska frågor") {
-                        ListItem(
-                            headlineContent = { Text("Automatiska frågor") },
-                            supportingContent = {
-                                Text(
-                                    "Frågar automatiskt när du stannar. Tid ${dwell}m • Radie ${radius}m",
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    if (automationExpanded) Icons.Filled.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = if (automationExpanded) "Collapse" else "Expand",
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { automationExpanded = !automationExpanded },
-                        )
-
-                        if (automationExpanded) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                            Text(
-                                "Tid = hur länge du måste stanna innan den frågar.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            )
-
-                            SettingStepper(
-                                label = "Tid innan fråga (minuter)",
-                                description = "Vänta så här länge innan en fråga visas.",
-                                value = dwell,
-                                min = 1,
-                                max = 60,
-                                onChange = { scope.launch { AppGraph.settings.setDwellMinutes(it) } },
-                            )
-                            SettingStepper(
-                                label = "Upptäcktsradie (meter)",
-                                description = "Hur nära du måste vara för att räknas som 'där'.",
-                                value = radius,
-                                min = 75,
-                                max = 150,
-                                onChange = { scope.launch { AppGraph.settings.setRadiusMeters(it) } },
-                            )
-                            SettingStepper(
-                                label = "Max frågor per dag",
-                                description = "Högsta antal frågor per dag.",
-                                value = limit,
-                                min = 1,
-                                max = 200,
-                                onChange = { scope.launch { AppGraph.settings.setDailyPromptLimit(it) } },
-                            )
-                            SettingStepper(
-                                label = "Tystnad efter Avfärda (minuter)",
-                                description = "Efter Avfärda väntar den så här länge.",
-                                value = suppression,
-                                min = 0,
-                                max = 24 * 60,
-                                onChange = { scope.launch { AppGraph.settings.setSuppressionMinutes(it) } },
-                            )
-
-                            OutlinedButton(
-                                onClick = { scope.launch { AppGraph.geofenceSyncManager.scheduleSync("manual_sync") } },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                            ) { Text("Update places") }
-                            Text(
-                                "Uppdaterar telefonens 'geofence'-lista.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 0.dp),
-                            )
-
-                            Spacer(Modifier.height(12.dp))
                         }
                     }
                 }

@@ -48,7 +48,7 @@ data class DriverSettings(
     val profileName: String = "",
     val onboardingCompleted: Boolean = false,
 
-    val trackingEnabled: Boolean = false,
+    val trackingEnabled: Boolean = true,
     val regionCode: String = "",
 
     val activeStartMinutes: Int = 0,

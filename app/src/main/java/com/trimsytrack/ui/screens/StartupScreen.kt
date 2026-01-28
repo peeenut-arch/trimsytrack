@@ -1,18 +1,23 @@
 package com.trimsytrack.ui.screens
 
 import android.util.Log
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,13 +28,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.FirebaseApp
 import com.trimsytrack.AppGraph
 import com.trimsytrack.BuildConfig
+import com.trimsytrack.R
 import com.trimsytrack.backend.BackendBlockedException
 import com.trimsytrack.data.driverdata.DriverDataSnapshotUploadWorker
 import com.trimsytrack.data.trackevents.TrackEventsCapabilityProbeWorker
@@ -37,7 +48,9 @@ import com.trimsytrack.data.trackevents.TrackEventsOutboxWorker
 import com.trimsytrack.debug.DebuggLogStore
 import com.trimsytrack.system.BackendBaselineProbe
 import com.trimsytrack.system.HardBlockCode
+import com.trimsytrack.ui.theme.TrimsyGreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -337,51 +350,155 @@ fun StartupScreen(
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(20.dp),
-        contentAlignment = Alignment.Center,
-    ) {
+    val terminalStatus: String? = when {
+        isCrosschecking -> crosscheckMessage
+        state is StartupState.Loading -> "[handshake] contacting backend…"
+        state is StartupState.Ready -> "[startup] finalizing…"
+        else -> null
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        Image(
+            painter = painterResource(id = R.drawable.splash),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+        )
+
+        // Place the "terminal" status box under the centered splash artwork.
+        // The splash bitmap already contains the logo; we avoid rendering a second logo on top.
+        if (terminalStatus != null) {
+            TerminalStatusBox(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = maxHeight * 0.66f)
+                    .fillMaxWidth(0.43f),
+                message = terminalStatus,
+                showSpinner = isCrosschecking || state is StartupState.Loading || state is StartupState.Ready,
+            )
+        }
+
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 22.dp, vertical = 28.dp),
+            verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+
             when {
-                isCrosschecking -> {
-                    CircularProgressIndicator()
-                    Text(crosscheckMessage)
-                }
-                state is StartupState.Loading -> {
-                    CircularProgressIndicator()
-                    Text("Checking account…")
-                }
                 state is StartupState.Blocked -> {
+                    Spacer(Modifier.height(18.dp))
                     val s = state as StartupState.Blocked
-                    Text("Blocked", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text(s.message)
-                    Spacer(Modifier.height(6.dp))
-                    Button(onClick = onSignOut) { Text("Sign out") }
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Color.Black.copy(alpha = 0.65f),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                "Blocked",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(s.message)
+                            Button(onClick = onSignOut) { Text("Sign out") }
+                        }
+                    }
                 }
+
                 state is StartupState.Error -> {
+                    Spacer(Modifier.height(18.dp))
                     val s = state as StartupState.Error
-                    Text("Startup error", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text(s.message)
-                    Spacer(Modifier.height(6.dp))
-                    RowButtons(
-                        onRetry = { scope.launch { runHandshake() } },
-                        onSignOut = onSignOut,
-                    )
-                }
-                state is StartupState.Ready -> {
-                    CircularProgressIndicator()
-                    Text("Loading…")
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Color.Black.copy(alpha = 0.65f),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text("Startup error", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                            Text(s.message)
+                            RowButtons(
+                                onRetry = { scope.launch { runHandshake() } },
+                                onSignOut = onSignOut,
+                            )
+                            if (!lastError.isNullOrBlank()) {
+                                Text(lastError!!, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+}
 
-            if (!lastError.isNullOrBlank() && state !is StartupState.Loading) {
-                Text(lastError!!, color = MaterialTheme.colorScheme.error)
+@Composable
+private fun TerminalStatusBox(
+    modifier: Modifier = Modifier,
+    message: String,
+    showSpinner: Boolean,
+) {
+    val textColor = Color.White
+    val shape = MaterialTheme.shapes.medium
+
+    var typedMessage by remember(message) { mutableStateOf("") }
+    LaunchedEffect(message) {
+        // Typewriter effect (slower) so the status is readable.
+        typedMessage = ""
+        for (i in 0 until message.length) {
+            typedMessage = message.substring(0, i + 1)
+            delay(55)
+        }
+    }
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth(),
+        color = Color.Black.copy(alpha = 0.72f),
+        shape = shape,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "trimsy:~$",
+                color = textColor.copy(alpha = 0.85f),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.4.sp,
+            )
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (showSpinner) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = textColor,
+                    )
+                    Spacer(Modifier.size(10.dp))
+                }
+
+                Text(
+                    text = typedMessage,
+                    color = textColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.35.sp,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }

@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -16,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -45,8 +46,8 @@ fun PermissionsRequiredScreen(
     var missing by remember { mutableStateOf(AppPermissionChecks.missingCritical(context)) }
     var batteryMissing by remember { mutableStateOf(!AppPermissionChecks.isBatteryOptimizationDisabled(context)) }
 
-    var didAutoRequest by rememberSaveable { mutableStateOf(false) }
     var didContinue by rememberSaveable { mutableStateOf(false) }
+    var didTryBackgroundLocation by rememberSaveable { mutableStateOf(false) }
 
     fun continueOnce() {
         if (didContinue) return
@@ -54,8 +55,8 @@ fun PermissionsRequiredScreen(
         onContinue()
     }
 
-    val requestPermissionsLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions(),
+    val requestFineLocationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
         onResult = {
             missing = AppPermissionChecks.missingCritical(context)
             batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
@@ -63,13 +64,14 @@ fun PermissionsRequiredScreen(
         },
     )
 
-    fun requestNow() {
-        val perms = buildList {
-            add(Manifest.permission.ACCESS_FINE_LOCATION)
-            if (android.os.Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        requestPermissionsLauncher.launch(perms.toTypedArray())
-    }
+    val requestNotificationsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = {
+            missing = AppPermissionChecks.missingCritical(context)
+            batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+            if (missing.isEmpty()) continueOnce()
+        },
+    )
 
     val requestBackgroundLocationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -82,6 +84,7 @@ fun PermissionsRequiredScreen(
 
     fun requestBackgroundLocationNow() {
         if (android.os.Build.VERSION.SDK_INT < 29) return
+        didTryBackgroundLocation = true
         requestBackgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
     }
 
@@ -121,17 +124,6 @@ fun PermissionsRequiredScreen(
         missing = AppPermissionChecks.missingCritical(context)
         batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
         if (missing.isEmpty()) continueOnce()
-
-        // Auto-request the permissions we can prompt for directly.
-        // Background location and battery optimization usually require additional user steps.
-        if (!didAutoRequest) {
-            didAutoRequest = true
-            val keys = missing.map { it.key }.toSet()
-            val shouldRequestNow = keys.contains("location_permission_foreground") || keys.contains("notifications_permission")
-            if (shouldRequestNow) {
-                requestNow()
-            }
-        }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -165,20 +157,26 @@ fun PermissionsRequiredScreen(
 
         Spacer(Modifier.height(4.dp))
 
-        if (missing.isEmpty()) {
+        // Wizard: pick the next missing requirement in a deterministic order.
+        val nextMissing = remember(missing, didTryBackgroundLocation) {
+            val byKey = missing.associateBy { it.key }
+            listOfNotNull(
+                byKey["location_permission_foreground"],
+                byKey["notifications_permission"],
+                byKey["location_services"],
+                byKey["notifications_disabled"],
+                byKey["location_permission_background"],
+            ).firstOrNull()
+        }
+
+        if (nextMissing == null) {
             Text("All set.")
             if (batteryMissing) {
                 Text(
-                    text = "Battery setting is still recommended (OEM devices may not report it correctly). You can continue.",
+                    text = "Battery optimization is still recommended for best reliability. You can adjust it later in Settings.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                 )
-                OutlinedButton(
-                    onClick = ::openBatteryOptimizationSettings,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Open battery settings")
-                }
             }
             Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) {
                 Text("Continue")
@@ -186,77 +184,63 @@ fun PermissionsRequiredScreen(
             return@Column
         }
 
-        missing.forEach { item ->
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(item.title, fontWeight = FontWeight.SemiBold)
-                Text(
-                    item.description,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-                )
-                when (item.key) {
-                    "location_services" -> {
-                        OutlinedButton(onClick = ::openLocationSettings) {
-                            Text("Open Location settings")
-                        }
-                    }
-                    "location_permission_background" -> {
-                        OutlinedButton(
-                            onClick = ::requestBackgroundLocationNow,
-                        ) {
-                            Text("Request 'Always allow' location")
-                        }
-                        OutlinedButton(onClick = ::openAppSettings) {
-                            Text("Open app settings")
-                        }
-                    }
-                    "notifications_disabled" -> {
-                        OutlinedButton(onClick = ::openNotificationSettings) {
-                            Text("Open notification settings")
-                        }
-                    }
-                    "battery_optimization" -> {
-                        OutlinedButton(onClick = ::openBatteryOptimizationSettings) {
-                            Text("Open battery settings")
-                        }
-                        OutlinedButton(onClick = ::openAppSettings) {
-                            Text("Open app settings")
-                        }
-                    }
+        Text(nextMissing.title, fontWeight = FontWeight.SemiBold)
+        Text(
+            nextMissing.description,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+        )
+
+        Spacer(Modifier.height(6.dp))
+
+        val buttonText = when (nextMissing.key) {
+            "location_permission_foreground" -> "Grant location permission"
+            "notifications_permission" -> "Grant notifications permission"
+            "location_services" -> "Open Location settings"
+            "notifications_disabled" -> "Open notification settings"
+            "location_permission_background" -> if (!didTryBackgroundLocation) "Grant 'Always allow' location" else "Open app settings"
+            else -> "Continue"
+        }
+
+        val onClick = when (nextMissing.key) {
+            "location_permission_foreground" -> ({ requestFineLocationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) })
+            "notifications_permission" -> ({
+                if (Build.VERSION.SDK_INT >= 33) {
+                    requestNotificationsLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    // Should not happen (gated in AppPermissionChecks), but keep it safe.
+                    missing = AppPermissionChecks.missingCritical(context)
+                    batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
+                    if (missing.isEmpty()) continueOnce()
                 }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        Button(
-            onClick = ::requestNow,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Request permissions")
-        }
-
-        OutlinedButton(
-            onClick = {
-                openAppSettings()
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Open app settings")
-        }
-
-        OutlinedButton(
-            onClick = {
+            })
+            "location_services" -> ({ openLocationSettings() })
+            "notifications_disabled" -> ({ openNotificationSettings() })
+            "location_permission_background" -> ({
+                if (!didTryBackgroundLocation) requestBackgroundLocationNow() else openAppSettings()
+            })
+            else -> ({
                 missing = AppPermissionChecks.missingCritical(context)
                 batteryMissing = !AppPermissionChecks.isBatteryOptimizationDisabled(context)
                 if (missing.isEmpty()) continueOnce()
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("I enabled them")
+            })
         }
+
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = onClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.Center),
+            ) {
+                Text(buttonText)
+            }
+        }
+
+        Text(
+            text = "After enabling it, return to this screen — it will continue automatically.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.65f),
+        )
     }
 }

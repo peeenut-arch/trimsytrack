@@ -297,7 +297,7 @@ fun AppNavHost(intent: Intent) {
                 onAddTripQuickLogWithPhoto = {
                     navController.navigate("${Routes.Camera}?tripId=-1&return=0&autoSave=1&quickLog=1")
                 },
-                onReviewPlaces = { navController.navigate(Routes.Today) },
+                onReviewPlaces = { navController.navigate(Routes.PingHistory) },
                 onJournal = { navController.navigate(Routes.Journal) },
                 onCamera = { navController.navigate(Routes.Camera) },
                 onOpenSettings = { navController.navigate(Routes.Settings) },

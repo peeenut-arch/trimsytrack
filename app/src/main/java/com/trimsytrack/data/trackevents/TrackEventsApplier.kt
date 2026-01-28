@@ -81,14 +81,17 @@ class TrackEventsApplier(
         val payload = e.payload ?: return
         val enabled = (payload["enabled"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: return
 
-        runCatching { AppGraph.settings.setTrackingEnabled(enabled) }
+        // Tracking is required for the app to function; do not allow remote disable.
+        val effectiveEnabled = true
+
+        runCatching { AppGraph.settings.setTrackingEnabled(effectiveEnabled) }
             .onFailure { Log.w("TrackEvents", "Failed apply trackingEnabled", it) }
 
-        if (enabled) {
-            runCatching { AppGraph.geofenceSyncManager.scheduleSync("trackEvents.tracking_enabled") }
-        } else {
-            runCatching { AppGraph.geofenceSyncManager.scheduleDisable("trackEvents.tracking_disabled") }
+        if (!enabled) {
+            Log.i("TrackEvents", "Ignoring remote tracking disable; keeping enabled")
         }
+
+        runCatching { AppGraph.geofenceSyncManager.scheduleSync("trackEvents.tracking_enabled") }
     }
 
     private suspend fun applyDwellMinutesSet(e: TrackEventWithSeq) {

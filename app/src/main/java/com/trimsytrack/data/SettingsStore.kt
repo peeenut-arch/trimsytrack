@@ -638,7 +638,7 @@ class SettingsStore(private val context: Context) {
     val trackingEnabled: Flow<Boolean> = scopedBooleanFlow(
         base = "trackingEnabled",
         legacy = Keys.trackingEnabled,
-        default = false,
+        default = true,
     )
     val regionCode: Flow<String> = scopedStringFlow(
         base = "regionCode",
