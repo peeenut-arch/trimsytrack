@@ -626,7 +626,16 @@ fun AutosyncStoresDialog(onDismiss: () -> Unit) {
             }
         }
 
-        AppGraph.geofenceSyncManager.scheduleSync("autosync_add")
+        // Make newly added locations take effect immediately (do not wait for WorkManager/Doze).
+        runCatching {
+            AppGraph.geofenceSyncManager.syncNowAndCatchUpAddedStores(
+                reason = "autosync_add",
+                storeIds = newStoreIds,
+            )
+        }.onFailure {
+            // Durable fallback.
+            AppGraph.geofenceSyncManager.scheduleSync("autosync_add")
+        }
 
         val homeLat = AppGraph.settings.businessHomeLat.first()
         val homeLng = AppGraph.settings.businessHomeLng.first()

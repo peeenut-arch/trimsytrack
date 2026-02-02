@@ -49,4 +49,5 @@ enum class PingTransition {
 
 enum class PingSource {
     GEOFENCE,
+    CATCH_UP,
 }

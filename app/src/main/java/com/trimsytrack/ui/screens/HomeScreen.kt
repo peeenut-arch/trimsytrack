@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Home
@@ -111,6 +112,9 @@ fun HomeScreen(
     var homeConfirmTimeZoneId by remember { mutableStateOf<String?>(null) }
     var homeConfirmTravelMinutes by remember { mutableStateOf<Int?>(null) }
     var homeConfirmTravelMeters by remember { mutableStateOf<Int?>(null) }
+
+    var showCancelLastStopConfirm by remember { mutableStateOf(false) }
+    var cancelTripBusy by remember { mutableStateOf(false) }
 
     var currentTripExpanded by rememberSaveable { mutableStateOf(true) }
     var hadActiveRun by rememberSaveable { mutableStateOf(false) }
@@ -251,6 +255,14 @@ fun HomeScreen(
                 },
                 onToggleExpanded = { currentTripExpanded = !currentTripExpanded },
                 onOpenSettings = onOpenSettings,
+                onCancelLastStop = {
+                    if (homeTripBusy || cancelTripBusy) return@CurrentTripCard
+                    if (currentRun.isNullOrEmpty()) {
+                        homeTripStatus = "No current trip found."
+                        return@CurrentTripCard
+                    }
+                    showCancelLastStopConfirm = true
+                },
                 onCompleteToHome = {
                     if (homeTripBusy) return@CurrentTripCard
                     if (currentRun.isNullOrEmpty()) {
@@ -461,6 +473,60 @@ fun HomeScreen(
                 onSaved = { /* handled inside modal */ },
             )
         }
+
+        if (showCancelLastStopConfirm) {
+            val last = currentRun?.lastOrNull()
+            AlertDialog(
+                onDismissRequest = { if (!cancelTripBusy) showCancelLastStopConfirm = false },
+                title = { Text("Cancel last stop?") },
+                text = {
+                    Text(
+                        if (last != null) {
+                            "This will remove the last stop: '${last.storeNameSnapshot.ifBlank { "Stop" }}'."
+                        } else {
+                            "No current trip found."
+                        }
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = !cancelTripBusy && last != null,
+                        onClick = {
+                            val t = last ?: return@TextButton
+                            scope.launch {
+                                if (cancelTripBusy) return@launch
+                                cancelTripBusy = true
+                                try {
+                                    withContext(Dispatchers.IO) { AppGraph.tripRepository.cancelTrip(t.id) }
+                                    runCatching { AppGraph.geofenceSyncManager.scheduleSync("home_current_trip_cancel_last_stop") }
+                                    homeTripStatus = "Cancelled last stop."
+                                } catch (e: Throwable) {
+                                    homeTripStatus = e.message ?: "Failed to cancel stop"
+                                } finally {
+                                    cancelTripBusy = false
+                                    showCancelLastStopConfirm = false
+                                }
+                            }
+                        },
+                        colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Filled.Delete, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Cancel")
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        enabled = !cancelTripBusy,
+                        onClick = { showCancelLastStopConfirm = false },
+                    ) { Text("Keep") }
+                },
+            )
+        }
     }
 }
 
@@ -473,6 +539,7 @@ private fun CurrentTripCard(
     homeDistanceMeters: Int,
     onToggleExpanded: () -> Unit,
     onOpenSettings: () -> Unit,
+    onCancelLastStop: () -> Unit,
     onCompleteToHome: () -> Unit,
 ) {
     val safeTrips = trips.orEmpty()
@@ -658,6 +725,29 @@ private fun CurrentTripCard(
                             textAlign = TextAlign.Center,
                             maxLines = 1,
                         )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Cancel last stop",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                    TextButton(
+                        enabled = hasRun && !homeTripBusy,
+                        onClick = onCancelLastStop,
+                        colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Text("Cancel")
                     }
                 }
             }

@@ -45,6 +45,9 @@ interface AttachmentDao {
     @Query("DELETE FROM attachments WHERE uid = :uid AND id = :id")
     suspend fun deleteById(uid: String, id: Long)
 
+    @Query("DELETE FROM attachments WHERE uid = :uid AND tripId = :tripId")
+    suspend fun deleteByTrip(uid: String, tripId: Long): Int
+
     @Query("UPDATE attachments SET uid = :uid WHERE uid = ''")
     suspend fun claimUnscoped(uid: String)
 

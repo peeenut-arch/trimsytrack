@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -57,6 +58,9 @@ import androidx.compose.ui.unit.dp
 import com.trimsytrack.AppGraph
 import com.trimsytrack.data.entities.StoreEntity
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -69,6 +73,16 @@ fun AutosyncLocationsScreen(
     val ignoredStoreIds by AppGraph.settings.ignoredStoreIds.collectAsState(initial = emptySet())
     val storeDisplayOverrides by AppGraph.settings.storeDisplayOverrides.collectAsState(initial = emptyMap())
     val manualTripCategoryConfigs by AppGraph.settings.manualTripCategoryConfigs.collectAsState(initial = emptyList())
+    val lastRegisteredStores by AppGraph.settings.geofenceLastSyncRegisteredStores.collectAsState(initial = 0)
+
+    val geofenceLastSyncAtMillis by AppGraph.settings.geofenceLastSyncAtMillis.collectAsState(initial = null)
+    val geofenceLastSyncReason by AppGraph.settings.geofenceLastSyncReason.collectAsState(initial = "")
+    val geofenceLastSyncTotalStores by AppGraph.settings.geofenceLastSyncTotalStores.collectAsState(initial = 0)
+    val geofenceLastSyncResult by AppGraph.settings.geofenceLastSyncResult.collectAsState(initial = "")
+
+    val geofenceLastEventAtMillis by AppGraph.settings.geofenceLastEventAtMillis.collectAsState(initial = null)
+    val geofenceLastEventStoreId by AppGraph.settings.geofenceLastEventStoreId.collectAsState(initial = "")
+    val geofenceLastEventTransition by AppGraph.settings.geofenceLastEventTransition.collectAsState(initial = "")
 
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingRemoveStore by remember { mutableStateOf<StoreEntity?>(null) }
@@ -406,36 +420,38 @@ fun AutosyncLocationsScreen(
                         val oldCity = cityToRename
                         pendingRenameCity = null
                         renameCityText = ""
-                        if (newCity.isBlank() || newCity.equals(oldCity, ignoreCase = true)) return@TextButton
-
-                        // Preserve expanded state when renaming.
-                        if (expandedCities.contains(oldCity)) {
-                            expandedCities = (expandedCities - oldCity) + newCity
-                        }
-                        expandedCityCategories = expandedCityCategories
-                            .map { key ->
-                                if (key.startsWith("${oldCity}::")) "${newCity}::" + key.removePrefix("${oldCity}::") else key
+                        if (newCity.isBlank() || newCity.equals(oldCity, ignoreCase = true)) {
+                            // No-op.
+                        } else {
+                            // Preserve expanded state when renaming.
+                            if (expandedCities.contains(oldCity)) {
+                                expandedCities = (expandedCities - oldCity) + newCity
                             }
-                            .toSet()
+                            expandedCityCategories = expandedCityCategories
+                                .map { key ->
+                                    if (key.startsWith("${oldCity}::")) "${newCity}::" + key.removePrefix("${oldCity}::") else key
+                                }
+                                .toSet()
 
-                        scope.launch {
-                            val toUpdate = allStores.filter { resolvedCity(it).trim() == oldCity }
-                            toUpdate.forEach { store ->
-                                val current = storeDisplayOverrides[store.id]
-                                AppGraph.settings.setStoreDisplayOverride(
-                                    storeId = store.id,
-                                    name = current?.name,
-                                    city = newCity,
-                                    categoryLabel = current?.categoryLabel,
-                                )
-                            }
+                            scope.launch {
+                                val toUpdate = allStores.filter { resolvedCity(it).trim() == oldCity }
+                                toUpdate.forEach { store ->
+                                    val current = storeDisplayOverrides[store.id]
+                                    AppGraph.settings.setStoreDisplayOverride(
+                                        storeId = store.id,
+                                        name = current?.name,
+                                        city = newCity,
+                                        categoryLabel = current?.categoryLabel,
+                                    )
+                                }
 
-                            runCatching {
-                                AppGraph.trackEventEmitter.emitAutosyncStoreOverrideBulkSet(
-                                    storeIds = toUpdate.map { it.id },
-                                    city = newCity,
-                                    reason = "autosync_city_rename",
-                                )
+                                runCatching {
+                                    AppGraph.trackEventEmitter.emitAutosyncStoreOverrideBulkSet(
+                                        storeIds = toUpdate.map { it.id },
+                                        city = newCity,
+                                        reason = "autosync_city_rename",
+                                    )
+                                }
                             }
                         }
                     },
@@ -677,6 +693,15 @@ fun AutosyncLocationsScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    val safeRegistered = lastRegisteredStores.coerceIn(0, 100)
+                    Text(
+                        text = "$safeRegistered/100",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        modifier = Modifier.padding(end = 16.dp),
+                    )
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
@@ -699,10 +724,81 @@ fun AutosyncLocationsScreen(
                 Text("Add autosync locations")
             }
 
+            FilledTonalButton(
+                onClick = {
+                    runCatching { AppGraph.geofenceSyncManager.scheduleSync("autosync_manual_refresh") }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 0.dp),
+            ) {
+                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.size(10.dp))
+                Text("Refresh geofences")
+            }
+
             Text(
                 "Synced locations (active geofences)",
                 style = MaterialTheme.typography.titleMedium,
             )
+
+            val timeFmt = remember { DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm") }
+            val lastSyncText = remember(geofenceLastSyncAtMillis) {
+                val ms = geofenceLastSyncAtMillis
+                if (ms == null || ms <= 0L) {
+                    "never"
+                } else {
+                    timeFmt.format(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()))
+                }
+            }
+            val lastEventText = remember(geofenceLastEventAtMillis) {
+                val ms = geofenceLastEventAtMillis
+                if (ms == null || ms <= 0L) {
+                    "never"
+                } else {
+                    timeFmt.format(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()))
+                }
+            }
+            val lastEventStoreName = remember(allStores, geofenceLastEventStoreId, storeDisplayOverrides) {
+                if (geofenceLastEventStoreId.isBlank()) return@remember ""
+                val store = allStores.firstOrNull { it.id == geofenceLastEventStoreId }
+                if (store == null) {
+                    geofenceLastEventStoreId
+                } else {
+                    resolvedName(store)
+                }
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Geofence diagnostics",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Last sync: $lastSyncText · $lastRegisteredStores/$geofenceLastSyncTotalStores · ${geofenceLastSyncReason.ifBlank { "(no reason)" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                    if (geofenceLastSyncResult.isNotBlank()) {
+                        Text(
+                            text = "Result: $geofenceLastSyncResult",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        )
+                    }
+                    Text(
+                        text = "Last event: $lastEventText · ${geofenceLastEventTransition.ifBlank { "(none)" }} · ${lastEventStoreName.ifBlank { "(no store)" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                }
+            }
 
             if (groupedByCityThenCategory.isEmpty()) {
                 Text(
@@ -849,49 +945,49 @@ fun AutosyncLocationsScreen(
                             .clickable { categoriesSectionExpanded = !categoriesSectionExpanded },
                     )
 
-                    if (!categoriesSectionExpanded) return@Column
+                    if (categoriesSectionExpanded) {
+                        val sortedCategories = remember(manualTripCategoryConfigs) {
+                            manualTripCategoryConfigs.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
+                        }
 
-                    val sortedCategories = remember(manualTripCategoryConfigs) {
-                        manualTripCategoryConfigs.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
-                    }
-
-                    if (sortedCategories.isEmpty()) {
-                        Text(
-                            "No categories yet.",
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-                        )
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 240.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            items(
-                                items = sortedCategories,
-                                key = { it.label.lowercase() },
-                            ) { cfg ->
-                                val keywordCount = cfg.keywords.size
-                                ListItem(
-                                    headlineContent = { Text(cfg.label) },
-                                    supportingContent = { Text("Keywords: $keywordCount") },
-                                    trailingContent = {
-                                        Row {
-                                            IconButton(
-                                                onClick = {
-                                                    pendingEditCategory = cfg
-                                                    editCategoryLabel = ""
-                                                    editCategoryKeywordsCsv = ""
-                                                },
-                                            ) {
-                                                Icon(Icons.Filled.Edit, contentDescription = "Edit")
+                        if (sortedCategories.isEmpty()) {
+                            Text(
+                                "No categories yet.",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 240.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                items(
+                                    items = sortedCategories,
+                                    key = { it.label.lowercase() },
+                                ) { cfg ->
+                                    val keywordCount = cfg.keywords.size
+                                    ListItem(
+                                        headlineContent = { Text(cfg.label) },
+                                        supportingContent = { Text("Keywords: $keywordCount") },
+                                        trailingContent = {
+                                            Row {
+                                                IconButton(
+                                                    onClick = {
+                                                        pendingEditCategory = cfg
+                                                        editCategoryLabel = ""
+                                                        editCategoryKeywordsCsv = ""
+                                                    },
+                                                ) {
+                                                    Icon(Icons.Filled.Edit, contentDescription = "Edit")
+                                                }
+                                                IconButton(onClick = { pendingDeleteCategoryLabel = cfg.label }) {
+                                                    Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                                                }
                                             }
-                                            IconButton(onClick = { pendingDeleteCategoryLabel = cfg.label }) {
-                                                Icon(Icons.Filled.Delete, contentDescription = "Delete")
-                                            }
-                                        }
-                                    },
-                                )
+                                        },
+                                    )
+                                }
                             }
                         }
                     }

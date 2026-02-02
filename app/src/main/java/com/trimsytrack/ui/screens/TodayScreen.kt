@@ -13,12 +13,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -87,6 +90,9 @@ fun TodayScreen(
 
     var homeTripBusy by remember { mutableStateOf(false) }
     var homeTripStatus by remember { mutableStateOf<String?>(null) }
+
+    var showCancelLastStopConfirm by remember { mutableStateOf(false) }
+    var cancelTripBusy by remember { mutableStateOf(false) }
 
 
     Scaffold(
@@ -169,6 +175,19 @@ fun TodayScreen(
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.weight(1f),
                                     )
+
+                                    IconButton(
+                                        onClick = {
+                                            if (homeTripBusy || cancelTripBusy) return@IconButton
+                                            showCancelLastStopConfirm = true
+                                        },
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Delete,
+                                            contentDescription = "Cancel last stop",
+                                            tint = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
 
                                     IconButton(
                                         onClick = {
@@ -364,6 +383,54 @@ fun TodayScreen(
                 }
 
                 item { Spacer(Modifier.height(16.dp)) }
+            }
+
+            if (showCancelLastStopConfirm) {
+                val last = currentRun?.lastOrNull()
+                AlertDialog(
+                    onDismissRequest = { if (!cancelTripBusy) showCancelLastStopConfirm = false },
+                    title = { Text("Cancel last stop?") },
+                    text = {
+                        Text(
+                            if (last != null) {
+                                "This will remove the last stop: '${last.storeNameSnapshot.ifBlank { "Stop" }}'."
+                            } else {
+                                "No current trip found."
+                            }
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = !cancelTripBusy && last != null,
+                            onClick = {
+                                val t = last ?: return@TextButton
+                                scope.launch {
+                                    if (cancelTripBusy) return@launch
+                                    cancelTripBusy = true
+                                    try {
+                                        withContext(Dispatchers.IO) { AppGraph.tripRepository.cancelTrip(t.id) }
+                                        runCatching { AppGraph.geofenceSyncManager.scheduleSync("today_current_trip_cancel_last_stop") }
+                                        homeTripStatus = "Cancelled last stop."
+                                    } catch (e: Throwable) {
+                                        homeTripStatus = e.message ?: "Failed to cancel stop"
+                                    } finally {
+                                        cancelTripBusy = false
+                                        showCancelLastStopConfirm = false
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                        ) { Text("Cancel") }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            enabled = !cancelTripBusy,
+                            onClick = { showCancelLastStopConfirm = false },
+                        ) { Text("Keep") }
+                    },
+                )
             }
         }
     }

@@ -601,6 +601,33 @@ class TripRepository(
         tripDao.deleteById(uid, id)
     }
 
+    /**
+     * Cancels (deletes) a trip entry the user just created by mistake.
+     *
+     * This is intended for local-only correction of the current open run.
+     * It deletes any attachments linked to the trip and removes an orphaned run row if needed.
+     */
+    suspend fun cancelTrip(id: Long) {
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank() || id <= 0L) return
+
+        val trip = tripDao.getById(uid, id) ?: return
+
+        // Remove evidence links first to avoid leaving dangling UI references.
+        runCatching { attachmentDao.deleteByTrip(uid = uid, tripId = id) }
+
+        tripDao.deleteById(uid, id)
+
+        // If this was the last trip in its run, delete the orphaned run record too.
+        val rid = trip.runId
+        if (rid != null) {
+            val remaining = runCatching { tripDao.listByRunId(uid, rid) }.getOrElse { emptyList() }
+            if (remaining.isEmpty()) {
+                runCatching { runDao.deleteById(uid = uid, id = rid) }
+            }
+        }
+    }
+
     suspend fun listTripsBetweenDays(startDay: LocalDate, endDay: LocalDate): List<TripEntity> =
         settings.uidOrEmpty().let { uid ->
             if (uid.isBlank()) emptyList() else tripDao.listBetweenDays(uid, startDay, endDay)

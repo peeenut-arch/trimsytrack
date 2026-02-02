@@ -42,6 +42,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
@@ -1170,6 +1171,50 @@ fun CreateTripModal(
                 CurrentTripDetailsDialog(
                     startAnchorLabel = startAnchor?.label,
                     trips = createdTrips,
+                    enabled = !busy,
+                    onCancelLastStop = {
+                        val last = createdTrips.lastOrNull() ?: return@CurrentTripDetailsDialog
+                        scope.launch {
+                            if (busy) return@launch
+                            busy = true
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    AppGraph.tripRepository.cancelTrip(last.id)
+                                }
+
+                                createdTripIds.remove(last.id)
+
+                                val newLast = createdTrips.dropLast(1).lastOrNull()
+                                startAnchor = if (newLast == null) {
+                                    when {
+                                        homeAnchor.lat.isFinite() && homeAnchor.lng.isFinite() -> homeAnchor
+                                        deviceLocation != null -> {
+                                            StartAnchor(
+                                                label = "Current location",
+                                                lat = deviceLocation!!.first,
+                                                lng = deviceLocation!!.second,
+                                                placeType = PlaceType.OTHER,
+                                                locationId = null,
+                                            )
+                                        }
+                                        else -> null
+                                    }
+                                } else {
+                                    StartAnchor(
+                                        label = newLast.storeNameSnapshot.ifBlank { "Previous stop" },
+                                        lat = newLast.storeLatSnapshot,
+                                        lng = newLast.storeLngSnapshot,
+                                        placeType = newLast.endPlaceType,
+                                        locationId = newLast.storeId,
+                                    )
+                                }
+                            } catch (t: Throwable) {
+                                snackbarHostState.showSnackbar("Failed to cancel stop")
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
                     onDismiss = { showCurrentTripDialog = false },
                 )
             }
@@ -1714,6 +1759,8 @@ private fun SetStopArrivalConfirmDialog(
 private fun CurrentTripDetailsDialog(
     startAnchorLabel: String?,
     trips: List<TripEntity>,
+    enabled: Boolean,
+    onCancelLastStop: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     fun formatStopTime(instant: Instant, timeZoneId: String?): String {
@@ -1741,6 +1788,8 @@ private fun CurrentTripDetailsDialog(
     }
     val totalDistanceMeters = trips.sumOf { it.distanceMeters.coerceAtLeast(0) }
     val totalMinutes = trips.sumOf { it.durationMinutes.coerceAtLeast(0) }
+
+    var showCancelConfirm by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1771,6 +1820,20 @@ private fun CurrentTripDetailsDialog(
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.weight(1f),
                     )
+
+                    if (trips.isNotEmpty()) {
+                        IconButton(
+                            onClick = { showCancelConfirm = true },
+                            enabled = enabled,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = "Cancel last stop",
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+
                     TextButton(
                         onClick = onDismiss,
                         colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
@@ -1843,6 +1906,34 @@ private fun CurrentTripDetailsDialog(
                 }
             }
         }
+    }
+
+    if (showCancelConfirm) {
+        AlertDialog(
+            onDismissRequest = { showCancelConfirm = false },
+            title = { Text("Cancel last stop?") },
+            text = { Text("This will remove the most recently added stop from this trip.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showCancelConfirm = false
+                        onCancelLastStop()
+                    },
+                    enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Text("Cancel stop")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showCancelConfirm = false },
+                    enabled = enabled,
+                ) {
+                    Text("Keep")
+                }
+            },
+        )
     }
 }
 
