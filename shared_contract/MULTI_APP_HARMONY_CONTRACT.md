@@ -88,6 +88,24 @@ Client requirements:
 - An app must not delete or mutate another app’s owned data except via explicit shared, contract-defined flows.
 - Account deletion is the only global “delete everything” operation and must be explicit and irreversible.
 
+### 8) Route Ownership Is Explicit (No Cross-App Route Rewires)
+
+When multiple apps share one Firebase Functions backend, **function names and apiV1 route names are shared global surfaces**. That means one app’s deploy can accidentally remove/replace another app’s routes if names collide.
+
+Law:
+- Route ownership must be declared in contract docs.
+- TrimsyTRACK-only routes must enforce `app_id=trimsytrack` and must not be repurposed by TrimsyApp/TrimsyPC.
+- Shared routes must validate `app_id` and must not allow cross-app writes (namespace by `source_app_id` or equivalent).
+
+Reserved TrimsyTRACK-only apiV1 route names:
+- `driverdataGet`
+- `driverdataPut`
+- `trackEventsBatchPut`
+- `trackEventsSinceGet`
+- `drivingTripCreate`
+
+If any of these regress to `404`/`ROUTE_NOT_FOUND`, treat it as a misdeploy and roll back immediately.
+
 ## What “Separation” Means Here
 
 We do **not** split into separate backends.

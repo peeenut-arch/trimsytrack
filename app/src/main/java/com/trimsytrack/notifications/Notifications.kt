@@ -4,11 +4,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.trimsytrack.R
+import com.trimsytrack.system.AppPermissionChecks
 
 object Notifications {
+    private const val TAG = "TrimsyTrack"
+
     const val CHANNEL_PROMPTS = "prompts"
     const val CHANNEL_LOCATION_PING = "location_ping"
     const val CHANNEL_RECEIPT_REMINDER = "receipt_reminder"
@@ -61,7 +65,19 @@ object Notifications {
     }
 
     fun notify(context: Context, id: Int, builder: NotificationCompat.Builder) {
-        NotificationManagerCompat.from(context).notify(id, builder.build())
+        ensureChannels(context)
+
+        // On Android 13+, POST_NOTIFICATIONS is required. Also respect system-level notification toggles.
+        if (!AppPermissionChecks.hasNotifications(context) || !AppPermissionChecks.areNotificationsEnabled(context)) {
+            Log.w(TAG, "Notifications.notify suppressed (permission/disabled) id=$id")
+            return
+        }
+
+        try {
+            NotificationManagerCompat.from(context).notify(id, builder.build())
+        } catch (t: SecurityException) {
+            Log.w(TAG, "Notifications.notify failed (SecurityException) id=$id", t)
+        }
     }
 
     fun cancel(context: Context, id: Int) {

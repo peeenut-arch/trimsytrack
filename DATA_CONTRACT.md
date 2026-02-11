@@ -153,20 +153,30 @@ Driver identity fields required for a complete driving journal are synced in sna
 - `driverName` = driver’s name
 - `vehicleRegNumber` = car registration number
 
-### Evidence / media (local-only)
+### Evidence / media (synced to backend)
 
 Evidence (photos/scans/PDFs) is stored as `AttachmentEntity` and added via `TripRepository.addAttachment(...)`.
 
 - `AttachmentEntity.id` (Long, auto-increment) = **EvidenceId (local)**
 - `AttachmentEntity.tripId` (Long) = link to the trip's **local Trip#**
 
-Evidence files are stored under:
+Evidence files are stored locally under:
 
 `files/evidence/<tripId>/<file>`
 
 and the app enforces a canonical filename containing the local trip id and evidence id.
 
-**Rule:** Evidence bytes/media are never uploaded to backend. They are shared to the companion/PC using `EvidenceProvider`.
+**Rule:** Evidence bytes/media are uploaded to backend storage (Cloud Storage) via signed URLs.
+
+Flow:
+- App stores evidence as `AttachmentEntity` (local DB) and keeps stable IDs:
+  - `AttachmentEntity.clientRef` = universal evidence id (`clientEvidenceId`)
+  - `TripEntity.clientRef` = universal trip id (`tripClientRef`)
+- App calls backend `tripEvidenceUploadInit` to ask **where/how to upload**.
+- Backend returns a short-lived signed upload URL; client uploads bytes via HTTP `PUT`.
+- Evidence metadata is still included in driverdata snapshots; device-local URIs are omitted from cloud snapshots.
+
+`EvidenceProvider` remains available as a local sharing mechanism, but it is no longer the authoritative sync path for evidence bytes.
 
 ### Parking fee receipts (parkingticketID)
 

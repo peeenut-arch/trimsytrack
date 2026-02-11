@@ -45,6 +45,12 @@ First-time (no DriverData yet) is a valid empty state:
 - `app_instance_id` is optional (recommended).
 - TrimsyTrack sync endpoints require `app_id=trimsytrack`.
 
+**System identity lock:** this bundle is for **TrimsyTRACK**.
+- Must never be confused with **TrimsyApp**.
+- Must never silently change which routes/meaning are used.
+
+Authoritative identity boundary: [TRIMSYTRACK_SYSTEM_IDENTITY.md](TRIMSYTRACK_SYSTEM_IDENTITY.md)
+
 ---
 
 ## What you must do in your repo

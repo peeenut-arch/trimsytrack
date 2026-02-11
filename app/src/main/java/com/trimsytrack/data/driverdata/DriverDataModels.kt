@@ -19,6 +19,7 @@ data class DriverData(
     val regions: Map<String, String> = emptyMap(),
 
     val stores: List<StoreDto> = emptyList(),
+    @kotlinx.serialization.Serializable(with = LenientTripListSerializer::class)
     val trips: List<TripDto> = emptyList(),
 
     /**
@@ -38,7 +39,7 @@ data class DriverData(
     val distanceCache: List<DistanceCacheDto> = emptyList(),
     val attachments: List<AttachmentDto> = emptyList(),
 
-    // Parking/traffic fee receipts: metadata only (media is synced to PC separately).
+    // Parking/traffic fee receipts: metadata snapshot; media bytes are synced via the evidence upload flow.
     val parkingTickets: List<ParkingTicketDto> = emptyList(),
 )
 
@@ -150,11 +151,15 @@ data class TripDto(
     /** Sync state (e.g. LOCAL_ONLY / SYNCED). */
     val syncStatus: String = "",
 
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val createdAt: String,
     val day: String,
 
     // New (schemaVersion >= 2): explicit time boundaries + timezone.
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val startedAt: String = "",
+
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val endedAt: String = "",
     val timeZoneId: String = "",
 
@@ -220,6 +225,7 @@ data class StopDto(
     val kind: String,
 
     /** When the stop was reached (arrival). */
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val occurredAt: String,
 
     /** Optional pre-formatted local time for UI (e.g. "06/22 10:53"). */
@@ -256,6 +262,7 @@ data class PingEventDto(
     val storeLatSnapshot: Double,
     val storeLngSnapshot: Double,
     val day: String,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val occurredAt: String,
     val transition: String,
     val source: String,
@@ -263,6 +270,7 @@ data class PingEventDto(
     val routeDistanceFromPrevMeters: Int? = null,
     val routeDurationFromPrevMinutes: Int? = null,
     val routeSource: String? = null,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringNullableSerializer::class)
     val routeComputedAt: String? = null,
 
     /** Local Trip id used as route anchor (if any). */
@@ -275,7 +283,9 @@ data class PingEventDto(
 @Serializable
 data class VisitedStoreDto(
     val storeId: String,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val firstVisitedAt: String,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val lastVisitedAt: String,
     val visitCount: Int,
     val lastStoreNameSnapshot: String,
@@ -317,9 +327,11 @@ data class PromptEventDto(
     val storeLatSnapshot: Double,
     val storeLngSnapshot: Double,
     val day: String,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val triggeredAt: String,
     val status: String,
     val notificationId: Int,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val lastUpdatedAt: String,
     val linkedTripId: Long? = null,
 )
@@ -328,6 +340,7 @@ data class PromptEventDto(
 data class RunDto(
     val id: Long,
     val day: String,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val createdAt: String,
     val label: String,
 )
@@ -350,6 +363,7 @@ data class DistanceCacheDto(
     val routePolyline: String? = null,
     val source: String,
 
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val createdAt: String,
 )
 
@@ -368,11 +382,18 @@ data class AttachmentDto(
     val uri: String,
     val mimeType: String,
     val displayName: String,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val capturedAt: String = "",
+
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringSerializer::class)
     val addedAt: String,
 
     val sha256: String? = null,
     val sizeBytes: Long? = null,
+    @kotlinx.serialization.Serializable(with = FirestoreTimestampOrIsoStringNullableSerializer::class)
     val linkedAt: String? = null,
     val linkedByDeviceId: String? = null,
+
+    /** Optional linkage: when this evidence item represents a parking/traffic fee receipt. */
+    val parkingTicketId: String? = null,
 )

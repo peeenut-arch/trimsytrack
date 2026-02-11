@@ -57,6 +57,21 @@ object DebuggLogStore {
         }
     }
 
+    fun snapshotAllLines(): List<String> {
+        synchronized(lock) {
+            return buffer
+                .toList()
+                .map { it.toLine() }
+        }
+    }
+
+    fun clear() {
+        synchronized(lock) {
+            buffer.clear()
+            _entries.value = emptyList()
+        }
+    }
+
     private fun <T> ArrayDeque<T>.takeLast(n: Int): List<T> {
         if (n <= 0) return emptyList()
         val list = this.toList()

@@ -32,6 +32,9 @@ Some subsystems enforce stricter values:
 
 - TrimsyTrack sync endpoints require `app_id=trimsytrack`.
 
+System identity boundary (TrimsyTRACK vs TrimsyApp) is non-negotiable:
+- See [TRIMSYTRACK_SYSTEM_IDENTITY.md](TRIMSYTRACK_SYSTEM_IDENTITY.md)
+
 ## Identity (UID-only)
 
 - Firebase Auth `uid` is the **only identity**.

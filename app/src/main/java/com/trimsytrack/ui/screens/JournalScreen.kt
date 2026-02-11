@@ -503,11 +503,9 @@ private fun RunCard(
     timeFmt: DateTimeFormatter,
     onOpen: () -> Unit,
 ) {
-    val runTitle = if (run.runSequenceNumber > 0) {
-        "Trip #${run.runSequenceNumber}"
-    } else {
-        "Trip (in progress)"
-    }
+    // Trip ID is the runId (one per Home→...→Home). For legacy/unscoped rows, key is -tripId.
+    val tripId = kotlin.math.abs(run.key)
+    val runTitle = if (tripId > 0) "Trip ID #$tripId" else "Trip"
 
     val timeRange = runCatching {
         "${run.start.format(timeFmt)}–${run.end.format(timeFmt)}"
@@ -590,12 +588,12 @@ private fun TripRow(
         else -> ""
     }
 
+    val stopId = t.clientRef?.trim().orEmpty()
     val meta = buildString {
         append(t.day)
         if (timeLabel.isNotBlank()) append(" · ").append(timeLabel)
         if (cityLabel.isNotBlank()) append(" · ").append(cityLabel)
-        val seq = sequenceNumber ?: 0
-        if (seq > 0) append(" · Trip #").append(seq)
+        if (stopId.isNotBlank()) append(" · Stop ID ").append(stopId)
         append(" · ").append("%.1f".format(t.distanceMeters / 1000.0)).append(" km")
     }
 
@@ -613,8 +611,7 @@ private fun TripRow(
         ) {
             Text(
                 text = t.storeNameSnapshot.ifBlank {
-                    val seq = sequenceNumber ?: 0
-                    if (seq > 0) "Trip #$seq" else "Trip"
+                    if (stopId.isNotBlank()) "Stop ID $stopId" else "Stop"
                 },
                 style = MaterialTheme.typography.bodyLarge,
                 maxLines = 1,
@@ -685,13 +682,9 @@ private fun RunDetailsDialog(
                 topBar = {
                     TopAppBar(
                         title = {
-                            val runTitle = if (run.runSequenceNumber > 0) {
-                                "Trip #${run.runSequenceNumber}"
-                            } else {
-                                "Trip"
-                            }
                             Column {
-                                Text(runTitle)
+                                val tripId = kotlin.math.abs(run.key)
+                                Text(if (tripId > 0) "Trip ID #$tripId" else "Trip")
                             }
                         },
                         navigationIcon = {
@@ -784,12 +777,20 @@ private fun RunDetailsDialog(
                             ""
                         }
                         val stopMeta = buildString {
-                            append("Stop #").append(idx + 1)
+                            val stopId = t.clientRef?.trim().orEmpty()
+                            if (stopId.isNotBlank()) {
+                                append("Stop ID ").append(stopId)
+                            }
+                            // Trip ID is the runId shown in the dialog title.
                             if (isLastStopBeforeHome && endTime.isNotBlank() && departTimeFromLastStop.isNotBlank()) {
-                                append(" · Arrive ").append(endTime)
+                                if (stopId.isNotBlank()) append(" · ")
+                                append("Arrive ").append(endTime)
                                 append(" · Depart ").append(departTimeFromLastStop)
                             } else {
-                                if (timeLabel.isNotBlank()) append(" · ").append(timeLabel)
+                                if (timeLabel.isNotBlank()) {
+                                    if (stopId.isNotBlank()) append(" · ")
+                                    append(timeLabel)
+                                }
                             }
                         }
 

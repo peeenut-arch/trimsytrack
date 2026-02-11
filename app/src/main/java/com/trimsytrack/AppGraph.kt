@@ -105,6 +105,11 @@ object AppGraph {
         synchronized(this) {
             if (initialized) return
 
+            // System identity lock: TrimsyTRACK must never drift to any other app_id.
+            check(BuildConfig.APP_ID == "trimsytrack") {
+                "Identity lock violated: BuildConfig.APP_ID=${BuildConfig.APP_ID} (expected trimsytrack)"
+            }
+
             appContext = context.applicationContext
 
             settings = SettingsStore(appContext)

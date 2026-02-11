@@ -93,6 +93,9 @@ internal fun moveTempFileProviderUriToTripFiles(
     val safeStore = sanitizeFileName(tripStoreNameSnapshot ?: "trip").ifBlank { "trip" }
     val dayPart = tripDay?.toString() ?: "trip_${tripId}"
     val timePart = capturedAt.toEpochMilli().toString()
+    // Avoid collisions when multiple attachments share the same capturedAt.
+    // (This happened in Ghost Wizard where evidence+receipt used the same Instant.)
+    val uniquePart = System.currentTimeMillis().toString()
 
     val extension = when (mimeType) {
         "image/jpeg" -> ".jpg"
@@ -101,7 +104,7 @@ internal fun moveTempFileProviderUriToTripFiles(
     }
 
     val destDir = File(context.filesDir, "evidence/${tripId}").apply { mkdirs() }
-    val destFile = File(destDir, "${dayPart}_${safeStore}_${timePart}${extension}")
+    val destFile = File(destDir, "${dayPart}_${safeStore}_${timePart}_${uniquePart}${extension}")
 
     tempFile.inputStream().use { input ->
         destFile.outputStream().use { output ->

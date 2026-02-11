@@ -50,7 +50,7 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $outDir = Join-Path $PSScriptRoot "..\tmp\smoke_sync\$timestamp"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-$pattern = "Handshake ok|handshakeGet|driverdataPut|driverdataGet|drivingTripCreate|region verify action|Worker result|BackendBlocked|UID_DATA_MISSING|UNAUTHENTICATED|ACCOUNT_CONFLICT|UID_DELETED|PROTOCOL_MISMATCH|Cloud sync check failed|Exception|FATAL| 401 | 403 | 500 "
+$pattern = "Handshake ok|handshakeGet|driverdataPut|driverdataGet|drivingTripCreate|CanonicalWriteOutboxWorker|CanonicalWriteOutbox:|Canonical outbox enqueued|CanonicalSync:|DriverDataSync: driverdataPut|EvidenceUpload:|SmokeSync:|ParkingTicketExport|TrackEvents probe succeeded|TrackEvents endpoints returned 404|region verify action|Worker result|BackendBlocked|UID_DATA_MISSING|UNAUTHENTICATED|ACCOUNT_CONFLICT|UID_DELETED|PROTOCOL_MISMATCH|Cloud sync check failed|Exception|FATAL| 401 | 403 | 500 "
 
 function Clear-Logcat {
     & $adb -s $DeviceSerial logcat -c | Out-Null

@@ -44,6 +44,7 @@ import com.trimsytrack.ui.screens.RunCompletionScreen
 import com.trimsytrack.ui.screens.TodayScreen
 import com.trimsytrack.ui.screens.PingHistoryScreen
 import com.trimsytrack.ui.screens.PermissionsRequiredScreen
+import com.trimsytrack.ui.screens.GhostTestWizardScreen
 import com.trimsytrack.notifications.ReceiptReminderWorker
 import com.trimsytrack.notifications.RunCompletionNotifications
 import com.trimsytrack.system.AppPermissionChecks
@@ -74,6 +75,7 @@ object Routes {
     const val SavedStores = "savedStores"
     const val TestPing = "testPing"
     const val RunComplete = "runComplete"
+    const val GhostWizard = "ghostWizard"
 }
 
 @Composable
@@ -333,7 +335,10 @@ fun AppNavHost(intent: Intent) {
                 onBack = { navController.popBackStack() },
                 onOpenTrip = { navController.navigate("${Routes.Trip}/$it") },
                 onAddMediaToTrip = { tripId ->
-                    navController.navigate("${Routes.Camera}?tripId=$tripId&return=0")
+                    // Hard-bind the selected stop/trip context.
+                    // This prevents evidence from being accidentally linked to the wrong trip.
+                    // Also auto-open the camera to keep the UX as "tap camera on stop".
+                    navController.navigate("${Routes.MediaReview}/$tripId?autoTake=1")
                 },
             )
         }
@@ -346,6 +351,14 @@ fun AppNavHost(intent: Intent) {
                 onOpenAccount = { navController.navigate(Routes.Account) },
                 onOpenAccountLocation = { navController.navigate(Routes.AccountLocation) },
                 onOpenSavedStores = { navController.navigate(Routes.SavedStores) },
+                onOpenGhostWizard = { navController.navigate(Routes.GhostWizard) },
+            )
+        }
+
+        composable(Routes.GhostWizard) {
+            GhostTestWizardScreen(
+                onBack = { navController.popBackStack() },
+                onOpenTrip = { tripId -> navController.navigate("${Routes.Trip}/$tripId") },
             )
         }
 
@@ -428,15 +441,23 @@ fun AppNavHost(intent: Intent) {
         }
 
         composable(
-            route = "${Routes.MediaReview}/{tripId}",
-            arguments = listOf(navArgument("tripId") { type = NavType.LongType }),
+            route = "${Routes.MediaReview}/{tripId}?autoTake={autoTake}",
+            arguments = listOf(
+                navArgument("tripId") { type = NavType.LongType },
+                navArgument("autoTake") { type = NavType.IntType; defaultValue = 0 },
+            ),
         ) { backStackEntry ->
             val tripId = backStackEntry.arguments?.getLong("tripId") ?: 0L
+            val autoTake = (backStackEntry.arguments?.getInt("autoTake") ?: 0) == 1
             TripMediaReviewScreen(
                 tripId = tripId,
+                autoStartCamera = autoTake,
                 savedStateHandle = backStackEntry.savedStateHandle,
                 onTakePhoto = {
-                    navController.navigate("${Routes.Camera}?tripId=-1&return=1")
+                    // Keep the selected trip context all the way into the camera flow.
+                    // Even though we return the capture via SavedStateHandle, passing tripId here
+                    // prevents any ambiguity in the camera UI and avoids accidental mis-linking.
+                    navController.navigate("${Routes.Camera}?tripId=$tripId&return=1")
                 },
                 onDone = { navController.popBackStack() },
                 onBack = { navController.popBackStack() },

@@ -12,6 +12,11 @@
 			"problemMatcher": [
 				"$javac"
 			],
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			},
 			"group": "build"
 		},
 		{
@@ -25,6 +30,11 @@
 			"problemMatcher": [
 				"$javac"
 			],
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			},
 			"group": "build"
 		},
 		{
@@ -35,6 +45,11 @@
 				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\build_install_launch.ps1"
 			},
 			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			},
 			"group": {
 				"kind": "build",
 				"isDefault": true
@@ -48,6 +63,11 @@
 				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\verify_installed_apk.ps1"
 			},
 			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			},
 			"problemMatcher": []
 		},
 		{
@@ -58,6 +78,11 @@
 				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\smoke_sync_check.ps1 -DoRestart"
 			},
 			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			},
 			"problemMatcher": []
 		},
 		{
@@ -68,6 +93,11 @@
 				"command": "powershell -ExecutionPolicy Bypass -File .\\tools\\smoke_sync_check.ps1 -DoRestart -DoReinstall -AssumeYesForReinstall -NonInteractiveWaitAfterActionSeconds 60 -NonInteractiveWaitAfterReloginSeconds 90"
 			},
 			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			},
 			"problemMatcher": []
 		}
 	]

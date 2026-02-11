@@ -67,6 +67,7 @@ private data class PendingMedia(
 @OptIn(ExperimentalMaterial3Api::class)
 fun TripMediaReviewScreen(
     tripId: Long,
+    autoStartCamera: Boolean = false,
     savedStateHandle: SavedStateHandle,
     onTakePhoto: () -> Unit,
     onDone: () -> Unit,
@@ -80,6 +81,9 @@ fun TripMediaReviewScreen(
 
     val items = remember { mutableStateOf<List<PendingMedia>>(emptyList()) }
     val selectedIndex = remember { mutableIntStateOf(0) }
+
+    val autoStartDone = remember(tripId) { mutableStateOf(false) }
+    val autoSaveDone = remember(tripId) { mutableStateOf(false) }
 
     val status = remember { mutableStateOf<String?>(null) }
     val saving = remember { mutableStateOf(false) }
@@ -101,7 +105,11 @@ fun TripMediaReviewScreen(
     val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
-        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        // Some devices/flows can deliver RESULT_OK but without the expected extras.
+        // ML Kit parsing assumes extras exist; bail out early if missing.
+        if (data.extras == null) return@rememberLauncherForActivityResult
+        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
             ?: return@rememberLauncherForActivityResult
 
         val uri = scanResult.pdf?.uri ?: scanResult.pages?.firstOrNull()?.imageUri
@@ -141,6 +149,21 @@ fun TripMediaReviewScreen(
     val cameraMimeState = savedStateHandle.getStateFlow<String?>("cameraCaptureMimeType", null).collectAsState()
     val cameraIsTempState = savedStateHandle.getStateFlow<Boolean?>("cameraCaptureIsTemp", null).collectAsState()
 
+    LaunchedEffect(autoStartCamera) {
+        if (!autoStartCamera) return@LaunchedEffect
+        if (autoStartDone.value) return@LaunchedEffect
+
+        // Only auto-launch when there is nothing pending yet.
+        // If user cancels the camera, do not loop.
+        if (items.value.isNotEmpty()) {
+            autoStartDone.value = true
+            return@LaunchedEffect
+        }
+
+        autoStartDone.value = true
+        onTakePhoto()
+    }
+
     LaunchedEffect(cameraUriState.value) {
         val uriString = cameraUriState.value ?: return@LaunchedEffect
         val capturedAt = cameraAtState.value
@@ -157,6 +180,54 @@ fun TripMediaReviewScreen(
             isTempLocalFileProviderUri = isTempLocal,
             capturedAtEpochMillis = capturedAt,
         )
+
+        // Stop-camera UX: auto-save the first capture and pop back.
+        // If something goes wrong, fall back to the normal review flow.
+        if (autoStartCamera && !autoSaveDone.value) {
+            autoSaveDone.value = true
+            saving.value = true
+            status.value = null
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val t = AppGraph.tripRepository.get(tripId) ?: throw IllegalStateException("Trip not found")
+                    val saved = if (added.isTempLocalFileProviderUri) {
+                        moveTempFileProviderUriToTripFiles(
+                            context = context,
+                            uid = t.uid,
+                            tripId = tripId,
+                            tripDay = t.day,
+                            tripStoreNameSnapshot = t.storeNameSnapshot,
+                            tempFileProviderUri = added.uri,
+                            mimeType = added.mimeType,
+                            capturedAt = added.capturedAtEpochMillis?.let { Instant.ofEpochMilli(it) }
+                                ?: Instant.now(),
+                        )
+                    } else {
+                        importDocumentToTripFiles(
+                            context = context,
+                            uid = t.uid,
+                            tripId = tripId,
+                            tripDay = t.day,
+                            tripStoreNameSnapshot = t.storeNameSnapshot,
+                            sourceUri = added.uri,
+                        )
+                    }
+                    AppGraph.tripRepository.addAttachment(saved)
+                }
+            }.onSuccess {
+                status.value = "Saved."
+                items.value = emptyList()
+                onDone()
+            }.onFailure { e ->
+                status.value = "Failed to save: ${e.message ?: e.javaClass.simpleName}"
+                items.value = items.value + added
+                selectedIndex.intValue = items.value.size - 1
+            }
+
+            saving.value = false
+            return@LaunchedEffect
+        }
+
         items.value = items.value + added
         selectedIndex.intValue = items.value.size - 1
     }
@@ -286,7 +357,11 @@ fun TripMediaReviewScreen(
                                 }
                                 scanner.getStartScanIntent(a)
                                     .addOnSuccessListener { intentSender ->
-                                        scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                                        scanLauncher.launch(
+                                            IntentSenderRequest.Builder(intentSender)
+                                                .setFillInIntent(android.content.Intent())
+                                                .build()
+                                        )
                                     }
                                     .addOnFailureListener { e ->
                                         status.value = e.message ?: "Failed to start scanner"

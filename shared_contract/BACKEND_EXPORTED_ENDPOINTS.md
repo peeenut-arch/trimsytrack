@@ -46,6 +46,9 @@ TrimsyTrack sync surfaces:
 - `driverdataGet`
 - `driverdataPut`
 - `drivingTripCreate`
+- `tripEvidenceUploadInit`
+- `tripEvidenceListByTrip`
+- `tripEvidenceDownload`
 
 Sales + bookkeeping:
 - `saleCreate`

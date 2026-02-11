@@ -160,6 +160,7 @@ fun SettingsScreen(
     onOpenAccount: () -> Unit,
     onOpenAccountLocation: () -> Unit,
     onOpenSavedStores: () -> Unit,
+    onOpenGhostWizard: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1987,6 +1988,19 @@ fun SettingsScreen(
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            appendSyncDebugLog("Open: Ghost Test Wizard")
+                            onOpenGhostWizard()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Open Ghost Test Wizard")
+                    }
+
                     ListItem(
                         headlineContent = { Text("Outbox pending") },
                         supportingContent = {
@@ -2050,6 +2064,33 @@ fun SettingsScreen(
                             .padding(horizontal = 16.dp),
                     ) {
                         Text("Enqueue canonical flush")
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = {
+                            appendSyncDebugLog("=== Endpoint probe ===")
+                            scope.launch {
+                                runCatching {
+                                    appendSyncDebugLog(com.trimsytrack.system.BackendEndpointProbe.headerRow())
+                                    val rows = com.trimsytrack.system.BackendEndpointProbe.probeAll(
+                                        settings = AppGraph.settings,
+                                        includeTrackEvents = true,
+                                        includeCallable = true,
+                                    )
+                                    rows.forEach { r ->
+                                        appendSyncDebugLog(com.trimsytrack.system.BackendEndpointProbe.formatRow(r))
+                                    }
+                                }.onFailure { t ->
+                                    appendSyncDebugLog("Probe failed: ${t.javaClass.simpleName}: ${t.message}")
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text("Probe backend endpoints")
                     }
 
                     Spacer(Modifier.height(10.dp))

@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.location.Geocoder
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,6 +45,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.trimsytrack.AppGraph
+import com.trimsytrack.BuildConfig
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.ui.media.importDocumentToTripFiles
@@ -75,11 +77,6 @@ fun TripDetailScreen(
     val trip by vm.trip.collectAsState()
     val attachments by AppGraph.tripRepository.observeAttachments(tripId).collectAsState(initial = emptyList())
 
-    val tripNumber = remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(tripId) {
-        tripNumber.value = runCatching { AppGraph.tripRepository.completedTripNumberForTrip(tripId) }.getOrNull()
-    }
-
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val importMessage = remember { mutableStateOf<String?>(null) }
@@ -101,6 +98,13 @@ fun TripDetailScreen(
                 return@rememberLauncherForActivityResult
             }
 
+            if (BuildConfig.DEBUG) {
+                Log.d(
+                    "TrimsyTrack",
+                    "ParkingFeePhoto result uri=$uri feeMinor=$feeMinor tripId=$tripId",
+                )
+            }
+
             val t = trip
             if (t == null) {
                 importMessage.value = "Trip not loaded yet. Try again."
@@ -110,6 +114,13 @@ fun TripDetailScreen(
 
             scope.launch {
                 try {
+                    // Persist read access when the picker supports it (ACTION_OPEN_DOCUMENT).
+                    runCatching {
+                        context.contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                    }
                     val baseEntity = importDocumentToTripFiles(
                         context = context,
                         uid = t.uid,
@@ -121,6 +132,7 @@ fun TripDetailScreen(
                     val feeText = formatMinorAmount(feeMinor)
                     val parkingTicketId = t.parkingTicketId ?: UUID.randomUUID().toString()
                     val entity = baseEntity.copy(
+                        clientRef = parkingTicketId,
                         displayName = "Parking/Traffic fee ${feeText} — receipt (${parkingTicketId.take(8)})"
                     )
                     AppGraph.tripRepository.addAttachment(entity)
@@ -150,8 +162,18 @@ fun TripDetailScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    val n = tripNumber.value ?: 0
-                    Text(if (n > 0) "Trip #$n" else "Trip")
+                    val stopId = trip?.clientRef?.trim().orEmpty()
+                    val runId = trip?.runId ?: 0L
+                    Column {
+                        Text(if (runId > 0L) "Trip ID #$runId" else "Trip")
+                        if (stopId.isNotBlank()) {
+                            Text(
+                                text = "Stop ID $stopId",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -437,17 +459,6 @@ fun TripDetailScreen(
             ) {
                 OutlinedButton(
                     onClick = {
-                        importMessage.value = null
-                        feeInputError.value = null
-                        pendingFeeMinor.value = null
-                        showFeeDialog.value = true
-                    },
-                ) {
-                    Text("Add Parking")
-                }
-
-                OutlinedButton(
-                    onClick = {
                         showAddMediaPrompt.value = false
                         onOpenMediaReviewForTrip(tripId)
                     },
@@ -520,6 +531,12 @@ fun TripDetailScreen(
 
                         pendingFeeMinor.value = parsed
                         showFeeDialog.value = false
+                        if (BuildConfig.DEBUG) {
+                            Log.d(
+                                "TrimsyTrack",
+                                "ParkingFeePhoto launch mime=image/* tripId=$tripId feeMinor=$parsed",
+                            )
+                        }
                         uploadFeePhotoLauncher.launch(arrayOf("image/*"))
                     }
                 ) { Text("Upload photo") }

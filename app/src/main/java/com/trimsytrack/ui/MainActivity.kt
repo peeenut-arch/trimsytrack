@@ -1,6 +1,7 @@
 package com.trimsytrack.ui
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -18,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import com.trimsytrack.AppGraph
+import com.trimsytrack.BuildConfig
 import com.trimsytrack.R
 import com.trimsytrack.ui.theme.TrimsyTheme
 import android.content.Intent
@@ -71,5 +73,19 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         currentIntentState.value = intent
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (!BuildConfig.DEBUG) return
+
+        val extrasKeys = runCatching { data?.extras?.keySet()?.joinToString(prefix = "[", postfix = "]") }.getOrNull()
+        Log.d(
+            "TrimsyTrack",
+            "onActivityResult rc=$requestCode result=$resultCode dataNull=${data == null} " +
+                "action=${data?.action} data=${data?.dataString} type=${data?.type} extras=$extrasKeys",
+        )
     }
 }

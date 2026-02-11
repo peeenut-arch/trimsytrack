@@ -1,6 +1,7 @@
 package com.trimsytrack.data.driverdata
 
 import android.content.Context
+import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -139,16 +140,25 @@ class DriverDataSnapshotUploadWorker(
         }
 
         if (!handshakeSucceeded) {
+            Log.w("TrimsyTrack", "SmokeSync: handshake FAILED (background)")
             return Result.retry()
         }
 
+        Log.i("TrimsyTrack", "SmokeSync: handshake OK (background)")
+
         // If backend writes are disabled (safety mode / server control), do nothing.
         val writesEnabled = AppGraph.settings.backendWritesEnabled.first()
-        if (!writesEnabled) return Result.success()
+        if (!writesEnabled) {
+            Log.w("TrimsyTrack", "SmokeSync: writes disabled; skipping sync")
+            return Result.success()
+        }
 
         // If identity isn't ready, do nothing (prevents noisy retries).
         val uid = AppGraph.settings.backendIdentityUid.first().trim()
-        if (uid.isBlank()) return Result.success()
+        if (uid.isBlank()) {
+            Log.w("TrimsyTrack", "SmokeSync: missing uid; skipping sync")
+            return Result.success()
+        }
 
         // Canonical truth writes must go first. If there are pending canonical writes,
         // prioritize flushing them and retry snapshot later.
@@ -156,8 +166,19 @@ class DriverDataSnapshotUploadWorker(
         val pendingCanonical = runCatching { AppGraph.syncDb.canonicalWriteOutboxDao().countPending() }.getOrDefault(0)
         if (pendingCanonical > 0) {
             runCatching { AppGraph.canonicalWritesSyncManager.enqueueImmediate("pre_snapshot_gate") }
+            Log.i("TrimsyTrack", "SmokeSync: canonical pending=$pendingCanonical; retrying later")
             return Result.retry()
         }
+
+        // Best-effort: evidence/media bytes should be synced alongside metadata.
+        // This runs even if the DriverData snapshot fingerprint has not changed.
+        val evUploaded = runCatching { AppGraph.driverDataRepository.uploadEvidenceBytesBestEffort(limit = 3) }
+            .onFailure { t ->
+                Log.w("TrimsyTrack", "SmokeSync: evidence upload failed: ${t.message?.take(200) ?: t::class.java.simpleName}")
+            }
+            .getOrDefault(0)
+
+        Log.i("TrimsyTrack", "SmokeSync: evidence uploaded=$evUploaded")
 
         // Fixup: older code could cache distances under placeholder uid (e.g. "anon") before handshake.
         // That makes DriverData exports look like distanceCache is empty.
@@ -182,6 +203,11 @@ class DriverDataSnapshotUploadWorker(
                 DriverDataUploadOutcome.SKIPPED_EMPTY -> RESULT_SKIPPED
             }
 
+            Log.i(
+                "TrimsyTrack",
+                "SmokeSync: driverdataPut outcome=${r.outcome} fp=${(r.fingerprint ?: "").take(10)}",
+            )
+
             AppGraph.settings.setDriverDataLastUpload(
                 atMillis = nowMillis,
                 result = outcome,
@@ -190,6 +216,7 @@ class DriverDataSnapshotUploadWorker(
 
             Result.success()
         } else {
+            Log.w("TrimsyTrack", "SmokeSync: driverdataPut FAILED (retry)")
             AppGraph.settings.setDriverDataLastUpload(
                 atMillis = nowMillis,
                 result = "$RESULT_FAILED:$trigger:$reason",

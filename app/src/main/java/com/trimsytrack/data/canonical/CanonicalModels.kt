@@ -16,17 +16,45 @@ internal data class DrivingTripEvidenceMeta(
 )
 
 @Serializable
+internal data class DrivingTripPlace(
+    val at: String? = null,
+    val lat: Double,
+    val lng: Double,
+    val placeType: String? = null,
+    val startPlaceType: String? = null,
+    val endPlaceType: String? = null,
+    val label: String? = null,
+    val placeName: String? = null,
+    val startLabelSnapshot: String? = null,
+    val storeNameSnapshot: String? = null,
+    val citySnapshot: String? = null,
+    val storeId: String? = null,
+    val storeLocationId: String? = null,
+    val postOmbudId: String? = null,
+    val storeLatSnapshot: Double? = null,
+    val storeLngSnapshot: Double? = null,
+    val startAddressSnapshot: String? = null,
+    val endAddressSnapshot: String? = null,
+    val address: String? = null,
+)
+
+@Serializable
 internal data class DrivingTripCreateBody(
     val idempotencyKey: String,
     val clientTripId: String,
     val localTripNumber: Int,
+    val day: String,
     val runId: Long? = null,
     val syfte: String,
+    val businessPurpose: String? = null,
+    val isBusiness: Boolean = true,
     val driverName: String? = null,
     val vehicleRegNumber: String? = null,
     val startedAt: String,
     val endedAt: String,
     val timeZoneId: String,
+    val start: DrivingTripPlace,
+    val end: DrivingTripPlace,
     val startLat: Double,
     val startLng: Double,
     val startPlaceName: String? = null,
@@ -56,7 +84,8 @@ internal data class DrivingTripCreateBody(
 
 @Serializable
 internal data class DrivingTripCreateResult(
-    val drivingTripId: String,
+    val drivingTripId: String? = null,
+    val tripId: String? = null,
 )
 
 @Serializable

@@ -8,9 +8,12 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
@@ -30,8 +33,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -47,8 +52,10 @@ import com.trimsytrack.data.trackevents.TrackEventsCapabilityProbeWorker
 import com.trimsytrack.data.trackevents.TrackEventsOutboxWorker
 import com.trimsytrack.debug.DebuggLogStore
 import com.trimsytrack.system.BackendBaselineProbe
+import com.trimsytrack.system.BackendEndpointProbe
 import com.trimsytrack.system.HardBlockCode
 import com.trimsytrack.ui.theme.TrimsyGreen
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -70,12 +77,28 @@ fun StartupScreen(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     var state: StartupState by remember { mutableStateOf(StartupState.Loading) }
     var lastError: String? by remember { mutableStateOf(null) }
+
+    var probeOutput: String? by remember { mutableStateOf(null) }
+    var isProbing: Boolean by remember { mutableStateOf(false) }
+
+    fun formatProbeRows(title: String, baseUrlRaw: String, rows: List<BackendEndpointProbe.Row>): String {
+        val base = runCatching { BackendEndpointProbe.normalizeBaseUrlForDisplay(baseUrlRaw) }.getOrElse { baseUrlRaw.trim() }
+        return buildString {
+            appendLine(title)
+            appendLine("baseUrl=$base")
+            appendLine(BackendEndpointProbe.headerRow())
+            rows.forEach { appendLine(BackendEndpointProbe.formatRow(it)) }
+        }
+    }
 
     suspend fun runHandshake() {
         state = StartupState.Loading
         lastError = null
+        probeOutput = null
+        isProbing = false
 
         for (attempt in 0..1) {
             try {
@@ -154,14 +177,17 @@ fun StartupScreen(
 
                 // Baseline verification: detect misdeploys early (e.g. missing canonical route).
                 runCatching {
-                    withContext(Dispatchers.IO) { BackendBaselineProbe.verifyCanonicalRouteBaseline() }
+                    val baseUrlRaw = AppGraph.settings.backendBaseUrl.first()
+                    withContext(Dispatchers.IO) { BackendBaselineProbe.verifyCanonicalRouteBaseline(baseUrlRaw = baseUrlRaw) }
                 }.onFailure { t ->
                     if (t is BackendBlockedException && t.machineCode?.trim()?.uppercase() == "ROUTE_NOT_FOUND") {
                         val base = BuildConfig.BACKEND_API_BASE.trim()
+                        val settingsBase = runCatching { AppGraph.settings.backendBaseUrl.first().trim() }.getOrNull()
                         val deploy = result.deployment
                         state = StartupState.Error(
                             "Backend mismatch detected (canonical route missing).\n\n" +
                                 "baseUrl=$base\n" +
+                                (settingsBase?.takeIf { it.isNotBlank() && it != base }?.let { "settingsBaseUrl=$it\n" } ?: "") +
                                 "service=${deploy?.service ?: "-"} revision=${deploy?.revision ?: "-"} target=${deploy?.functionTarget ?: "-"}\n\n" +
                                 "This usually means you are hitting the wrong backend or an old revision that lacks drivingTripCreate."
                         )
@@ -255,6 +281,11 @@ fun StartupScreen(
                     }
                 }
                 return
+            } catch (t: CancellationException) {
+                // Normal in Compose: if the StartupScreen leaves composition while handshake is running,
+                // the coroutine is cancelled (e.g. after navigation). This is not a handshake failure.
+                Log.i("Startup", "Handshake cancelled", t)
+                throw t
             } catch (t: Throwable) {
                 Log.e("Startup", "Handshake failed", t)
                 DebuggLogStore.add(
@@ -431,6 +462,129 @@ fun StartupScreen(
                                 onRetry = { scope.launch { runHandshake() } },
                                 onSignOut = onSignOut,
                             )
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                OutlinedButton(
+                                    enabled = !isProbing,
+                                    onClick = {
+                                        scope.launch {
+                                            isProbing = true
+                                            probeOutput = "Probing endpoints…"
+
+                                            val buildConfigBase = BuildConfig.BACKEND_API_BASE
+                                            val settingsBase = runCatching { AppGraph.settings.backendBaseUrl.first() }.getOrNull().orEmpty()
+
+                                            val buildRows = runCatching {
+                                                withContext(Dispatchers.IO) {
+                                                    BackendEndpointProbe.probeAllWithBaseUrl(
+                                                        baseUrlRaw = buildConfigBase,
+                                                        includeTrackEvents = true,
+                                                        includeCallable = true,
+                                                    )
+                                                }
+                                            }.getOrElse { t ->
+                                                listOf(
+                                                    BackendEndpointProbe.Row(
+                                                        name = "_probe_failed",
+                                                        transport = "HTTP",
+                                                        target = buildConfigBase,
+                                                        method = "-",
+                                                        status = "EXC",
+                                                        ok = "false",
+                                                        errorCode = t.javaClass.simpleName,
+                                                        errorMessage = t.message.orEmpty(),
+                                                    ),
+                                                )
+                                            }
+
+                                            val parts = mutableListOf<String>()
+                                            parts += formatProbeRows("[Probe: BuildConfig]", buildConfigBase, buildRows)
+
+                                            val buildNorm = runCatching { BackendEndpointProbe.normalizeBaseUrlForDisplay(buildConfigBase) }.getOrElse { buildConfigBase.trim() }
+                                            val settingsNorm = runCatching { BackendEndpointProbe.normalizeBaseUrlForDisplay(settingsBase) }.getOrElse { settingsBase.trim() }
+                                            if (settingsNorm.isNotBlank() && settingsNorm != buildNorm) {
+                                                val settingsRows = runCatching {
+                                                    withContext(Dispatchers.IO) {
+                                                        BackendEndpointProbe.probeAllWithBaseUrl(
+                                                            baseUrlRaw = settingsBase,
+                                                            includeTrackEvents = true,
+                                                            includeCallable = true,
+                                                        )
+                                                    }
+                                                }.getOrElse { t ->
+                                                    listOf(
+                                                        BackendEndpointProbe.Row(
+                                                            name = "_probe_failed",
+                                                            transport = "HTTP",
+                                                            target = settingsBase,
+                                                            method = "-",
+                                                            status = "EXC",
+                                                            ok = "false",
+                                                            errorCode = t.javaClass.simpleName,
+                                                            errorMessage = t.message.orEmpty(),
+                                                        ),
+                                                    )
+                                                }
+                                                parts += formatProbeRows("\n[Probe: Settings override]", settingsBase, settingsRows)
+                                            }
+
+                                            probeOutput = parts.joinToString("\n")
+                                            DebuggLogStore.add(tag = "Probe", message = "\n" + probeOutput.orEmpty())
+                                            isProbing = false
+                                        }
+                                    },
+                                ) {
+                                    Text(if (isProbing) "Probing…" else "Probe endpoints")
+                                }
+
+                                OutlinedButton(
+                                    enabled = !isProbing && (!probeOutput.isNullOrBlank() || DebuggLogStore.snapshotAllLines().isNotEmpty()),
+                                    onClick = {
+                                        val out = buildString {
+                                            appendLine("[Probe endpoints]")
+                                            appendLine(probeOutput.orEmpty().trim())
+                                            appendLine()
+                                            appendLine("[In-memory debug logs]")
+                                            DebuggLogStore.snapshotAllLines().forEach { appendLine(it) }
+                                        }.trim()
+                                        clipboard.setText(AnnotatedString(out))
+                                    },
+                                ) {
+                                    Text("Copy logs")
+                                }
+
+                                OutlinedButton(
+                                    enabled = !isProbing && (!probeOutput.isNullOrBlank() || DebuggLogStore.snapshotAllLines().isNotEmpty()),
+                                    onClick = {
+                                        probeOutput = null
+                                        DebuggLogStore.clear()
+                                    },
+                                ) {
+                                    Text("Clear logs")
+                                }
+                            }
+
+                            if (!probeOutput.isNullOrBlank()) {
+                                val scroll = rememberScrollState()
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 260.dp),
+                                    color = Color.Black.copy(alpha = 0.35f),
+                                    shape = MaterialTheme.shapes.small,
+                                ) {
+                                    Text(
+                                        text = probeOutput.orEmpty(),
+                                        modifier = Modifier
+                                            .padding(10.dp)
+                                            .verticalScroll(scroll),
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp,
+                                        color = Color.White,
+                                    )
+                                }
+                            }
+
                             if (!lastError.isNullOrBlank()) {
                                 Text(lastError!!, color = MaterialTheme.colorScheme.error)
                             }

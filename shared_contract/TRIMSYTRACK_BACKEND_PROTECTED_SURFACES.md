@@ -56,6 +56,112 @@ These are the **minimum** backend surfaces TrimsyTRACK depends on today:
 
 (TrimsyTRACK also uses `uidEnsure` as an identity bootstrap in some flows; treat it as protected if used by clients.)
 
+### 2.4 Full backend route inventory (HTTP apiV1)
+
+Backend entrypoint: [BACKENDTRIMSY/functions/src/index.ts](BACKENDTRIMSY/functions/src/index.ts)
+
+All HTTP routes exposed under:
+- `POST https://<region>-<project>.cloudfunctions.net/apiV1/<route>`
+
+Inventory (current):
+
+**System / startup**
+- `health` (or empty route): health check
+- `handshakeGet` (**shared**, requires `app_id`)
+- `uidEnsure` (**shared**, idempotent provisioning helper)
+
+**AppData snapshot sync (chunked, shared)**
+- `appDataChunkPut`
+- `appDataCommit`
+- `appDataHeadsGet`
+- `appDataChunkGet`
+
+Notes:
+- These are shared surfaces. Isolation is enforced by `source_app_id` within the payload and per-app keys/doc IDs in storage.
+- Do not change their semantics without a shared-contract update + migration plan.
+
+**TrimsyTRACK-only sync + truth**
+- `driverdataPut` (**TrimsyTRACK-only**)
+- `trackEventsBatchPut` (**TrimsyTRACK-only**)
+- `trackEventsSinceGet` (**TrimsyTRACK-only**)
+- `drivingTripCreate` (**TrimsyTRACK-only**)
+
+**TrimsyTRACK + TrimsyPC (read-only)**
+- `driverdataGet`
+
+**Other app/system surfaces (not TrimsyTRACK-owned)**
+- `purgeMe`
+- `deleteMe`
+- `lawGet`
+- `lawQuizGet`
+- `lawQuizSubmit`
+- `lawAccept`
+- `lawContractGet`
+- `productCreate`
+- `productSetCategoryNumber`
+- `receiptCreate`
+- `receiptRowCreate`
+- `productCostAllocate`
+- `invariantsOpen`
+- `opsGetSafetyMode`
+- `opsSetSafetyMode`
+
+### 2.5 Full backend callable inventory (Firebase onCall)
+
+Callables are exported in the same file:
+- [BACKENDTRIMSY/functions/src/index.ts](BACKENDTRIMSY/functions/src/index.ts)
+
+Inventory (current):
+- `handshakeGetCallable` (shared)
+- `productCreateCallable`
+- `lawGetCallable`
+- `lawQuizGetCallable`
+- `lawQuizSubmitCallable`
+- `lawAcceptCallable`
+- `lawContractGetCallable`
+- `productSetCategoryNumberCallable`
+- `receiptCreateCallable`
+- `receiptRowCreateCallable`
+- `productCostAllocateCallable`
+- `drivingTripCreateCallable` (**TrimsyTRACK-only**)
+- `invariantsOpenCallable`
+- `selfTestCallable`
+
+## 3) Route ownership declaration (the part TrimsyApp must obey)
+
+This is the explicit “do not tamper” rule across apps:
+
+### 3.1 TrimsyTRACK-only (reserved route names)
+These routes are reserved for TrimsyTRACK and must reject non-TrimsyTRACK callers:
+- `driverdataPut`
+- `trackEventsBatchPut`
+- `trackEventsSinceGet`
+- `drivingTripCreate`
+- `tripEvidenceUploadInit`
+
+Enforcement (backend): `requireTrimsyTrackAppId(data, routeName)`.
+
+### 3.2 TrimsyTRACK + TrimsyPC (read-only)
+These routes allow TrimsyPC to fetch TrimsyTRACK-owned evidence media from backend storage, but must still reject `app_id=trimsyapp`:
+- `driverdataGet`
+- `tripEvidenceListByTrip`
+- `tripEvidenceDownload`
+
+Enforcement (backend): allow `app_id` in `{ trimsytrack, trimsypc }`.
+
+### 3.3 Shared (allowed for multiple apps)
+These routes are shared and must remain stable across all apps:
+- `handshakeGet`
+- `uidEnsure`
+- `appDataChunkPut`
+- `appDataCommit`
+- `appDataHeadsGet`
+- `appDataChunkGet`
+
+Shared rule:
+- Must validate `app_id` (must be one of: `trimsyapp`, `trimsytrack`, `trimsypc`).
+- Must not allow cross-app data mutation; storage keys/queries must be app-scoped (e.g. `source_app_id`).
+
 ### 2.2 Stability rules for these routes
 - Must not be removed.
 - Must not be repurposed.

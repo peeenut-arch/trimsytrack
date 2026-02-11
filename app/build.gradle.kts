@@ -42,8 +42,9 @@ android {
 
         // Multi-app isolation: a stable app_id (compiled into the APK).
         // Backend uses this to prevent cross-app data leakage.
-        val fixedAppId = (providers.gradleProperty("APP_ID").orNull ?: "trimsytrack").trim()
-        buildConfigField("String", "APP_ID", "\"$fixedAppId\"")
+        // IMPORTANT: This must never be changed or overridden.
+        // TrimsyTRACK identity lock: app_id=trimsytrack.
+        buildConfigField("String", "APP_ID", "\"trimsytrack\"")
 
         // BACKENDTRIMSY HTTP API base (must include trailing slash).
         // Overridable for dev via Gradle property, local.properties, or env var.

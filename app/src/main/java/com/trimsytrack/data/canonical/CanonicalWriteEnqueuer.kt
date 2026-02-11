@@ -2,6 +2,7 @@ package com.trimsytrack.data.canonical
 
 import android.util.Log
 import com.trimsytrack.AppGraph
+import com.trimsytrack.BuildConfig
 import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.SyncStatus
@@ -80,17 +81,54 @@ class CanonicalWriteEnqueuer(
         val startedAtInstant = trip.startedAt
         val endedAtInstant = if (trip.endedAt.isBefore(startedAtInstant)) startedAtInstant else trip.endedAt
 
+        val startPlace = DrivingTripPlace(
+            at = startedAtInstant.toString(),
+            lat = trip.startLat,
+            lng = trip.startLng,
+            placeType = trip.startPlaceType.name,
+            startPlaceType = trip.startPlaceType.name,
+            label = trip.startLabelSnapshot.trim().ifBlank { null },
+            placeName = trip.startLabelSnapshot.trim().ifBlank { null },
+            startLabelSnapshot = trip.startLabelSnapshot.trim().ifBlank { null },
+            startAddressSnapshot = trip.startAddressSnapshot?.trim()?.ifBlank { null },
+            address = trip.startAddressSnapshot?.trim()?.ifBlank { null },
+        )
+
+        val endPlace = DrivingTripPlace(
+            at = endedAtInstant.toString(),
+            lat = trip.storeLatSnapshot,
+            lng = trip.storeLngSnapshot,
+            placeType = trip.endPlaceType.name,
+            endPlaceType = trip.endPlaceType.name,
+            label = trip.storeNameSnapshot.trim().ifBlank { null },
+            placeName = trip.storeNameSnapshot.trim().ifBlank { null },
+            storeNameSnapshot = trip.storeNameSnapshot.trim().ifBlank { null },
+            citySnapshot = trip.citySnapshot.trim().ifBlank { "Unknown" },
+            storeId = trip.storeId.trim().ifBlank { null },
+            storeLocationId = trip.storeLocationId?.trim()?.ifBlank { null },
+            postOmbudId = trip.postOmbudId?.trim()?.ifBlank { null },
+            storeLatSnapshot = trip.storeLatSnapshot,
+            storeLngSnapshot = trip.storeLngSnapshot,
+            endAddressSnapshot = trip.endAddressSnapshot?.trim()?.ifBlank { null },
+            address = trip.endAddressSnapshot?.trim()?.ifBlank { null },
+        )
+
         val body = DrivingTripCreateBody(
             idempotencyKey = idempotencyKey,
             clientTripId = clientTripId,
             localTripNumber = trip.id.toInt().coerceAtLeast(0),
+            day = trip.day.toString(),
             runId = trip.runId?.takeIf { it > 0 },
             syfte = syfte,
+            businessPurpose = syfte,
+            isBusiness = trip.isBusiness,
             driverName = driverName,
             vehicleRegNumber = vehicleRegNumber,
             startedAt = startedAtInstant.toString(),
             endedAt = endedAtInstant.toString(),
             timeZoneId = trip.timeZoneId,
+            start = startPlace,
+            end = endPlace,
             startLat = trip.startLat,
             startLng = trip.startLng,
             startPlaceName = trip.startLabelSnapshot.trim().ifBlank { null },
@@ -115,7 +153,7 @@ class CanonicalWriteEnqueuer(
             occurredAt = endedAtInstant.toString(),
             clientProtocolVersion = handshakeMarker,
             clientRequestId = clientRequestId,
-            app_id = "trimsytrack",
+            app_id = BuildConfig.APP_ID,
         )
 
         val bodyJson = json.encodeToString(DrivingTripCreateBody.serializer(), body)

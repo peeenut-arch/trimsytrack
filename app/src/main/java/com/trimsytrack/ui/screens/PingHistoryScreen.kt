@@ -2280,7 +2280,10 @@ private fun BuilderRunDetailsDialogPreview(
                         val timeLabel = if (startTime.isNotBlank() && endTime.isNotBlank()) "$startTime–$endTime" else ""
 
                         val stopMeta = buildString {
-                            append("Stop #").append(idx + 1)
+                            val stopId = t.clientRef?.trim().orEmpty()
+                            val tripId = t.runId ?: 0L
+                            if (stopId.isNotBlank()) append("Stop ID ").append(stopId).append(" · ")
+                            if (tripId > 0L) append("Trip ID #").append(tripId)
                             if (timeLabel.isNotBlank()) append(" · ").append(timeLabel)
                         }
 
@@ -2298,7 +2301,7 @@ private fun BuilderRunDetailsDialogPreview(
                                 Text(
                                     text = when (t.endPlaceType) {
                                         PlaceType.HOME -> "Business home"
-                                        else -> t.storeNameSnapshot.ifBlank { "Stop" }
+                                        else -> t.storeNameSnapshot.ifBlank { "Trip ID #${t.id}" }
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
                                     maxLines = 1,

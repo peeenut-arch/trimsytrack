@@ -533,7 +533,11 @@ fun CameraScreen(
     val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
-        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        // Some devices/flows can deliver RESULT_OK but without the expected extras.
+        // ML Kit parsing assumes extras exist; bail out early if missing.
+        if (data.extras == null) return@rememberLauncherForActivityResult
+        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
             ?: return@rememberLauncherForActivityResult
 
         val uri = scanResult.pdf?.uri ?: scanResult.pages?.firstOrNull()?.imageUri
@@ -585,7 +589,11 @@ fun CameraScreen(
         }
         scanner.getStartScanIntent(a)
             .addOnSuccessListener { intentSender ->
-                scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                scanLauncher.launch(
+                    IntentSenderRequest.Builder(intentSender)
+                        .setFillInIntent(android.content.Intent())
+                        .build()
+                )
             }
             .addOnFailureListener { e ->
                 captureError.value = e.message ?: "Failed to start scanner"

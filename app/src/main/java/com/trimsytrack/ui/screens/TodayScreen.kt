@@ -267,17 +267,9 @@ fun TodayScreen(
                                                         )
                                                     }
 
-                                                    val completedTripNumber = withContext(Dispatchers.IO) {
-                                                        AppGraph.tripRepository.completedTripNumberForTrip(tripId)
-                                                    } ?: 0
-
                                                     runCatching { AppGraph.geofenceSyncManager.scheduleSync("today_current_trip_home_button") }
 
-                                                    homeTripStatus = if (completedTripNumber > 0) {
-                                                        "Completed trip #$completedTripNumber (Home)."
-                                                    } else {
-                                                        "Completed trip (Home)."
-                                                    }
+                                                    homeTripStatus = "Completed Trip ID #$tripId (Home)."
                                                 } catch (e: Exception) {
                                                     homeTripStatus = e.message ?: "Failed to create Home trip"
                                                 } finally {
@@ -307,8 +299,15 @@ fun TodayScreen(
 
                                 currentRun.forEachIndexed { index, t ->
                                     val time = timeFormatter.format(t.endedAt.atZone(ZoneId.systemDefault()))
+                                    val stopId = t.clientRef?.trim().orEmpty()
+                                    val tripId = t.runId ?: 0L
                                     Text(
-                                        text = "Stop #${index + 1} · $time · ${t.storeNameSnapshot}",
+                                        text = buildString {
+                                            if (tripId > 0L) append("Trip ID #").append(tripId)
+                                            if (stopId.isNotBlank()) append(" · Stop ID ").append(stopId)
+                                            append(" · ").append(time)
+                                            append(" · ").append(t.storeNameSnapshot)
+                                        },
                                         style = MaterialTheme.typography.bodyMedium,
                                     )
                                 }

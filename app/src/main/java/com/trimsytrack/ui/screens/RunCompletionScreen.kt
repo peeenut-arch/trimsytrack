@@ -340,16 +340,8 @@ fun RunCompletionScreen(
                             )
                         }
 
-                        val completedTripNumber = withContext(Dispatchers.IO) {
-                            AppGraph.tripRepository.completedTripNumberForTrip(tripId)
-                        } ?: 0
-
                         runCatching { AppGraph.geofenceSyncManager.scheduleSync("run_complete_manual") }
-                        okMessage = if (completedTripNumber > 0) {
-                            "Completed trip #$completedTripNumber (Home)."
-                        } else {
-                            "Completed trip (Home)."
-                        }
+                        okMessage = "Completed Trip ID #$tripId (Home)."
                     } catch (t: Throwable) {
                         error = t.message ?: "Failed"
                     } finally {

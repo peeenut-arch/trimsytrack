@@ -1,6 +1,8 @@
 package com.trimsytrack.data.driverdata
 
 import android.content.Context
+import android.util.Base64
+import android.util.Log
 import com.trimsytrack.AppGraph
 import com.trimsytrack.BuildConfig
 import com.trimsytrack.data.SettingsStore
@@ -14,28 +16,45 @@ import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.data.entities.VisitedStoreEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.debug.DebuggLogStore
+import com.trimsytrack.backend.BackendErrorParsing
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneId
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import retrofit2.Retrofit
 import retrofit2.HttpException
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import java.util.UUID
 import com.trimsytrack.system.SystemCallablesService
 import com.trimsytrack.backend.PurgeApi
+import android.net.Uri
+import java.io.InputStream
+import java.util.concurrent.TimeUnit
 
 class DriverDataRepository(
     private val context: Context,
@@ -90,6 +109,476 @@ class DriverDataRepository(
         val app_id: String,
     )
 
+    private interface TripEvidenceApi {
+        @retrofit2.http.POST("tripEvidenceUploadInit")
+        suspend fun uploadInit(
+            @retrofit2.http.Body body: okhttp3.RequestBody,
+        ): String
+
+        @retrofit2.http.POST("tripEvidencePutBytes")
+        suspend fun putBytes(
+            @retrofit2.http.Body body: okhttp3.RequestBody,
+        ): String
+    }
+
+    @Serializable
+    private data class TripEvidencePutBytesRequest(
+        val clientProtocolVersion: Int,
+        val app_id: String,
+        val clientEvidenceId: String,
+        val tripClientRef: String,
+        val contentType: String,
+        val displayName: String,
+        val contentBase64: String,
+        val clientRequestId: String,
+    )
+
+    @Serializable
+    private data class TripEvidencePutBytesResult(
+        val alreadyUploaded: Boolean = false,
+        val storagePath: String = "",
+        val sizeBytes: Long? = null,
+        val sha256: String? = null,
+    )
+
+    @Serializable
+    private data class TripEvidencePutBytesResponse(
+        val ok: Boolean = false,
+        val result: TripEvidencePutBytesResult? = null,
+        val error: com.trimsytrack.backend.BackendApiError? = null,
+    )
+
+    @Serializable
+    private data class TripEvidenceUploadInitRequest(
+        val clientEvidenceId: String,
+        val tripClientRef: String,
+        val backendTripId: String? = null,
+        val parkingTicketId: String? = null,
+        val contentType: String,
+        val displayName: String,
+        val sha256: String? = null,
+        val sizeBytes: Long? = null,
+        val capturedAt: String? = null,
+        val linkedAt: String? = null,
+        val linkedByDeviceId: String? = null,
+        val clientProtocolVersion: Int,
+        val clientRequestId: String,
+        val app_id: String,
+    )
+
+    @Serializable
+    private data class TripEvidenceUploadInitResult(
+        val alreadyUploaded: Boolean = false,
+        val clientEvidenceId: String = "",
+        val tripClientRef: String = "",
+        val storagePath: String = "",
+        val uploadUrl: String? = null,
+        val expiresAtIso: String? = null,
+    )
+
+    @Serializable
+    private data class TripEvidenceUploadInitResponse(
+        val ok: Boolean = false,
+        val result: TripEvidenceUploadInitResult? = null,
+        val error: com.trimsytrack.backend.BackendApiError? = null,
+    )
+
+    private class InputStreamRequestBody(
+        private val contentType: okhttp3.MediaType,
+        private val contentLengthBytes: Long?,
+        private val inputStreamProvider: () -> InputStream,
+    ) : RequestBody() {
+        override fun contentType(): okhttp3.MediaType = contentType
+        override fun contentLength(): Long = contentLengthBytes ?: -1L
+
+        override fun writeTo(sink: BufferedSink) {
+            inputStreamProvider().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    sink.write(buffer, 0, read)
+                }
+            }
+        }
+    }
+
+    private fun messageChain(t: Throwable): String {
+        val out = mutableListOf<String>()
+        var cur: Throwable? = t
+        var guard = 0
+        while (cur != null && guard < 8) {
+            cur.message?.trim()?.takeIf { it.isNotBlank() }?.let { out.add(it) }
+            cur = cur.cause
+            guard += 1
+        }
+        return out.joinToString(" | ")
+    }
+
+    private fun isRetryableSignedUrlPutFailure(t: Throwable): Boolean {
+        if (t !is IOException) return false
+        val msg = messageChain(t).lowercase()
+        // Common transport-layer flakiness; especially when HTTP/2 streams are involved.
+        return msg.contains("unexpected end of stream") ||
+            msg.contains("eof") ||
+            msg.contains("stream was reset") ||
+            msg.contains("connection reset")
+    }
+
+    private fun guessContentLength(uri: Uri): Long? {
+        return runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                val len = afd.length
+                len.takeIf { it > 0 }
+            }
+        }.getOrNull()
+    }
+
+    private fun readAllBytes(uri: Uri): ByteArray {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            return input.readBytes()
+        }
+        throw IOException("Unable to open evidence uri")
+    }
+
+    /**
+     * Uploads evidence bytes (photos/PDF receipts) to backend storage.
+     * This is best-effort and intentionally independent of snapshot fingerprints.
+     */
+    suspend fun uploadEvidenceBytesBestEffort(
+        limit: Int = 3,
+        onLog: ((String) -> Unit)? = null,
+    ): Int = withContext(Dispatchers.IO) {
+        val handshakeMarker = settings.backendProtocolVersion.first()
+            ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
+
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return@withContext 0
+
+        val baseUrlRaw = settings.backendBaseUrl.first().trim().ifBlank { BuildConfig.BACKEND_API_BASE }
+        val baseUrl = normalizeBaseUrl(baseUrlRaw)
+
+        val retrofit = Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(AppGraph.backendHttpClient)
+            .addConverterFactory(ScalarsConverterFactory.create())
+            .build()
+        val api = retrofit.create(TripEvidenceApi::class.java)
+
+        val trips = runCatching { AppGraph.db.tripDao().listAll(uid) }.getOrDefault(emptyList())
+        val tripById = trips.associateBy { it.id }
+
+        val candidates = runCatching { AppGraph.db.attachmentDao().listAll(uid) }.getOrDefault(emptyList())
+            .asSequence()
+            .filter { it.clientRef?.trim().orEmpty().isNotBlank() }
+            .filter { it.uri.trim().isNotBlank() }
+            .sortedByDescending { it.addedAt }
+            // Scan more than we upload so we still make progress if some are already uploaded.
+            .take((limit * 12).coerceAtMost(240))
+            .toList()
+
+        val startLine = "EvidenceUpload: start uid=${uid.take(8)} limit=$limit candidates=${candidates.size} baseUrl=${baseUrl.take(80)}"
+        Log.i("TrimsyTrack", startLine)
+        onLog?.invoke(startLine)
+
+        var uploaded = 0
+
+        for (a in candidates) {
+            if (uploaded >= limit) break
+            runCatching {
+                val clientEvidenceId = a.clientRef?.trim().orEmpty()
+                if (clientEvidenceId.isBlank()) return@runCatching
+
+                val trip = tripById[a.tripId] ?: return@runCatching
+                val tripClientRef = trip.clientRef?.trim().orEmpty()
+                if (tripClientRef.isBlank()) return@runCatching
+
+                val parkingTicketId = trip.parkingTicketId
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() && it == clientEvidenceId }
+
+                val sanitizedContentType = a.mimeType.trim().ifBlank { "application/octet-stream" }
+                val sanitizedDisplayName = a.displayName.trim().ifBlank { "Evidence" }
+
+                Log.i(
+                    "TrimsyTrack",
+                    "EvidenceUpload: attempt ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} isParkingReceipt=${parkingTicketId != null} bytes=${a.sizeBytes ?: -1}",
+                )
+                onLog?.invoke(
+                    "EvidenceUpload: attempt ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} isParkingReceipt=${parkingTicketId != null} bytes=${a.sizeBytes ?: -1}",
+                )
+
+                val rid = UUID.randomUUID().toString()
+                val req = TripEvidenceUploadInitRequest(
+                    clientEvidenceId = clientEvidenceId,
+                    tripClientRef = tripClientRef,
+                    backendTripId = trip.backendId?.trim()?.ifBlank { null },
+                    parkingTicketId = parkingTicketId,
+                    contentType = sanitizedContentType,
+                    displayName = sanitizedDisplayName,
+                    sha256 = a.sha256?.trim()?.ifBlank { null },
+                    sizeBytes = a.sizeBytes,
+                    capturedAt = a.capturedAt.toString(),
+                    linkedAt = a.linkedAt?.toString(),
+                    linkedByDeviceId = a.linkedByDeviceId?.trim()?.ifBlank { null },
+                    clientProtocolVersion = handshakeMarker,
+                    clientRequestId = rid,
+                    app_id = BuildConfig.APP_ID,
+                )
+
+                onLog?.invoke("EvidenceUpload: uploadInit rid=${rid.take(8)} ev=${clientEvidenceId.take(8)}")
+
+                val raw = api.uploadInit(
+                    body = json.encodeToString(TripEvidenceUploadInitRequest.serializer(), req)
+                        .toRequestBody(jsonMediaType)
+                )
+
+                val envelope = runCatching {
+                    json.decodeFromString(TripEvidenceUploadInitResponse.serializer(), raw)
+                }.getOrElse {
+                    throw IOException("tripEvidenceUploadInit failed: invalid response")
+                }
+
+                if (!envelope.ok) {
+                    val msg = envelope.error?.message?.trim().orEmpty().ifBlank { "tripEvidenceUploadInit failed" }
+                    throw IOException(msg)
+                }
+
+                val result = envelope.result ?: throw IOException("tripEvidenceUploadInit failed: missing result")
+                Log.i(
+                    "TrimsyTrack",
+                    "EvidenceUpload: init ok ev=${clientEvidenceId.take(8)} alreadyUploaded=${result.alreadyUploaded}",
+                )
+                onLog?.invoke(
+                    "EvidenceUpload: init ok ev=${clientEvidenceId.take(8)} alreadyUploaded=${result.alreadyUploaded}",
+                )
+
+                if (result.alreadyUploaded) {
+                    return@runCatching
+                }
+
+                val uploadUrl = result.uploadUrl?.trim().orEmpty()
+                if (uploadUrl.isBlank()) {
+                    Log.w("TrimsyTrack", "EvidenceUpload: init missing uploadUrl ev=${clientEvidenceId.take(8)}")
+                    onLog?.invoke("EvidenceUpload: init missing uploadUrl ev=${clientEvidenceId.take(8)}")
+                    return@runCatching
+                }
+
+                val uri = runCatching { Uri.parse(a.uri) }.getOrNull() ?: return@runCatching
+                val contentType = runCatching { sanitizedContentType.toMediaType() }
+                    .getOrElse { "application/octet-stream".toMediaType() }
+
+                val contentLength = a.sizeBytes?.takeIf { it > 0 } ?: guessContentLength(uri)
+
+                val baseOkHttp = (AppGraph.backendHttpClient as? OkHttpClient) ?: OkHttpClient()
+                val signedUrlPutClient = baseOkHttp.newBuilder()
+                    // Signed URLs go to GCS; force HTTP/1.1 to avoid flaky HTTP/2 stream resets.
+                    .protocols(listOf(Protocol.HTTP_1_1))
+                    .connectTimeout(20, TimeUnit.SECONDS)
+                    .readTimeout(30, TimeUnit.SECONDS)
+                    .writeTimeout(30, TimeUnit.SECONDS)
+                    .callTimeout(75, TimeUnit.SECONDS)
+                    .build()
+
+                val backoffsMs = listOf(250L, 1_000L, 3_000L)
+                var attempt = 0
+                var lastPutFailure: Throwable? = null
+                while (true) {
+                    val attemptLabel = "${attempt + 1}/${backoffsMs.size}"
+                    try {
+                        // Re-init each attempt to get a fresh signed URL (previous one may be invalidated or partially used).
+                        val retryRid = UUID.randomUUID().toString()
+                        val retryReq = req.copy(clientRequestId = retryRid)
+                        onLog?.invoke(
+                            "EvidenceUpload: uploadInit rid=${retryRid.take(8)} ev=${clientEvidenceId.take(8)} attempt=$attemptLabel",
+                        )
+
+                        val retryRaw = api.uploadInit(
+                            body = json.encodeToString(TripEvidenceUploadInitRequest.serializer(), retryReq)
+                                .toRequestBody(jsonMediaType)
+                        )
+
+                        val retryEnvelope = runCatching {
+                            json.decodeFromString(TripEvidenceUploadInitResponse.serializer(), retryRaw)
+                        }.getOrElse {
+                            throw IOException("tripEvidenceUploadInit failed: invalid response")
+                        }
+                        if (!retryEnvelope.ok) {
+                            val msg = retryEnvelope.error?.message?.trim().orEmpty().ifBlank { "tripEvidenceUploadInit failed" }
+                            throw IOException(msg)
+                        }
+                        val retryResult = retryEnvelope.result
+                            ?: throw IOException("tripEvidenceUploadInit failed: missing result")
+                        if (retryResult.alreadyUploaded) {
+                            onLog?.invoke("EvidenceUpload: alreadyUploaded ev=${clientEvidenceId.take(8)}")
+                            return@runCatching
+                        }
+                        val retryUploadUrl = retryResult.uploadUrl?.trim().orEmpty()
+                        if (retryUploadUrl.isBlank()) {
+                            throw IOException("tripEvidenceUploadInit missing uploadUrl")
+                        }
+
+                        val body = InputStreamRequestBody(
+                            contentType = contentType,
+                            contentLengthBytes = contentLength,
+                            inputStreamProvider = {
+                                context.contentResolver.openInputStream(uri)
+                                    ?: throw IOException("Unable to open evidence uri")
+                            },
+                        )
+
+                        val requestBuilder = Request.Builder()
+                            .url(retryUploadUrl)
+                            .put(body)
+                            .header("Content-Type", sanitizedContentType)
+
+                        if (contentLength != null && contentLength > 0) {
+                            requestBuilder.header("Content-Length", contentLength.toString())
+                        }
+
+                        val resp = signedUrlPutClient.newCall(requestBuilder.build()).execute()
+                        resp.use {
+                            if (!it.isSuccessful) {
+                                throw IOException("Evidence upload failed http=${it.code}")
+                            }
+                            Log.i("TrimsyTrack", "EvidenceUpload: put ok ev=${clientEvidenceId.take(8)} http=${it.code}")
+                            onLog?.invoke("EvidenceUpload: put ok ev=${clientEvidenceId.take(8)} http=${it.code}")
+                        }
+
+                        // If we succeeded after a prior retry failure, ensure we do NOT trigger fallback.
+                        lastPutFailure = null
+                        uploaded += 1
+                        break
+                    } catch (t: Throwable) {
+                        lastPutFailure = t
+                        val retryable = isRetryableSignedUrlPutFailure(t)
+                        val msg = (t.message ?: t::class.java.simpleName).take(240)
+                        if (retryable && attempt < backoffsMs.lastIndex) {
+                            val waitMs = backoffsMs[attempt]
+                            Log.w(
+                                "TrimsyTrack",
+                                "EvidenceUpload: put failed (retryable) ev=${clientEvidenceId.take(8)} attempt=$attemptLabel waitMs=$waitMs err=$msg",
+                            )
+                            onLog?.invoke(
+                                "EvidenceUpload: retry ev=${clientEvidenceId.take(8)} attempt=$attemptLabel waitMs=$waitMs err=$msg",
+                            )
+                            delay(waitMs)
+                            attempt += 1
+                            continue
+                        }
+                        break
+                    }
+                }
+
+                // If the signed-url PUT never succeeded, fall back to backend-auth upload.
+                if (lastPutFailure != null) {
+                    val failure = lastPutFailure
+                    val rid2 = UUID.randomUUID().toString()
+                    val reason = (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown").take(220)
+                    Log.w(
+                        "TrimsyTrack",
+                        "EvidenceUpload: signed-url PUT failed; fallback tripEvidencePutBytes ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} rid=${rid2.take(8)} err=$reason",
+                    )
+                    onLog?.invoke(
+                        "EvidenceUpload: fallbackPutBytes start rid=${rid2.take(8)} ev=${clientEvidenceId.take(8)} err=$reason",
+                    )
+
+                    // Keep payload under backend cap (~6MB raw).
+                    val bytes = readAllBytes(uri)
+                    val uploadedBytesLen = bytes.size
+                    if (bytes.isEmpty()) throw IOException("Evidence bytes empty")
+
+                    val expectedBytesLen = a.sizeBytes?.toInt()?.takeIf { it > 0 }
+                    if (expectedBytesLen != null && expectedBytesLen != uploadedBytesLen) {
+                        val mismatch = "Evidence bytes mismatch ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} expectedBytes=$expectedBytesLen actualBytes=$uploadedBytesLen"
+                        Log.w("TrimsyTrack", "EvidenceUpload: $mismatch")
+                        onLog?.invoke("EvidenceUpload: $mismatch")
+                        throw IOException(mismatch)
+                    }
+
+                    val maxRawBytes = 6_000_000
+                    if (bytes.size > maxRawBytes) {
+                        throw IOException("Evidence too large for fallback (${bytes.size} bytes)")
+                    }
+
+                    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    val putReq = TripEvidencePutBytesRequest(
+                        clientProtocolVersion = handshakeMarker,
+                        app_id = BuildConfig.APP_ID,
+                        clientEvidenceId = clientEvidenceId,
+                        tripClientRef = tripClientRef,
+                        contentType = sanitizedContentType,
+                        displayName = sanitizedDisplayName,
+                        contentBase64 = b64,
+                        clientRequestId = rid2,
+                    )
+
+                    val putRaw = api.putBytes(
+                        body = json.encodeToString(TripEvidencePutBytesRequest.serializer(), putReq)
+                            .toRequestBody(jsonMediaType)
+                    )
+
+                    val putEnv = runCatching {
+                        json.decodeFromString(TripEvidencePutBytesResponse.serializer(), putRaw)
+                    }.getOrElse {
+                        throw IOException("tripEvidencePutBytes failed: invalid response")
+                    }
+                    if (!putEnv.ok) {
+                        val msg = putEnv.error?.message?.trim().orEmpty().ifBlank { "tripEvidencePutBytes failed" }
+                        throw IOException(msg)
+                    }
+
+                    val putResult = putEnv.result
+                    Log.i(
+                        "TrimsyTrack",
+                        "EvidenceUpload: fallbackPutBytes ok ev=${clientEvidenceId.take(8)} alreadyUploaded=${putResult?.alreadyUploaded} backendSizeBytes=${putResult?.sizeBytes} uploadedBytesLen=${uploadedBytesLen}",
+                    )
+                    onLog?.invoke(
+                        "EvidenceUpload: fallbackPutBytes ok ev=${clientEvidenceId.take(8)} backendSizeBytes=${putResult?.sizeBytes} uploadedBytesLen=${uploadedBytesLen}",
+                    )
+
+                    uploaded += 1
+                }
+            }.onFailure { t ->
+                val enriched = if (t is HttpException) {
+                    val code = t.code()
+                    val errBody = runCatching { t.response()?.errorBody()?.string() }.getOrNull().orEmpty()
+                    val headers = runCatching { t.response()?.headers() }.getOrNull()
+                    val svc = headers?.get("X-Backend-Service").orEmpty().trim()
+                    val rev = headers?.get("X-Backend-Revision").orEmpty().trim()
+                    val tgt = headers?.get("X-Backend-Function-Target").orEmpty().trim()
+                    val id = if (svc.isBlank() && rev.isBlank() && tgt.isBlank()) {
+                        ""
+                    } else {
+                        " backend={svc=${svc.ifBlank { "-" }} rev=${rev.ifBlank { "-" }} tgt=${tgt.ifBlank { "-" }}}"
+                    }
+                    val snippet = errBody
+                        .replace("\r", " ")
+                        .replace("\n", " ")
+                        .trim()
+                        .let { if (it.length > 450) it.take(450) + "…" else it }
+                    val base = t.message?.take(200).orEmpty().ifBlank { "HTTP $code" }
+                    if (snippet.isNotBlank()) "$base$id body=$snippet" else "$base$id"
+                } else {
+                    t.message?.take(200) ?: t::class.java.simpleName
+                }
+
+                Log.w(
+                    "TrimsyTrack",
+                    "EvidenceUpload: fail attId=${a.id} tripId=${a.tripId} err=$enriched",
+                )
+                onLog?.invoke(
+                    "EvidenceUpload: fail attId=${a.id} tripId=${a.tripId} err=$enriched",
+                )
+            }
+        }
+
+        val doneLine = "EvidenceUpload: done uploaded=$uploaded"
+        Log.i("TrimsyTrack", doneLine)
+        onLog?.invoke(doneLine)
+        uploaded
+    }
+
     suspend fun deleteBackendAuthUser(confirm: String): String = withContext(Dispatchers.IO) {
         val handshakeMarker = settings.backendProtocolVersion.first()
             ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
@@ -108,7 +597,7 @@ class DriverDataRepository(
             confirm = confirm,
                 clientProtocolVersion = handshakeMarker,
             clientRequestId = UUID.randomUUID().toString(),
-            app_id = "trimsytrack",
+            app_id = BuildConfig.APP_ID,
         )
 
         api.deleteMe(
@@ -135,7 +624,7 @@ class DriverDataRepository(
             confirm = confirm,
             clientProtocolVersion = handshakeMarker,
             clientRequestId = UUID.randomUUID().toString(),
-            app_id = "trimsytrack",
+            app_id = BuildConfig.APP_ID,
         )
 
         api.purgeMe(
@@ -159,13 +648,16 @@ class DriverDataRepository(
         val last = settings.driverDataLastUploadFingerprint.first().trim()
 
         if (fingerprint.isNotBlank() && fingerprint == last) {
+            Log.i("TrimsyTrack", "DriverDataSync: driverdataPut SKIP_NO_CHANGES fp=${fingerprint.take(10)}")
             return@withContext UploadSnapshotIfChangedResult(
                 outcome = DriverDataUploadOutcome.SKIPPED_NO_CHANGES,
                 fingerprint = fingerprint,
             )
         }
 
+        Log.i("TrimsyTrack", "DriverDataSync: driverdataPut START fp=${fingerprint.take(10)}")
         uploadSnapshot()
+        Log.i("TrimsyTrack", "DriverDataSync: driverdataPut DONE")
 
         val after = exportSnapshotDeterministic()
         val afterFingerprint = computeFingerprint(after)
@@ -416,6 +908,7 @@ class DriverDataRepository(
         }
 
         val tripClientRefByLocalId = tripEntities.associate { it.id to it.clientRef.orEmpty() }
+        val parkingTicketIdByTripId = tripEntities.associate { it.id to it.parkingTicketId }
 
         val trips = tripEntities.map { it.toDto() }.sortedBy { it.id }
         val prompts = if (uid.isBlank()) emptyList() else AppGraph.db.promptDao().listAll(uid).map { it.toDto() }.sortedBy { it.id }
@@ -425,6 +918,42 @@ class DriverDataRepository(
         val distanceCache = if (uid.isBlank()) emptyList() else AppGraph.db.distanceCacheDao().listAll(uid).map { it.toDto() }.sortedBy { it.id }
 
         val stops = buildStopsFromTrips(trips)
+
+        // Link parking/traffic fee receipt metadata to the actual receipt attachment.
+        // We use attachment.capturedAt (import time) as the canonical timestamp for the ticket.
+        val receiptAttachmentByParkingTicketId = attachmentsForCloud
+            .asSequence()
+            .mapNotNull { a -> a.clientRef?.trim()?.takeIf { it.isNotBlank() }?.let { it to a } }
+            .toMap()
+
+        val parkingTickets = tripEntities
+            .asSequence()
+            .filter { it.parkingTrafficFeeMinor != null && !it.parkingTicketId.isNullOrBlank() }
+            .mapNotNull { tripEntity ->
+                val ticketId = tripEntity.parkingTicketId?.trim().orEmpty()
+                val receipt = receiptAttachmentByParkingTicketId[ticketId]
+                if (receipt == null) {
+                    if (BuildConfig.DEBUG) {
+                        Log.w(
+                            "TrimsyTrack",
+                            "ParkingTicketExport skip_missing_receipt tripId=${tripEntity.id} ticketId=${ticketId.take(8)} feeMinor=${tripEntity.parkingTrafficFeeMinor}",
+                        )
+                    }
+                    return@mapNotNull null
+                }
+                tripEntity.toParkingTicketDto(receiptCapturedAtOverride = receipt.capturedAt)
+            }
+            .sortedBy { it.tripId }
+            .toList()
+
+        if (BuildConfig.DEBUG && parkingTickets.isNotEmpty()) {
+            parkingTickets.forEach { pt ->
+                Log.d(
+                    "TrimsyTrack",
+                    "ParkingTicketExport ok ticketId=${pt.parkingTicketId.take(8)} tripId=${pt.tripId} costMinor=${pt.costMinor} time=${pt.time} tz=${pt.timeZoneId} name=${pt.storeNameSnapshot} lat=${pt.storeLatSnapshot} lng=${pt.storeLngSnapshot}",
+                )
+            }
+        }
 
         val regions = if (uid.isBlank()) {
             emptyMap()
@@ -450,15 +979,15 @@ class DriverDataRepository(
             // Evidence bytes never go to backend snapshots, but metadata (ids, hashes, linkage) does.
             // NOTE: we intentionally omit device-local URIs in cloud snapshots.
             attachments = attachmentsForCloud
-                .map { it.toCloudDto(tripClientRef = tripClientRefByLocalId[it.tripId].orEmpty()) }
+                .map {
+                    it.toCloudDto(
+                        tripClientRef = tripClientRefByLocalId[it.tripId].orEmpty(),
+                        parkingTicketIdForTrip = parkingTicketIdByTripId[it.tripId],
+                    )
+                }
                 .sortedBy { it.id },
 
-            parkingTickets = tripEntities
-                .asSequence()
-                .filter { it.parkingTrafficFeeMinor != null && !it.parkingTicketId.isNullOrBlank() }
-                .map { it.toParkingTicketDto() }
-                .sortedBy { it.tripId }
-                .toList(),
+            parkingTickets = parkingTickets,
         )
     }
 
@@ -469,7 +998,8 @@ class DriverDataRepository(
         @Suppress("UNUSED_VARIABLE")
         val _handshakeMarker = handshakeMarker
 
-        val baseUrl = normalizeBaseUrl(BuildConfig.BACKEND_API_BASE)
+        val baseUrlRaw = settings.backendBaseUrl.first().trim().ifBlank { BuildConfig.BACKEND_API_BASE }
+        val baseUrl = normalizeBaseUrl(baseUrlRaw)
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(AppGraph.backendHttpClient)
@@ -484,15 +1014,61 @@ class DriverDataRepository(
             snapshot = snapshot,
                 clientProtocolVersion = handshakeMarker,
             clientRequestId = UUID.randomUUID().toString(),
-            app_id = "trimsytrack",
+            app_id = BuildConfig.APP_ID,
         )
         val payload = json.encodeToString(DriverDataPutRequest.serializer(), req)
 
-        val raw = api.upload(body = payload.toRequestBody(jsonMediaType))
-        val canonical = runCatching { json.decodeFromString(DriverData.serializer(), raw) }
-            .getOrElse { throw IOException("DriverData upload failed: invalid response") }
+        Log.i("TrimsyTrack", "DriverDataSync: driverdataPut request idempotencyKey=${idempotencyKey.take(40)}")
 
-        restoreFromSnapshot(canonical)
+        val raw = api.upload(body = payload.toRequestBody(jsonMediaType))
+        fun decodeDriverDataOrNull(jsonString: String): DriverData? {
+            val trimmed = jsonString.trim()
+            if (trimmed.isBlank() || trimmed == "null") return null
+            return runCatching { json.decodeFromString(DriverData.serializer(), trimmed) }.getOrNull()
+        }
+
+        val canonical: DriverData? = runCatching { decodeDriverDataOrNull(raw) }
+            .getOrElse { null }
+            ?: run {
+                val trimmed = raw.trim()
+                val element = runCatching { json.parseToJsonElement(trimmed) }.getOrNull()
+                val obj = runCatching { element?.jsonObject }.getOrNull()
+                val ok = obj?.get("ok")?.jsonPrimitive?.booleanOrNull
+
+                if (ok == false) {
+                    val msg = runCatching {
+                        obj["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
+                    }.getOrNull().orEmpty().trim().ifBlank { "DriverData upload rejected" }
+                    throw IOException("DriverData upload failed: $msg")
+                }
+
+                if (ok == true) {
+                    val resultEl = obj["result"] ?: obj["snapshot"] ?: obj["data"]
+                    val decoded = resultEl?.let { decodeDriverDataOrNull(it.toString()) }
+                    if (decoded == null) {
+                        Log.i(
+                            "TrimsyTrack",
+                            "DriverDataSync: driverdataPut ack (no snapshot in response) bytes=${raw.length}",
+                        )
+                    }
+                    decoded
+                } else {
+                    val snippet = trimmed
+                        .replace("\r", " ")
+                        .replace("\n", " ")
+                        .trim()
+                        .take(500)
+                    throw IOException("DriverData upload failed: invalid response (baseUrl=$baseUrl) snippet=$snippet")
+                }
+            }
+
+        Log.i("TrimsyTrack", "DriverDataSync: driverdataPut response_bytes=${raw.length}")
+
+        // Only restore if the backend actually returned a valid snapshot.
+        // Some deployments return an ACK envelope for driverdataPut.
+        if (canonical != null) {
+            restoreFromSnapshot(canonical)
+        }
         return raw
     }
 
@@ -502,7 +1078,8 @@ class DriverDataRepository(
      * This keeps account/auth untouched; it only clears server-side DriverData stored under `driverId`.
      */
     suspend fun clearRemoteSnapshot(driverId: String) {
-        val baseUrl = normalizeBaseUrl(BuildConfig.BACKEND_API_BASE)
+        val baseUrlRaw = settings.backendBaseUrl.first().trim().ifBlank { BuildConfig.BACKEND_API_BASE }
+        val baseUrl = normalizeBaseUrl(baseUrlRaw)
 
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
@@ -543,7 +1120,7 @@ class DriverDataRepository(
             snapshot = json.decodeFromString(DriverData.serializer(), payload),
                 clientProtocolVersion = handshakeMarker,
             clientRequestId = UUID.randomUUID().toString(),
-            app_id = "trimsytrack",
+            app_id = BuildConfig.APP_ID,
         )
         api.upload(body = json.encodeToString(DriverDataPutRequest.serializer(), req).toRequestBody(jsonMediaType))
     }
@@ -561,10 +1138,9 @@ class DriverDataRepository(
     private suspend fun downloadSnapshotOrNull(): DriverData? {
         val handshakeMarker = settings.backendProtocolVersion.first()
             ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
-        @Suppress("UNUSED_VARIABLE")
-        val _handshakeMarker = handshakeMarker
 
-        val baseUrl = normalizeBaseUrl(BuildConfig.BACKEND_API_BASE)
+        val baseUrlRaw = settings.backendBaseUrl.first().trim().ifBlank { BuildConfig.BACKEND_API_BASE }
+        val baseUrl = normalizeBaseUrl(baseUrlRaw)
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(AppGraph.backendHttpClient)
@@ -573,9 +1149,9 @@ class DriverDataRepository(
         val api = retrofit.create(DriverDataApi::class.java)
 
         val req = DriverDataGetRequest(
-            clientProtocolVersion = SystemCallablesService.CLIENT_PROTOCOL_VERSION,
+            clientProtocolVersion = handshakeMarker,
             clientRequestId = UUID.randomUUID().toString(),
-            app_id = "trimsytrack",
+            app_id = BuildConfig.APP_ID,
         )
 
         return try {
@@ -584,9 +1160,74 @@ class DriverDataRepository(
             // Some backend paths historically returned JSON `null` (200) when no snapshot exists.
             // Treat that as "no snapshot".
             if (trimmed.isBlank() || trimmed == "null") return null
-            json.decodeFromString(DriverData.serializer(), trimmed)
+            try {
+                json.decodeFromString(DriverData.serializer(), trimmed)
+            } catch (t: SerializationException) {
+                // Backward/forward compat:
+                // Some deployments may return an ok/result envelope instead of the raw DriverData snapshot.
+                // Example shape:
+                //   {"ok":true,"result":{ ...DriverData... }}
+                // If we still can't interpret it, treat as "no snapshot" (non-fatal) and log a snippet.
+                val element = runCatching { json.parseToJsonElement(trimmed) }.getOrNull()
+                val obj: JsonObject? = element?.let { it as? kotlinx.serialization.json.JsonObject }
+                    ?: runCatching { element?.jsonObject }.getOrNull()
+
+                val ok = obj?.get("ok")?.jsonPrimitive?.booleanOrNull
+
+                if (ok == true) {
+                    val resultEl = obj["result"]
+                        ?: obj["snapshot"]
+                        ?: obj["data"]
+                    if (resultEl != null) {
+                        return json.decodeFromString(DriverData.serializer(), resultEl.toString())
+                    }
+                }
+
+                val snippet = trimmed
+                    .replace("\r", " ")
+                    .replace("\n", " ")
+                    .trim()
+                    .take(1200)
+
+                Log.e(
+                    "DriverData",
+                    "driverdataGet returned unexpected JSON (treating as no snapshot) baseUrl=$baseUrl snippet=$snippet",
+                    t,
+                )
+                DebuggLogStore.add(
+                    tag = "DriverData",
+                    message = "driverdataGet unexpected JSON -> no snapshot (baseUrl=$baseUrl) snippet=${snippet.take(300)}",
+                )
+
+                null
+            }
         } catch (e: HttpException) {
             if (e.code() == 404) return null
+            val errorBodyRaw = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
+            val parsed = BackendErrorParsing.parseErrorEnvelopeOrNull(errorBodyRaw)
+            val machineCode = parsed?.error?.details?.machineCode
+                ?.trim()
+                ?.ifBlank { null }
+                ?: parsed?.error?.details?.machine
+                    ?.trim()
+                    ?.ifBlank { null }
+
+            if (!errorBodyRaw.isNullOrBlank()) {
+                val snippet = errorBodyRaw
+                    .replace("\r", " ")
+                    .replace("\n", " ")
+                    .trim()
+                    .take(3000)
+
+                Log.e(
+                    "DriverData",
+                    "driverdataGet failed http=${e.code()} machineCode=${machineCode ?: "-"} baseUrl=$baseUrl errorBody=$snippet",
+                )
+                DebuggLogStore.add(
+                    tag = "DriverData",
+                    message = "driverdataGet failed http=${e.code()} machineCode=${machineCode ?: "-"} baseUrl=$baseUrl errorBody=$snippet",
+                )
+            }
             throw e
         }
     }
@@ -744,6 +1385,10 @@ class DriverDataRepository(
 
         var prev: TripDto? = null
         for (t in ordered) {
+            if (t.endPlaceType.equals("HOME", ignoreCase = true)) {
+                prev = t
+                continue
+            }
             val prevTrip = prev
             val prevStopId = prevTrip?.clientRef?.trim().takeIf { !it.isNullOrBlank() }
             out += StopDto(
@@ -958,9 +1603,16 @@ private fun TripDto.toEntity(profileId: String) = TripEntity(
     parkingTicketId = parkingTicketId,
 )
 
-private fun TripEntity.toParkingTicketDto(): ParkingTicketDto {
+private fun TripEntity.toParkingTicketDto(
+    receiptCapturedAtOverride: Instant? = null,
+): ParkingTicketDto {
     val ticketId = parkingTicketId?.trim().orEmpty()
     val amount = parkingTrafficFeeMinor ?: 0
+
+    val ticketInstant = receiptCapturedAtOverride ?: endedAt
+    val zone = runCatching { ZoneId.of(timeZoneId) }.getOrElse { ZoneId.systemDefault() }
+    val ticketLocalDate = runCatching { LocalDateTime.ofInstant(ticketInstant, zone).toLocalDate() }.getOrElse { day }
+
     return ParkingTicketDto(
         parkingTicketId = ticketId,
         tripId = id,
@@ -969,8 +1621,8 @@ private fun TripEntity.toParkingTicketDto(): ParkingTicketDto {
         syfte = com.trimsytrack.data.SettingsStore
             .normalizeBusinessPurpose(businessPurpose)
             .ifBlank { com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE },
-        date = day.toString(),
-        time = endedAt.toString(),
+        date = ticketLocalDate.toString(),
+        time = ticketInstant.toString(),
         timeZoneId = timeZoneId,
         storeLocationId = storeLocationId,
         postOmbudId = postOmbudId,
@@ -1063,7 +1715,10 @@ private fun DistanceCacheDto.toEntity(profileId: String) = DistanceCacheEntity(
     createdAt = Instant.parse(createdAt),
 )
 
-private fun AttachmentEntity.toDto(tripClientRef: String) = AttachmentDto(
+private fun AttachmentEntity.toDto(
+    tripClientRef: String,
+    parkingTicketIdForTrip: String?,
+) = AttachmentDto(
     id = id,
     tripId = tripId,
     clientRef = clientRef.orEmpty(),
@@ -1077,9 +1732,13 @@ private fun AttachmentEntity.toDto(tripClientRef: String) = AttachmentDto(
     sizeBytes = sizeBytes,
     linkedAt = linkedAt?.toString(),
     linkedByDeviceId = linkedByDeviceId,
+    parkingTicketId = parkingTicketIdForTrip?.takeIf { it.isNotBlank() && it == clientRef },
 )
 
-private fun AttachmentEntity.toCloudDto(tripClientRef: String) = AttachmentDto(
+private fun AttachmentEntity.toCloudDto(
+    tripClientRef: String,
+    parkingTicketIdForTrip: String?,
+) = AttachmentDto(
     id = id,
     tripId = tripId,
     clientRef = clientRef.orEmpty(),
@@ -1093,6 +1752,7 @@ private fun AttachmentEntity.toCloudDto(tripClientRef: String) = AttachmentDto(
     sizeBytes = sizeBytes,
     linkedAt = linkedAt?.toString(),
     linkedByDeviceId = linkedByDeviceId,
+    parkingTicketId = parkingTicketIdForTrip?.takeIf { it.isNotBlank() && it == clientRef },
 )
 
 private fun AttachmentDto.toEntity(profileId: String) = AttachmentEntity(

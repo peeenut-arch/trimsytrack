@@ -33,7 +33,7 @@ class SystemCallablesService(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val appIdForBackend: String = "trimsytrack"
+    private val appIdForBackend: String = BuildConfig.APP_ID
 
     companion object {
         // Client protocol version (the backend supports a range; see handshake.protocol).
@@ -119,6 +119,48 @@ class SystemCallablesService(
         return obj["result"] ?: error("$whatFailed: missing result")
     }
 
+    /**
+     * Some deployments may return a raw JSON object for handshakeGet instead of the callable wrapper
+     * { ok: true, result: {...} }. Accept both to avoid treating valid responses as blocked.
+     */
+    private fun unwrapResultLenient(root: JsonElement, whatFailed: String): JsonElement {
+        val obj = runCatching { root.jsonObject }.getOrNull() ?: return root
+
+        // Preferred: callable-style wrapper.
+        if (obj.containsKey("ok")) {
+            return unwrapResult(root, whatFailed)
+        }
+
+        // Some servers might wrap in { result: {...} } without an ok flag.
+        obj["result"]?.let { return it }
+
+        // Or return an error object without ok.
+        val err = obj["error"]?.jsonObject
+        if (err != null) {
+            val msg = err.get("message")?.jsonPrimitive?.content?.trim().orEmpty()
+            val code = err.get("code")?.jsonPrimitive?.content?.trim()?.ifBlank { null }
+            val machine = err
+                .get("details")
+                ?.jsonObject
+                ?.let { detailsObj ->
+                    detailsObj["machineCode"] ?: detailsObj["machine"]
+                }
+                ?.jsonPrimitive
+                ?.content
+                ?.trim()
+                ?.ifBlank { null }
+            throw BackendBlockedException(
+                message = msg.ifBlank { "Backend call failed ($whatFailed)" },
+                httpStatus = 500,
+                backendCode = code,
+                machineCode = machine,
+            )
+        }
+
+        // Raw object (assume it's the result).
+        return root
+    }
+
     suspend fun handshakeGet(): HandshakeResult {
         val requestId = newClientRequestId()
         val response = api().handshakeGet(body = toJsonBody(mapOf(
@@ -127,11 +169,11 @@ class SystemCallablesService(
             "clientRequestId" to requestId,
         )))
         val root = parseOrThrow(response, whatFailed = "handshakeGet")
-        val result = unwrapResult(root, whatFailed = "handshakeGet")
+        val result = unwrapResultLenient(root, whatFailed = "handshakeGet")
         val obj = result.jsonObject
 
         val protocolVersion = obj["protocolVersion"]?.jsonPrimitive?.intOrNull
-            ?: error("handshakeGetCallable: missing protocolVersion")
+            ?: error("handshakeGet: missing protocolVersion")
 
         val writesEnabled = obj["writesEnabled"]?.jsonPrimitive?.booleanOrNull ?: true
 

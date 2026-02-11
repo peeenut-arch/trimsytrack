@@ -16,7 +16,8 @@ import kotlinx.coroutines.runBlocking
  * Read-only provider for sharing Evidence (photos/screenshots/scans/PDFs) across apps.
  *
  * This is intended for the companion app (TrimsyApp) to pull evidence to a computer.
- * Evidence never goes to the backend.
+ * Evidence may also be uploaded to backend storage (cloud) via the signed-URL evidence sync flow.
+ * This provider exists for local sharing/compatibility.
  *
  * URIs:
  * - content://<applicationId>.evidence/list

@@ -20,7 +20,7 @@ class TrackEventsRepository(
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    private val appIdForBackend: String = "trimsytrack"
+    private val appIdForBackend: String = BuildConfig.APP_ID
 
     suspend fun batchPut(events: List<TrackEvent>): TrackEventsBatchPutResult {
         if (events.isEmpty()) return TrackEventsBatchPutResult(accepted = 0, nextSeq = 0, lastSeq = 0)

@@ -17,6 +17,7 @@ import com.trimsytrack.system.SystemCallablesService
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -25,6 +26,8 @@ import kotlinx.serialization.json.jsonObject
 import retrofit2.HttpException
 import java.io.File
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
 
@@ -171,10 +174,19 @@ class CanonicalWriteOutboxWorker(
 
         val dao = AppGraph.syncDb.canonicalWriteOutboxDao()
         val pending = dao.listPending(limit = 25)
-        if (pending.isEmpty()) return Result.success()
+        if (pending.isEmpty()) {
+            Log.i("TrimsyTrack", "CanonicalWriteOutboxWorker: pending=0 (nothing to flush)")
+            return Result.success()
+        }
+
+        Log.i("TrimsyTrack", "CanonicalSync: start pending=${pending.size}")
+        Log.i("TrimsyTrack", "CanonicalWriteOutboxWorker: pending=${pending.size}; flushing")
 
         val nowMillis = System.currentTimeMillis()
         dao.markAttempted(pending.map { it.id }, nowMillis)
+
+        var okCount = 0
+        var rejectedCount = 0
 
         for (item in pending) {
             // If another worker (or a previous attempt) has disabled writes, stop early.
@@ -211,7 +223,14 @@ class CanonicalWriteOutboxWorker(
 
                         val raw = AppGraph.canonicalApi.drivingTripCreate(body = body)
                         val parsed = runCatching { json.decodeFromString(DrivingTripCreateResponse.serializer(), raw) }.getOrNull()
-                        if (parsed?.ok == true && parsed.result != null) {
+                        val backendTripId = parsed?.result?.tripId
+                            ?.trim()
+                            ?.ifBlank { null }
+                            ?: parsed?.result?.drivingTripId
+                                ?.trim()
+                                ?.ifBlank { null }
+
+                        if (parsed?.ok == true && backendTripId != null) {
                             val endsAtHome = request?.endPlaceType
                                 ?.trim()
                                 ?.uppercase(Locale.ROOT) == "HOME"
@@ -222,7 +241,7 @@ class CanonicalWriteOutboxWorker(
                                 val local = AppGraph.db.tripDao().getById(uid, tripId)
                                 if (local != null) {
                                     val updated = local.copy(
-                                        backendId = parsed.result.drivingTripId,
+                                        backendId = backendTripId,
                                         syncStatus = SyncStatus.SYNCED,
                                         syncErrorMachineCode = null,
                                         syncErrorMessage = null,
@@ -255,8 +274,13 @@ class CanonicalWriteOutboxWorker(
                                 ?: parsed?.error?.details?.machine
                                     ?.trim()
                                     ?.takeIf { it.isNotBlank() }
-                            val msg = parsed?.error?.message?.trim()?.takeIf { it.isNotBlank() }
-                                ?: "drivingTripCreate returned non-ok"
+                            val msg = parsed?.error?.message
+                                ?.trim()
+                                ?.takeIf { it.isNotBlank() }
+                                ?: run {
+                                    val snippet = raw.trim().take(220)
+                                    if (snippet.isNotBlank()) "drivingTripCreate non-ok; raw=$snippet" else "drivingTripCreate returned non-ok"
+                                }
                             val retryAfter = parsed?.error?.details?.retryAfterSeconds
                             Quintuple(200, false, mc, msg, retryAfter != null && retryAfter > 0)
                         }
@@ -342,11 +366,15 @@ class CanonicalWriteOutboxWorker(
                     }
                 }
                 dao.markUploaded(listOf(item.id))
+                rejectedCount += 1
                 continue
             }
 
             dao.markUploaded(listOf(item.id))
+            okCount += 1
         }
+
+        Log.i("TrimsyTrack", "CanonicalSync: flushed ok=$okCount rejected=$rejectedCount total=${pending.size}")
 
         return Result.success()
     }
@@ -358,6 +386,27 @@ class CanonicalWriteOutboxWorker(
         val fourth: D,
         val fifth: E,
     )
+
+    private fun jsonDoubleOrNull(p: JsonPrimitive?): Double? {
+        val raw = p?.content?.trim().orEmpty()
+        if (raw.isBlank()) return null
+        return raw.toDoubleOrNull()
+    }
+
+    private fun jsonBoolOrNull(p: JsonPrimitive?): Boolean? {
+        if (p == null) return null
+        // JsonPrimitive can represent booleans, numbers, or strings.
+        // We intentionally avoid booleanOrNull for older kotlinx.serialization versions.
+        val raw = p.content.trim().lowercase()
+        if (raw.isBlank()) return null
+        return when (raw) {
+            "true" -> true
+            "false" -> false
+            "1" -> true
+            "0" -> false
+            else -> null
+        }
+    }
 
     private fun normalizeDrivingTripCreateBodyJson(bodyJson: String): String {
         val root = runCatching { json.parseToJsonElement(bodyJson).jsonObject }.getOrNull() ?: return bodyJson
@@ -375,7 +424,7 @@ class CanonicalWriteOutboxWorker(
         // Required canonical fields (older queued outbox rows may not include these).
         val existingAppId = (root["app_id"] as? JsonPrimitive)?.content?.trim().orEmpty()
         if (existingAppId.isBlank()) {
-            updated["app_id"] = JsonPrimitive("trimsytrack")
+            updated["app_id"] = JsonPrimitive(BuildConfig.APP_ID)
             changed = true
         }
 
@@ -389,6 +438,225 @@ class CanonicalWriteOutboxWorker(
         if (existingReqId.isBlank()) {
             updated["clientRequestId"] = JsonPrimitive(UUID.randomUUID().toString())
             changed = true
+        }
+
+        // Backward/forward compat: some backend revisions validate `businessPurpose` (string).
+        // Older queued rows used `syfte` (string) and omitted/typed `businessPurpose`.
+        val businessPurposePrim = root["businessPurpose"] as? JsonPrimitive
+        val businessPurposeContent = businessPurposePrim?.content?.trim().orEmpty()
+        val syfteContent = (root["syfte"] as? JsonPrimitive)?.content?.trim().orEmpty()
+        val needsBusinessPurpose = businessPurposeContent.isBlank() || businessPurposePrim?.isString == false
+        if (needsBusinessPurpose) {
+            val next = (if (syfteContent.isNotBlank()) syfteContent else businessPurposeContent).trim()
+            if (next.isNotBlank()) {
+                updated["businessPurpose"] = JsonPrimitive(next)
+                changed = true
+            }
+        }
+
+        // Backward/forward compat: backend expects isBusiness as boolean.
+        val isBusinessPrim = root["isBusiness"] as? JsonPrimitive
+        val isBusinessVal = jsonBoolOrNull(isBusinessPrim)
+        if (isBusinessVal == null) {
+            // Default to true to preserve existing semantics (trips are business by default).
+            updated["isBusiness"] = JsonPrimitive(true)
+            changed = true
+        }
+
+        // Backward/forward compat: ensure `day` exists as YYYY-MM-DD string.
+        // Some backend revisions require it.
+        val existingDay = (root["day"] as? JsonPrimitive)?.content?.trim().orEmpty()
+        if (existingDay.isBlank()) {
+            val startedAtRaw = (root["startedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val endedAtRaw = (root["endedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val timeZoneIdRaw = (root["timeZoneId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+
+            val day = runCatching {
+                val zone = runCatching { ZoneId.of(timeZoneIdRaw) }.getOrNull() ?: ZoneId.of("UTC")
+                val endedInstant = Instant.parse(endedAtRaw.ifBlank { startedAtRaw })
+                endedInstant.atZone(zone).toLocalDate().format(DateTimeFormatter.ISO_LOCAL_DATE)
+            }.getOrNull()
+
+            if (!day.isNullOrBlank()) {
+                updated["day"] = JsonPrimitive(day)
+                changed = true
+            }
+        }
+
+        // Backward/forward compat: some backend revisions expect nested `start` / `end` objects.
+        // Preserve existing flat fields too (startLat/startLng/etc.) for older backend deployments.
+        val existingStartObj = root["start"] as? JsonObject
+        if (existingStartObj == null) {
+            val startLatPrim = root["startLat"] as? JsonPrimitive
+            val startLngPrim = root["startLng"] as? JsonPrimitive
+            val startLatVal = jsonDoubleOrNull(startLatPrim)
+            val startLngVal = jsonDoubleOrNull(startLngPrim)
+            if (startLatVal != null && startLngVal != null) {
+                val startMap = mutableMapOf<String, JsonElement>()
+                val startedAtRaw2 = (root["startedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (startedAtRaw2.isNotBlank()) startMap["at"] = JsonPrimitive(startedAtRaw2)
+                startMap["lat"] = JsonPrimitive(startLatVal)
+                startMap["lng"] = JsonPrimitive(startLngVal)
+
+                val startPlaceTypeRaw = (root["startPlaceType"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (startPlaceTypeRaw.isNotBlank()) startMap["placeType"] = JsonPrimitive(startPlaceTypeRaw)
+
+                val startNameRaw = (root["startPlaceName"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (startNameRaw.isNotBlank()) startMap["placeName"] = JsonPrimitive(startNameRaw)
+
+                val startAddrRaw = (root["startAddress"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (startAddrRaw.isNotBlank()) startMap["address"] = JsonPrimitive(startAddrRaw)
+
+                updated["start"] = JsonObject(startMap)
+                changed = true
+            }
+        } else {
+            val hasLabel = (existingStartObj["label"] as? JsonPrimitive)?.content?.trim().orEmpty().isNotBlank()
+            if (!hasLabel) {
+                val startNameRaw = (root["startPlaceName"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (startNameRaw.isNotBlank()) {
+                    val startMap = existingStartObj.toMutableMap()
+                    startMap["label"] = JsonPrimitive(startNameRaw)
+                    updated["start"] = JsonObject(startMap)
+                    changed = true
+                }
+            }
+
+            val hasStartLabelSnapshot = (existingStartObj["startLabelSnapshot"] as? JsonPrimitive)?.content
+                ?.trim()
+                .orEmpty()
+                .isNotBlank()
+            if (!hasStartLabelSnapshot) {
+                val startNameRaw = (root["startPlaceName"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (startNameRaw.isNotBlank()) {
+                    val startMap = (updated["start"] as? JsonObject ?: existingStartObj).toMutableMap()
+                    startMap["startLabelSnapshot"] = JsonPrimitive(startNameRaw)
+
+                    val startPlaceTypeRaw = (root["startPlaceType"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                    if (startPlaceTypeRaw.isNotBlank() && !startMap.containsKey("startPlaceType")) {
+                        startMap["startPlaceType"] = JsonPrimitive(startPlaceTypeRaw)
+                    }
+
+                    updated["start"] = JsonObject(startMap)
+                    changed = true
+                }
+            }
+        }
+
+        val existingEndObj = root["end"] as? JsonObject
+        if (existingEndObj == null) {
+            val endLatPrim = root["endLat"] as? JsonPrimitive
+            val endLngPrim = root["endLng"] as? JsonPrimitive
+            val endLatVal = jsonDoubleOrNull(endLatPrim)
+            val endLngVal = jsonDoubleOrNull(endLngPrim)
+            if (endLatVal != null && endLngVal != null) {
+                val endMap = mutableMapOf<String, JsonElement>()
+                val endedAtRaw2 = (root["endedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (endedAtRaw2.isNotBlank()) endMap["at"] = JsonPrimitive(endedAtRaw2)
+                endMap["lat"] = JsonPrimitive(endLatVal)
+                endMap["lng"] = JsonPrimitive(endLngVal)
+
+                // Backend validators expect this to be present and non-blank.
+                val cityRaw = (root["city"] as? JsonPrimitive)?.content?.trim().orEmpty().ifBlank { "Unknown" }
+                endMap["citySnapshot"] = JsonPrimitive(cityRaw)
+
+                val endPlaceTypeRaw = (root["endPlaceType"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (endPlaceTypeRaw.isNotBlank()) endMap["placeType"] = JsonPrimitive(endPlaceTypeRaw)
+
+                val endNameRaw = (root["endPlaceName"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (endNameRaw.isNotBlank()) endMap["placeName"] = JsonPrimitive(endNameRaw)
+
+                val endAddrRaw = (root["endAddress"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (endAddrRaw.isNotBlank()) endMap["address"] = JsonPrimitive(endAddrRaw)
+
+                updated["end"] = JsonObject(endMap)
+                changed = true
+            }
+        } else {
+            val hasLabel = (existingEndObj["label"] as? JsonPrimitive)?.content?.trim().orEmpty().isNotBlank()
+            if (!hasLabel) {
+                val endNameRaw = (root["endPlaceName"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (endNameRaw.isNotBlank()) {
+                    val endMap = existingEndObj.toMutableMap()
+                    endMap["label"] = JsonPrimitive(endNameRaw)
+                    updated["end"] = JsonObject(endMap)
+                    changed = true
+                }
+            }
+
+            val hasStoreNameSnapshot = (existingEndObj["storeNameSnapshot"] as? JsonPrimitive)?.content
+                ?.trim()
+                .orEmpty()
+                .isNotBlank()
+            if (!hasStoreNameSnapshot) {
+                val endNameRaw = (root["endPlaceName"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (endNameRaw.isNotBlank()) {
+                    val endMap = (updated["end"] as? JsonObject ?: existingEndObj).toMutableMap()
+                    endMap["storeNameSnapshot"] = JsonPrimitive(endNameRaw)
+
+                    val endPlaceTypeRaw = (root["endPlaceType"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                    if (endPlaceTypeRaw.isNotBlank() && !endMap.containsKey("endPlaceType")) {
+                        endMap["endPlaceType"] = JsonPrimitive(endPlaceTypeRaw)
+                    }
+
+                    updated["end"] = JsonObject(endMap)
+                    changed = true
+                }
+            }
+
+            val endObjCurrent = updated["end"] as? JsonObject ?: existingEndObj
+            val endMap = endObjCurrent.toMutableMap()
+
+            val citySnapshotExisting = (endObjCurrent["citySnapshot"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            if (citySnapshotExisting.isBlank()) {
+                val cityRaw = (root["city"] as? JsonPrimitive)?.content?.trim().orEmpty().ifBlank { "Unknown" }
+                // Backend validation expects a string and some deployments treat blank as missing.
+                endMap["citySnapshot"] = JsonPrimitive(cityRaw)
+                changed = true
+            }
+
+            val storeIdExisting = (endObjCurrent["storeId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            if (storeIdExisting.isBlank()) {
+                val storeIdRaw = (root["storeId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (storeIdRaw.isNotBlank()) {
+                    endMap["storeId"] = JsonPrimitive(storeIdRaw)
+                    changed = true
+                }
+            }
+
+            val storeLocationIdExisting = (endObjCurrent["storeLocationId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            if (storeLocationIdExisting.isBlank()) {
+                val raw = (root["storeLocationId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (raw.isNotBlank()) {
+                    endMap["storeLocationId"] = JsonPrimitive(raw)
+                    changed = true
+                }
+            }
+
+            val postOmbudIdExisting = (endObjCurrent["postOmbudId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            if (postOmbudIdExisting.isBlank()) {
+                val raw = (root["postOmbudId"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                if (raw.isNotBlank()) {
+                    endMap["postOmbudId"] = JsonPrimitive(raw)
+                    changed = true
+                }
+            }
+
+            val storeLatExisting = jsonDoubleOrNull(endObjCurrent["storeLatSnapshot"] as? JsonPrimitive)
+            val storeLngExisting = jsonDoubleOrNull(endObjCurrent["storeLngSnapshot"] as? JsonPrimitive)
+            if (storeLatExisting == null || storeLngExisting == null) {
+                val endLat = jsonDoubleOrNull(root["endLat"] as? JsonPrimitive)
+                val endLng = jsonDoubleOrNull(root["endLng"] as? JsonPrimitive)
+                if (endLat != null && endLng != null) {
+                    if (storeLatExisting == null) endMap["storeLatSnapshot"] = JsonPrimitive(endLat)
+                    if (storeLngExisting == null) endMap["storeLngSnapshot"] = JsonPrimitive(endLng)
+                    changed = true
+                }
+            }
+
+            if (changed) {
+                updated["end"] = JsonObject(endMap)
+            }
         }
 
         // Guard against invalid local timestamps producing permanent 400s.

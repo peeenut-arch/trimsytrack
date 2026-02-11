@@ -6,11 +6,13 @@ import com.trimsytrack.backend.BackendApiErrorEnvelope
 import com.trimsytrack.backend.BackendBlockedException
 import com.trimsytrack.backend.BackendErrorParsing
 import com.trimsytrack.backend.CallableJson
+import com.trimsytrack.debug.DebuggLogStore
 import com.trimsytrack.debug.DebuggHttpInterceptor
 import com.trimsytrack.network.BackendRequestInterceptor
 import kotlinx.coroutines.flow.first
 import okhttp3.Headers
 import okhttp3.OkHttpClient
+import android.util.Log
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
@@ -40,20 +42,18 @@ object BackendBaselineProbe {
             .build()
     }
 
-    private val probeApi: CanonicalProbeApi by lazy {
+    private fun api(baseUrlRaw: String): CanonicalProbeApi {
         val retrofit = Retrofit.Builder()
-            .baseUrl(normalizeBaseUrl(BuildConfig.BACKEND_API_BASE))
+            .baseUrl(normalizeBaseUrl(baseUrlRaw))
             .client(probeClient)
             .addConverterFactory(ScalarsConverterFactory.create())
             .build()
-        retrofit.create(CanonicalProbeApi::class.java)
+        return retrofit.create(CanonicalProbeApi::class.java)
     }
-
-    private fun api(): CanonicalProbeApi = probeApi
 
     private fun normalizeBaseUrl(raw: String): String {
         val base = raw.trim()
-        check(base.isNotBlank()) { "Missing BACKEND_API_BASE" }
+        check(base.isNotBlank()) { "Missing backend base url" }
         return if (base.endsWith("/")) base else "$base/"
     }
 
@@ -61,9 +61,8 @@ object BackendBaselineProbe {
         return CallableJson.toJsonElement(payload).toString()
     }
 
-    private fun parseEnvelope(response: Response<String>): BackendApiErrorEnvelope? {
-        val errorBody = runCatching { response.errorBody()?.string() }.getOrNull()
-        return BackendErrorParsing.parseErrorEnvelopeOrNull(errorBody)
+    private fun parseEnvelope(errorBodyRaw: String?): BackendApiErrorEnvelope? {
+        return BackendErrorParsing.parseErrorEnvelopeOrNull(errorBodyRaw)
     }
 
     private fun computeRetryAfterEpochMs(headers: Headers?, parsed: BackendApiErrorEnvelope?): Long? {
@@ -79,6 +78,15 @@ object BackendBaselineProbe {
      * - 412 safety mode: fine (route exists; writes gated).
      */
     suspend fun verifyCanonicalRouteBaseline() {
+        verifyCanonicalRouteBaseline(baseUrlRaw = BuildConfig.BACKEND_API_BASE)
+    }
+
+    /**
+     * Same as [verifyCanonicalRouteBaseline] but probes the provided base URL.
+     *
+     * This is used on Startup so a debug Settings base-url override and the baseline check stay aligned.
+     */
+    suspend fun verifyCanonicalRouteBaseline(baseUrlRaw: String) {
         val protocol = AppGraph.settings.backendProtocolVersion.first()
             ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
 
@@ -94,10 +102,21 @@ object BackendBaselineProbe {
             )
         )
 
-        val response = api().drivingTripCreate(body = body)
-        if (response.isSuccessful) return
+        val response = api(baseUrlRaw).drivingTripCreate(body = body)
+        if (response.isSuccessful) {
+            Log.i(
+                "BaselineProbe",
+                "drivingTripCreate present: http=${response.code()} baseUrl=${normalizeBaseUrl(baseUrlRaw)}",
+            )
+            DebuggLogStore.add(
+                tag = "BaselineProbe",
+                message = "drivingTripCreate present http=${response.code()} baseUrl=${normalizeBaseUrl(baseUrlRaw)}",
+            )
+            return
+        }
 
-        val parsed = parseEnvelope(response)
+        val errorBodyRaw = runCatching { response.errorBody()?.string() }.getOrNull()
+        val parsed = parseEnvelope(errorBodyRaw)
         val machineCode = parsed?.error?.details?.machineCode
             ?.trim()
             ?.ifBlank { null }
@@ -107,6 +126,24 @@ object BackendBaselineProbe {
         val retryAfter = computeRetryAfterEpochMs(response.headers(), parsed)
 
         if (response.code() == 404 || machineCode?.uppercase() == "ROUTE_NOT_FOUND") {
+            val rawSnippet = errorBodyRaw
+                ?.replace("\r", " ")
+                ?.replace("\n", " ")
+                ?.trim()
+                ?.take(3000)
+                ?: ""
+
+            if (rawSnippet.isNotBlank()) {
+                Log.e(
+                    "BaselineProbe",
+                    "drivingTripCreate missing: http=404 baseUrl=${normalizeBaseUrl(baseUrlRaw)} errorBody=$rawSnippet",
+                )
+                DebuggLogStore.add(
+                    tag = "BaselineProbe",
+                    message = "drivingTripCreate missing http=404 baseUrl=${normalizeBaseUrl(baseUrlRaw)} errorBody=$rawSnippet",
+                )
+            }
+
             throw BackendBlockedException(
                 message = "Backend misdeploy detected: drivingTripCreate route missing (404).",
                 httpStatus = response.code(),
@@ -117,6 +154,14 @@ object BackendBaselineProbe {
         }
 
         // Any other error implies the route exists (validation, safety mode, etc.).
+        Log.i(
+            "BaselineProbe",
+            "drivingTripCreate present: http=${response.code()} baseUrl=${normalizeBaseUrl(baseUrlRaw)}",
+        )
+        DebuggLogStore.add(
+            tag = "BaselineProbe",
+            message = "drivingTripCreate present http=${response.code()} baseUrl=${normalizeBaseUrl(baseUrlRaw)}",
+        )
         return
     }
 }

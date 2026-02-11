@@ -33,6 +33,9 @@ class GoogleSignInService(
     }
 
     suspend fun handleSignInResult(context: Context, data: Intent?) {
+        requireNotNull(data) { "Google sign-in returned no data (possibly canceled)." }
+        // Play Services parsing expects extras to be present.
+        requireNotNull(data.extras) { "Google sign-in returned no extras (possibly canceled)." }
         val task = GoogleSignIn.getSignedInAccountFromIntent(data)
         val account: GoogleSignInAccount = task.awaitResult()
 
