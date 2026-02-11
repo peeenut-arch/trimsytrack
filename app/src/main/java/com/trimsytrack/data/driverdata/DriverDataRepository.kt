@@ -119,7 +119,40 @@ class DriverDataRepository(
         suspend fun putBytes(
             @retrofit2.http.Body body: okhttp3.RequestBody,
         ): String
+
+        @retrofit2.http.POST("tripEvidenceDownload")
+        suspend fun download(
+            @retrofit2.http.Body body: okhttp3.RequestBody,
+        ): retrofit2.Response<String>
     }
+
+    @Serializable
+    private data class TripEvidenceDownloadRequest(
+        val clientProtocolVersion: Int,
+        val app_id: String,
+        val clientEvidenceId: String,
+        val clientRequestId: String,
+    )
+
+    @Serializable
+    private data class TripEvidenceDownloadResult(
+        val clientEvidenceId: String = "",
+        val tripClientRef: String = "",
+        val contentType: String = "application/octet-stream",
+        val displayName: String = "",
+        val sha256: String? = null,
+        val sizeBytes: Long? = null,
+        val parkingTicketId: String? = null,
+        val downloadUrl: String = "",
+        val expiresAtIso: String = "",
+    )
+
+    @Serializable
+    private data class TripEvidenceDownloadResponse(
+        val ok: Boolean = false,
+        val result: TripEvidenceDownloadResult? = null,
+        val error: com.trimsytrack.backend.BackendApiError? = null,
+    )
 
     @Serializable
     private data class TripEvidencePutBytesRequest(
@@ -283,6 +316,24 @@ class DriverDataRepository(
 
         var uploaded = 0
 
+        fun sha256Hex(bytes: ByteArray): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+            val sb = StringBuilder(digest.size * 2)
+            for (b in digest) {
+                sb.append(String.format("%02x", b))
+            }
+            return sb.toString()
+        }
+
+        fun compactSnippet(raw: String?, maxLen: Int = 420): String {
+            val s = raw.orEmpty()
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .trim()
+            if (s.isBlank()) return ""
+            return if (s.length <= maxLen) s else (s.take(maxLen - 1) + "…")
+        }
+
         for (a in candidates) {
             if (uploaded >= limit) break
             runCatching {
@@ -370,9 +421,10 @@ class DriverDataRepository(
 
                 val contentLength = a.sizeBytes?.takeIf { it > 0 } ?: guessContentLength(uri)
 
-                val baseOkHttp = (AppGraph.backendHttpClient as? OkHttpClient) ?: OkHttpClient()
-                val signedUrlPutClient = baseOkHttp.newBuilder()
-                    // Signed URLs go to GCS; force HTTP/1.1 to avoid flaky HTTP/2 stream resets.
+                // IMPORTANT: signed URLs are for GCS; do not reuse the backend-auth HTTP client here.
+                // Backend clients typically add Authorization headers/interceptors that can break signed URLs.
+                val signedUrlTransportClient = OkHttpClient.Builder()
+                    // Force HTTP/1.1 to avoid flaky HTTP/2 stream resets.
                     .protocols(listOf(Protocol.HTTP_1_1))
                     .connectTimeout(20, TimeUnit.SECONDS)
                     .readTimeout(30, TimeUnit.SECONDS)
@@ -383,6 +435,7 @@ class DriverDataRepository(
                 val backoffsMs = listOf(250L, 1_000L, 3_000L)
                 var attempt = 0
                 var lastPutFailure: Throwable? = null
+                var signedUrlPutSucceeded = false
                 while (true) {
                     val attemptLabel = "${attempt + 1}/${backoffsMs.size}"
                     try {
@@ -436,7 +489,7 @@ class DriverDataRepository(
                             requestBuilder.header("Content-Length", contentLength.toString())
                         }
 
-                        val resp = signedUrlPutClient.newCall(requestBuilder.build()).execute()
+                        val resp = signedUrlTransportClient.newCall(requestBuilder.build()).execute()
                         resp.use {
                             if (!it.isSuccessful) {
                                 throw IOException("Evidence upload failed http=${it.code}")
@@ -447,7 +500,7 @@ class DriverDataRepository(
 
                         // If we succeeded after a prior retry failure, ensure we do NOT trigger fallback.
                         lastPutFailure = null
-                        uploaded += 1
+                        signedUrlPutSucceeded = true
                         break
                     } catch (t: Throwable) {
                         lastPutFailure = t
@@ -470,14 +523,106 @@ class DriverDataRepository(
                     }
                 }
 
+                suspend fun verifyDownloadAndRangeOrThrow(reasonLabel: String): Boolean {
+                    val verifyRid = UUID.randomUUID().toString()
+                    onLog?.invoke(
+                        "EvidenceUpload: verifyDownload rid=${verifyRid.take(8)} ev=${clientEvidenceId.take(8)} reason=$reasonLabel",
+                    )
+
+                    val dlReq = TripEvidenceDownloadRequest(
+                        clientProtocolVersion = handshakeMarker,
+                        app_id = BuildConfig.APP_ID,
+                        clientEvidenceId = clientEvidenceId,
+                        clientRequestId = verifyRid,
+                    )
+
+                    val dlResp = api.download(
+                        body = json.encodeToString(TripEvidenceDownloadRequest.serializer(), dlReq)
+                            .toRequestBody(jsonMediaType),
+                    )
+
+                    if (!dlResp.isSuccessful) {
+                        val errBody = runCatching { dlResp.errorBody()?.string() }.getOrNull()
+                        val parsed = BackendErrorParsing.parseErrorEnvelopeOrNull(errBody)
+                        val machineCode = parsed?.error?.details?.machineCode?.trim()?.uppercase()
+
+                        // The backend may surface missing-bytes as a deterministic gate.
+                        if (dlResp.code() == 412 && machineCode == "EVIDENCE_BYTES_MISSING") {
+                            onLog?.invoke(
+                                "EvidenceUpload: verifyDownload missing-bytes ev=${clientEvidenceId.take(8)} http=412 machine=EVIDENCE_BYTES_MISSING",
+                            )
+                            return true
+                        }
+
+                        val snippet = compactSnippet(errBody)
+                        throw IOException(
+                            "tripEvidenceDownload failed http=${dlResp.code()} machine=${machineCode ?: "-"} ev=${clientEvidenceId.take(8)} body=${snippet}",
+                        )
+                    }
+
+                    val rawBody = dlResp.body().orEmpty()
+                    val env = runCatching {
+                        json.decodeFromString(TripEvidenceDownloadResponse.serializer(), rawBody)
+                    }.getOrElse {
+                        throw IOException("tripEvidenceDownload failed: invalid response")
+                    }
+
+                    if (!env.ok) {
+                        val msg = env.error?.message?.trim().orEmpty().ifBlank { "tripEvidenceDownload failed" }
+                        throw IOException(msg)
+                    }
+
+                    val url = env.result?.downloadUrl?.trim().orEmpty()
+                    if (url.isBlank()) {
+                        throw IOException("tripEvidenceDownload missing downloadUrl")
+                    }
+
+                    // Verify the signed URL can actually fetch bytes (minimal bandwidth): request a 1-byte range.
+                    val rangeReq = Request.Builder()
+                        .url(url)
+                        .get()
+                        .header("Range", "bytes=0-0")
+                        .build()
+                    signedUrlTransportClient.newCall(rangeReq).execute().use { r ->
+                        if (!(r.isSuccessful || r.code == 206)) {
+                            throw IOException("Signed download url fetch failed http=${r.code}")
+                        }
+                        val bodyBytes = r.body?.bytes() ?: ByteArray(0)
+                        if (bodyBytes.isEmpty()) {
+                            throw IOException("Signed download url returned 0 bytes")
+                        }
+                    }
+
+                    onLog?.invoke(
+                        "EvidenceUpload: verifyDownload ok ev=${clientEvidenceId.take(8)}",
+                    )
+                    return false
+                }
+
+                // Postcondition: even if the signed-url PUT returned 2xx, the object might not exist (transport truncated).
+                // If the backend reports missing bytes, immediately fall back to backend-auth upload.
+                var needsFallback = lastPutFailure != null
+                if (signedUrlPutSucceeded) {
+                    val missing = verifyDownloadAndRangeOrThrow(reasonLabel = "post_put")
+                    if (!missing) {
+                        uploaded += 1
+                        return@runCatching
+                    }
+                    needsFallback = true
+                }
+
                 // If the signed-url PUT never succeeded, fall back to backend-auth upload.
-                if (lastPutFailure != null) {
+                if (needsFallback) {
                     val failure = lastPutFailure
                     val rid2 = UUID.randomUUID().toString()
-                    val reason = (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown").take(220)
+                    val reason = if (failure == null && signedUrlPutSucceeded) {
+                        "verifyDownload EVIDENCE_BYTES_MISSING"
+                    } else {
+                        (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown").take(220)
+                    }
                     Log.w(
                         "TrimsyTrack",
-                        "EvidenceUpload: signed-url PUT failed; fallback tripEvidencePutBytes ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} rid=${rid2.take(8)} err=$reason",
+                        "EvidenceUpload: fallback tripEvidencePutBytes ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} rid=${rid2.take(8)} err=$reason",
                     )
                     onLog?.invoke(
                         "EvidenceUpload: fallbackPutBytes start rid=${rid2.take(8)} ev=${clientEvidenceId.take(8)} err=$reason",
@@ -487,6 +632,15 @@ class DriverDataRepository(
                     val bytes = readAllBytes(uri)
                     val uploadedBytesLen = bytes.size
                     if (bytes.isEmpty()) throw IOException("Evidence bytes empty")
+
+                    val computedSha256 = sha256Hex(bytes)
+                    val expectedSha256 = a.sha256?.trim()?.lowercase()?.ifBlank { null }
+                    if (expectedSha256 != null && expectedSha256 != computedSha256.lowercase()) {
+                        val mismatch = "Evidence sha256 mismatch ev=${clientEvidenceId.take(8)} trip=${tripClientRef.take(8)} expectedSha=${expectedSha256.take(12)} actualSha=${computedSha256.take(12)}"
+                        Log.w("TrimsyTrack", "EvidenceUpload: $mismatch")
+                        onLog?.invoke("EvidenceUpload: $mismatch")
+                        throw IOException(mismatch)
+                    }
 
                     val expectedBytesLen = a.sizeBytes?.toInt()?.takeIf { it > 0 }
                     if (expectedBytesLen != null && expectedBytesLen != uploadedBytesLen) {
@@ -536,6 +690,12 @@ class DriverDataRepository(
                     onLog?.invoke(
                         "EvidenceUpload: fallbackPutBytes ok ev=${clientEvidenceId.take(8)} backendSizeBytes=${putResult?.sizeBytes} uploadedBytesLen=${uploadedBytesLen}",
                     )
+
+                    // Postcondition: ensure bytes are now present (backend sees storage object, and signed download URL works).
+                    val stillMissing = verifyDownloadAndRangeOrThrow(reasonLabel = "post_fallback")
+                    if (stillMissing) {
+                        throw IOException("Evidence still missing after fallbackPutBytes (EVIDENCE_BYTES_MISSING)")
+                    }
 
                     uploaded += 1
                 }
