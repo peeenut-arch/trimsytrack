@@ -17,6 +17,11 @@ Core behavior:
 - The other app should use `trimsyapp`.
 - Override for builds: `./gradlew assembleDebug -PAPP_ID=trimsytrack`
 
+## TrimsyPC (where to read what syncs)
+
+Authoritative TrimsyPC read-only retrieval guide (snapshot + trip media + parking fee receipts):
+- `shared_contract/TRIMSYPC_TRIMSYTRACK_SYNC_GUIDE.md`
+
 ## Play Store / privacy principles
 - No foreground service.
 - No GPS polling.

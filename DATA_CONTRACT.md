@@ -38,7 +38,7 @@ The `{ ok, result, error }` envelope exists on the **HTTP** endpoints (`apiV1/*`
 
 ### HTTP Envelope (apiV1/*)
 
-All `apiV1/*` responses use the same envelope:
+Most `apiV1/*` responses use the same envelope:
 
 ```json
 {
@@ -57,6 +57,9 @@ On failure:
   "error": { "message": "..." }
 }
 ```
+
+Legacy compatibility note:
+- `driverdataGet` and `driverdataPut` return the **DriverData object directly at the top-level** (no `{ ok, result }` wrapper).
 
 ### lawGetCallable (Callable) → LawGetResult
 
@@ -110,7 +113,12 @@ Canonical Truth (products, receipts, trips, transactions)
 
 ## TRIPS + EVIDENCE: LOCAL IDS vs CLOUD METADATA
 
-This app currently has **local-only media evidence** (synced phone → PC via the Evidence content provider), while **trip + evidence metadata** can be uploaded to cloud snapshots.
+This app stores evidence/media bytes locally and uploads them to backend storage (Cloud Storage) via signed URLs.
+
+- DriverData snapshots include **trip + evidence metadata** (IDs, hashes, linkage) but do **not** inline evidence bytes.
+- Evidence bytes are fetched via backend routes (`tripEvidenceListByTrip` + `tripEvidenceDownload`) using short-lived signed URLs.
+
+`EvidenceProvider` remains available as an optional local sharing mechanism, but it is no longer the authoritative sync path for evidence bytes.
 
 ### Trip logging (what we store)
 
@@ -185,7 +193,10 @@ Parking/traffic fee receipts are modeled as:
 - `TripEntity.parkingTrafficFeeMinor` = cost (minor units)
 - `TripEntity.parkingTicketId` = **parkingticketID** (String UUID)
 
-When a parking fee is added in the Trip UI, we ensure `parkingTicketId` exists and attach the receipt photo as local-only evidence (PC-synced).
+When a parking fee is added in the Trip UI, we ensure `parkingTicketId` exists and attach the receipt photo as evidence (uploaded via the normal evidence pipeline).
+
+Link rule:
+- `TripEntity.parkingTicketId` == receipt evidence `clientEvidenceId` (`AttachmentEntity.clientRef`)
 
 **Parking ticket metadata uploaded to cloud snapshots** (media excluded):
 

@@ -15,9 +15,10 @@ This document is for Trimsy (TrimsyApp / analytics tooling) to understand **exac
 - **Canonical driving-trip truth** is written via backend route `apiV1/drivingTripCreate`.
 - **DriverData snapshots** (`driverdataGet/driverdataPut`) are **checkpoint snapshots** for restore/reinstall and cross-device seeding. They are not the canonical “truth stream”; they’re “current known state” snapshots.
 
-### Evidence bytes never go to backend
-- Evidence/media bytes are **local-only** and exported via a ContentProvider to TrimsyApp.
-- Backend snapshots can carry **evidence metadata** (IDs, hashes, linkage) but never the media bytes.
+### Evidence bytes are stored in backend storage
+- Evidence/media bytes are uploaded to backend storage (Cloud Storage) via `tripEvidenceUploadInit` + signed URL `PUT`.
+- DriverData snapshots still carry **evidence metadata** (IDs, hashes, linkage) but **do not** inline the media bytes.
+- TrimsyPC/Trimsy tooling must fetch media bytes via backend routes `tripEvidenceListByTrip` + `tripEvidenceDownload`.
 
 ---
 
@@ -37,6 +38,7 @@ TrimsyTRACK interacts with these backend surfaces:
 - **Startup gating:** `handshakeGet`, then law gating (`lawGet`, `lawAccept`, etc.)
 - **DriverData snapshot store:** `driverdataGet`, `driverdataPut`
 - **Canonical driving-trip truth:** `drivingTripCreate`
+- **Trip evidence media bytes:** `tripEvidenceUploadInit`, `tripEvidenceListByTrip`, `tripEvidenceDownload`
 
 Optional / capability-gated (may not exist on every backend revision):
 - **TrackEvents (telemetry-like):** `trackEventsBatchPut`, `trackEventsSinceGet` (advertised via `handshakeGet.capabilities.trackEvents` when supported)
@@ -587,7 +589,9 @@ Stops are derived from trips as:
 - `tripClientRef` is the stable link to the owning trip.
 - In cloud snapshots, `uri` is intentionally `""`.
 
-To fetch bytes, Trimsy must use the EvidenceProvider routes.
+To fetch bytes, TrimsyPC must use backend routes:
+- `tripEvidenceListByTrip(tripClientRef)` to list evidence metadata for a trip
+- `tripEvidenceDownload(clientEvidenceId)` to obtain a short-lived signed `downloadUrl`
 
 ---
 
@@ -614,10 +618,13 @@ Evidence count per trip:
 - from snapshot: count `attachments` where `tripClientRef == trip.clientRef`
 
 ### 8.3 Parking/traffic fee receipts
-Parking/traffic fee media is local-only evidence, but the metadata is in:
+Parking/traffic fee receipt media is evidence uploaded to backend storage; the metadata is in:
 - `Trip.parkingTrafficFeeMinor`
 - `Trip.parkingTicketId`
 - and emitted to `parkingTickets[]` in DriverData snapshots.
+
+Join rule:
+- `Trip.parkingTicketId` == the receipt evidence `clientEvidenceId`
 
 ### 8.4 Swedish Körjournal CSV mapping (as implemented)
 The app’s Körjournal exporter maps data like this:
@@ -664,15 +671,16 @@ From evidence:
 
 ### 10.1 Preferred ingestion pipeline
 1) Pull **DriverData v3** from backend (`driverdataGet`) for restore/cross-device.
-2) Pull **evidence bytes** from device via EvidenceProvider (`.../list`, `.../ev/<id>`, `.../file?...`).
+2) Pull **evidence bytes** from backend via `tripEvidenceListByTrip` + `tripEvidenceDownload`.
 3) Pull **canonical trips** from backend truth store (future/if TrimsyApp becomes canonical reader). Today, TrimsyTRACK itself writes canonical truth via `drivingTripCreate` and stores the resulting `backendId` locally.
 
 ### 10.2 Treat local Trip# as display-only
 - Do not use `Trip.id` as a long-term stable identifier.
 - Use `Trip.clientRef` for cross-device, cross-system, and deduplication.
 
-### 10.3 Evidence bytes are optional in cloud restore
-- After reinstall, a device may restore trips and attachment metadata from cloud but will not have the evidence bytes unless they are still present locally or re-synced phone→PC.
+### 10.3 Evidence bytes are not in the snapshot
+- After reinstall, a device may restore trips and attachment metadata from cloud.
+- Evidence bytes are not in the DriverData snapshot; to restore media, clients must re-download bytes using `tripEvidenceDownload`.
 
 ---
 

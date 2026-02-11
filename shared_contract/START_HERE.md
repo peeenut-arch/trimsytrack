@@ -79,6 +79,8 @@ Authoritative identity boundary: [TRIMSYTRACK_SYSTEM_IDENTITY.md](TRIMSYTRACK_SY
 - Exported HTTP/callable surface: `BACKEND_EXPORTED_ENDPOINTS.md`
 - Storage + payload rules: `BACKEND_STORAGE_AND_SYNC_PAYLOAD.md`
 - Architectural contract summary: `BACKEND_CONTRACT.md`
+- Full TrimsyTRACK data schema (analytics/journal): `TRIMSYTRACK_COMPLETE_DATA_MAP.md`
+- TrimsyPC read-only fetch guide (parking fee + trip media): `TRIMSYPC_TRIMSYTRACK_SYNC_GUIDE.md`
 
 ---
 

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -27,9 +28,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -43,6 +46,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.trimsytrack.AppGraph
@@ -51,6 +55,7 @@ import com.trimsytrack.data.BUSINESS_HOME_LOCATION_ID
 import com.trimsytrack.data.SettingsStore
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.DistanceMethod
+import com.trimsytrack.data.entities.DistanceCacheEntity
 import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
@@ -88,9 +93,32 @@ import retrofit2.converter.scalars.ScalarsConverterFactory
 
 private const val GHOST_WIZARD_BUILD_STAMP = "2026-02-11j"
 
+private enum class GhostCheckStatus {
+    PASS,
+    WARN,
+    FAIL,
+}
+
+private data class GhostCheck(
+    val name: String,
+    val status: GhostCheckStatus,
+    val detail: String = "",
+)
+
+private data class GhostAttachedEvidenceIds(
+    val evidenceId: String,
+    val receiptId: String?,
+)
+
+private data class GhostVerifyResult(
+    val summary: String,
+    val checks: List<GhostCheck>,
+)
+
 private data class GhostSyncNowResult(
     val summary: String,
     val evidenceUploadLogLines: List<String>,
+    val checks: List<GhostCheck>,
 )
 
 private enum class GhostStep {
@@ -275,6 +303,13 @@ fun GhostTestWizardScreen(
     val step = remember { mutableStateOf(GhostStep.Intro) }
     val busy = remember { mutableStateOf(false) }
 
+    val lastChecks = remember { mutableStateOf<List<GhostCheck>>(emptyList()) }
+
+    val stressEnabled = remember { mutableStateOf(false) }
+    val stressIterationsText = remember { mutableStateOf("5") }
+    val stressDelayMsText = remember { mutableStateOf("0") }
+    val stressStopOnFail = remember { mutableStateOf(true) }
+
     val storeTripId = remember { mutableStateOf<Long?>(null) }
     val storeTripClientRef = remember { mutableStateOf<String?>(null) }
     val deleteTripId = remember { mutableStateOf<Long?>(null) }
@@ -287,6 +322,14 @@ fun GhostTestWizardScreen(
     val expectedBusinessHomeAddress = remember { mutableStateOf<String?>(null) }
     val expectedStoreSyncRadiusKm = remember { mutableStateOf<Int?>(null) }
     val expectedManualTripStoreSortMode = remember { mutableStateOf<String?>(null) }
+
+    val expectedPingPromptDay = remember { mutableStateOf<String?>(null) }
+    val expectedDistanceStartLatE5 = remember { mutableStateOf<Int?>(null) }
+    val expectedDistanceStartLngE5 = remember { mutableStateOf<Int?>(null) }
+    val expectedDistanceDestLatE5 = remember { mutableStateOf<Int?>(null) }
+    val expectedDistanceDestLngE5 = remember { mutableStateOf<Int?>(null) }
+
+    fun toE5(v: Double): Int = (v * 100_000.0).toInt()
 
     suspend fun requireHandshakeMarker(): Int {
         return AppGraph.settings.backendProtocolVersion.first()
@@ -438,6 +481,35 @@ fun GhostTestWizardScreen(
         AppGraph.db.storeDao().upsertAll(listOf(store))
         runCatching { AppGraph.db.storeDao().setFavorite(uid = uid, storeId = id, isFavorite = true) }
 
+        // Add one deterministic distance-cache record to ensure distanceCache[] is non-empty in snapshots.
+        // (We avoid calling external Google APIs from the wizard.)
+        val startLatE5 = toE5(store.lat)
+        val startLngE5 = toE5(store.lng)
+        val destLatE5 = toE5(store.lat + 0.0012)
+        val destLngE5 = toE5(store.lng + 0.0012)
+        AppGraph.db.distanceCacheDao().upsert(
+            DistanceCacheEntity(
+                uid = uid,
+                startLocationId = null,
+                endLocationId = null,
+                startLatE5 = startLatE5,
+                startLngE5 = startLngE5,
+                destLatE5 = destLatE5,
+                destLngE5 = destLngE5,
+                travelMode = "DRIVE",
+                distanceMeters = 1234,
+                durationMinutes = 7,
+                routePolyline = null,
+                source = "INTERNAL",
+                createdAt = Instant.now(),
+            ),
+        )
+
+        expectedDistanceStartLatE5.value = startLatE5
+        expectedDistanceStartLngE5.value = startLngE5
+        expectedDistanceDestLatE5.value = destLatE5
+        expectedDistanceDestLngE5.value = destLngE5
+
         // Critical for ping+notification: do not ignore the store; ignored stores suppress prompts.
         runCatching { AppGraph.settings.setStoreIgnored(storeId = id, ignored = false) }
         runCatching {
@@ -484,10 +556,25 @@ fun GhostTestWizardScreen(
         if (ping == null) throw IllegalStateException("Ping not created for storeId=${storeId.take(24)}")
         if (prompt == null) throw IllegalStateException("Prompt not created for storeId=${storeId.take(24)}")
 
+        // Deterministically mark the store as visited (this is part of DriverData snapshots).
+        AppGraph.db.visitedStoreDao().markVisitedOnce(
+            uid = uid,
+            storeId = storeId,
+            visitedAt = now.toEpochMilli(),
+            name = "Ghost Autosync Location",
+            city = "GhostTown",
+            lat = 59.3326,
+            lng = 18.0649,
+        )
+        val visited = AppGraph.db.visitedStoreDao().listAll(uid).any { it.storeId.trim() == storeId.trim() }
+        if (!visited) throw IllegalStateException("VisitedStore not created for storeId=${storeId.take(24)}")
+
+        expectedPingPromptDay.value = day.toString()
+
         "pingId=${ping.id} promptId=${prompt.id} notifId=${prompt.notificationId} day=$day"
     }
 
-    suspend fun attachEvidenceToTrip(tripId: Long) = withContext(Dispatchers.IO) {
+    suspend fun attachEvidenceToTrip(tripId: Long, includeReceipt: Boolean): GhostAttachedEvidenceIds = withContext(Dispatchers.IO) {
         val uid = AppGraph.settings.requireUid()
         val trip = AppGraph.tripRepository.get(tripId) ?: throw IllegalStateException("Trip not found")
 
@@ -533,40 +620,50 @@ fun GhostTestWizardScreen(
             linkedByDeviceId = "ghost_wizard",
         )
 
-        val uriReceipt = createDebugJpegInCache(
-            context = context,
-            fileName = "ghost_receipt_${System.currentTimeMillis()}.jpg",
-            textLines = listOf(
-                "Ghost Receipt",
-                "ticketId=${ticketId.take(12)}",
-                "feeMinor=${trip.parkingTrafficFeeMinor}",
-            ),
-        )
+        var receipt: AttachmentEntity? = null
+        if (includeReceipt) {
+            val uriReceipt = createDebugJpegInCache(
+                context = context,
+                fileName = "ghost_receipt_${System.currentTimeMillis()}.jpg",
+                textLines = listOf(
+                    "Ghost Receipt",
+                    "ticketId=${ticketId.take(12)}",
+                    "feeMinor=${trip.parkingTrafficFeeMinor}",
+                ),
+            )
 
-        val receipt = moveTempFileProviderUriToTripFiles(
-            context = context,
-            uid = uid,
-            tripId = tripId,
-            tripDay = day,
-            tripStoreNameSnapshot = storeName,
-            tempFileProviderUri = uriReceipt,
-            mimeType = "image/jpeg",
-            capturedAt = capturedAt,
-        ).copy(
-            uid = uid,
-            clientRef = ticketId,
-            displayName = (generic.displayName.replace("— photo", "— receipt")).ifBlank { "Receipt" },
-            linkedByDeviceId = "ghost_wizard",
-        )
+            receipt = moveTempFileProviderUriToTripFiles(
+                context = context,
+                uid = uid,
+                tripId = tripId,
+                tripDay = day,
+                tripStoreNameSnapshot = storeName,
+                tempFileProviderUri = uriReceipt,
+                mimeType = "image/jpeg",
+                capturedAt = capturedAt,
+            ).copy(
+                uid = uid,
+                clientRef = ticketId,
+                displayName = (generic.displayName.replace("— photo", "— receipt")).ifBlank { "Receipt" },
+                linkedByDeviceId = "ghost_wizard",
+            )
+        }
 
-        AppGraph.db.attachmentDao().insertAll(listOf(generic, receipt))
+        val toInsert = buildList {
+            add(generic)
+            if (receipt != null) add(receipt)
+        }
+        AppGraph.db.attachmentDao().insertAll(toInsert)
 
         evidenceId.value = evId
-        parkingTicketId.value = ticketId
+        if (includeReceipt) parkingTicketId.value = ticketId
+
+        GhostAttachedEvidenceIds(evidenceId = evId, receiptId = receipt?.clientRef)
     }
 
     suspend fun syncNow(): GhostSyncNowResult = withContext(Dispatchers.IO) {
-        val pendingBefore = runCatching { AppGraph.syncDb.canonicalWriteOutboxDao().countPending() }.getOrDefault(-1)
+        val pendingCanonicalBefore = runCatching { AppGraph.syncDb.canonicalWriteOutboxDao().countPending() }.getOrDefault(-1)
+        val pendingTrackEventsBefore = runCatching { AppGraph.syncDb.trackEventOutboxDao().countPending() }.getOrDefault(-1)
 
         val evidenceLines = mutableListOf<String>()
         fun captureEv(line: String) {
@@ -594,22 +691,95 @@ fun GhostTestWizardScreen(
         }
 
         // Wait for canonical outbox to drain so the run is truly canonicalized.
-        var pendingAfter = pendingBefore
+        var pendingCanonicalAfter = pendingCanonicalBefore
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < 20_000) {
-            pendingAfter = runCatching { AppGraph.syncDb.canonicalWriteOutboxDao().countPending() }.getOrDefault(-1)
-            if (pendingAfter == 0) break
+            pendingCanonicalAfter = runCatching { AppGraph.syncDb.canonicalWriteOutboxDao().countPending() }.getOrDefault(-1)
+            if (pendingCanonicalAfter == 0) break
             delay(500)
         }
 
+        val trackEventsSupported = AppGraph.settings.trackEventsBackendSupported.first()
+        var pendingTrackEventsAfter = pendingTrackEventsBefore
+        if (trackEventsSupported) {
+            val start2 = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start2 < 20_000) {
+                pendingTrackEventsAfter = runCatching { AppGraph.syncDb.trackEventOutboxDao().countPending() }.getOrDefault(-1)
+                if (pendingTrackEventsAfter == 0) break
+                delay(500)
+            }
+        }
+
+        val checks = buildList {
+            add(
+                GhostCheck(
+                    name = "snapshotUpload",
+                    status = if (snapshotBytes > 0) GhostCheckStatus.PASS else GhostCheckStatus.FAIL,
+                    detail = "bytes=$snapshotBytes",
+                ),
+            )
+            add(
+                GhostCheck(
+                    name = "evidenceUpload",
+                    status = when {
+                        evUploaded > 0 -> GhostCheckStatus.PASS
+                        else -> GhostCheckStatus.WARN
+                    },
+                    detail = "uploaded=$evUploaded",
+                ),
+            )
+            add(
+                GhostCheck(
+                    name = "canonicalOutboxDrain",
+                    status = when {
+                        pendingCanonicalAfter == 0 -> GhostCheckStatus.PASS
+                        pendingCanonicalAfter < 0 -> GhostCheckStatus.WARN
+                        else -> GhostCheckStatus.FAIL
+                    },
+                    detail = "before=$pendingCanonicalBefore after=$pendingCanonicalAfter",
+                ),
+            )
+            if (trackEventsSupported) {
+                add(
+                    GhostCheck(
+                        name = "trackEventsOutboxDrain",
+                        status = when {
+                            pendingTrackEventsAfter == 0 -> GhostCheckStatus.PASS
+                            pendingTrackEventsAfter < 0 -> GhostCheckStatus.WARN
+                            else -> GhostCheckStatus.WARN
+                        },
+                        detail = "before=$pendingTrackEventsBefore after=$pendingTrackEventsAfter",
+                    ),
+                )
+            }
+        }
+
+        // Deterministic fail-fast: canonical outbox must drain (unless we couldn't read it).
+        if (pendingCanonicalAfter > 0) {
+            throw IllegalStateException("Canonical outbox did not drain (pending=$pendingCanonicalAfter)")
+        }
+
         GhostSyncNowResult(
-            summary = "snapshotBytes=$snapshotBytes evidenceUploaded=$evUploaded pendingCanonical(before=$pendingBefore after=$pendingAfter)",
+            summary = "snapshotBytes=$snapshotBytes evidenceUploaded=$evUploaded pendingCanonical(before=$pendingCanonicalBefore after=$pendingCanonicalAfter) pendingTrackEvents(before=$pendingTrackEventsBefore after=${if (trackEventsSupported) pendingTrackEventsAfter else "-"})",
             evidenceUploadLogLines = evidenceLines.toList(),
+            checks = checks,
         )
     }
 
-    suspend fun verifyBackend(tripClientRef: String, expectedEvidenceIds: List<String>): String = withContext(Dispatchers.IO) {
+    suspend fun verifyBackend(tripClientRef: String, expectedEvidenceIds: List<String>): GhostVerifyResult = withContext(Dispatchers.IO) {
         val marker = requireHandshakeMarker()
+
+        val checks = mutableListOf<GhostCheck>()
+        fun pass(name: String, detail: String = "") {
+            checks.add(GhostCheck(name = name, status = GhostCheckStatus.PASS, detail = detail))
+        }
+        fun warn(name: String, detail: String = "") {
+            checks.add(GhostCheck(name = name, status = GhostCheckStatus.WARN, detail = detail))
+        }
+        fun fail(name: String, detail: String): Nothing {
+            checks.add(GhostCheck(name = name, status = GhostCheckStatus.FAIL, detail = detail))
+            throw IllegalStateException(detail)
+        }
 
         // 1) Probe handshake + driverdataGet quickly (HTTP).
         val probeRows = BackendEndpointProbe.probeAll(
@@ -747,66 +917,123 @@ fun GhostTestWizardScreen(
             delay(1500)
         }
         val driverData = snapshot ?: throw IllegalStateException("driverdataGet returned no snapshot (yet)")
+        pass("driverdataGet", "trips=${driverData.trips.size} stores=${driverData.stores.size} attachments=${driverData.attachments.size}")
 
         // Extra coverage assertions (edit/delete/settings/autosync location)
         val expectedEditedNotes = "GHOST_WIZARD|v1|edited"
         val editedTrip = driverData.trips.firstOrNull { it.clientRef.trim() == tripClientRef.trim() }
-            ?: throw IllegalStateException("DriverData snapshot missing edited trip clientRef=${tripClientRef.take(8)}")
+            ?: fail("trips.editedTrip", "DriverData snapshot missing edited trip clientRef=${tripClientRef.take(8)}")
         if (editedTrip.notes.trim() != expectedEditedNotes) {
-            throw IllegalStateException("Edited trip not reflected in snapshot (notes mismatch)")
+            fail("trips.editApplied", "Edited trip not reflected in snapshot (notes mismatch)")
         }
+        pass("trips.editApplied")
 
         val deletedRef = deleteTripClientRef.value?.trim().orEmpty()
         if (deletedRef.isNotBlank()) {
             val stillThere = driverData.trips.any { it.clientRef.trim() == deletedRef }
-            if (stillThere) throw IllegalStateException("Deleted trip still present in snapshot clientRef=${deletedRef.take(8)}")
+            if (stillThere) fail("trips.deleteApplied", "Deleted trip still present in snapshot clientRef=${deletedRef.take(8)}")
+            pass("trips.deleteApplied")
         }
 
         val expAddr = expectedBusinessHomeAddress.value?.trim().orEmpty()
         if (expAddr.isNotBlank() && driverData.settings.businessHomeAddress.trim() != expAddr) {
-            throw IllegalStateException("Settings not reflected in snapshot (businessHomeAddress mismatch)")
+            fail("settings.businessHomeAddress", "Settings not reflected in snapshot (businessHomeAddress mismatch)")
         }
+        if (expAddr.isNotBlank()) pass("settings.businessHomeAddress")
 
         val expRadius = expectedStoreSyncRadiusKm.value
         if (expRadius != null && driverData.settings.storeSyncRadiusKm != expRadius) {
-            throw IllegalStateException("Settings not reflected in snapshot (storeSyncRadiusKm mismatch)")
+            fail("settings.storeSyncRadiusKm", "Settings not reflected in snapshot (storeSyncRadiusKm mismatch)")
         }
+        if (expRadius != null) pass("settings.storeSyncRadiusKm")
 
         val expSort = expectedManualTripStoreSortMode.value?.trim().orEmpty()
         if (expSort.isNotBlank() && driverData.settings.manualTripStoreSortMode.trim() != expSort) {
-            throw IllegalStateException("Settings not reflected in snapshot (manualTripStoreSortMode mismatch)")
+            fail("settings.manualTripStoreSortMode", "Settings not reflected in snapshot (manualTripStoreSortMode mismatch)")
         }
+        if (expSort.isNotBlank()) pass("settings.manualTripStoreSortMode")
 
         val storeId = ghostStoreId.value?.trim().orEmpty()
         if (storeId.isNotBlank()) {
             val storeFound = driverData.stores.any { it.id.trim() == storeId }
-            if (!storeFound) throw IllegalStateException("Autosync location missing in snapshot storeId=${storeId.take(24)}")
+            if (!storeFound) fail("stores.autosyncPresent", "Autosync location missing in snapshot storeId=${storeId.take(24)}")
 
             val ignored = driverData.settings.ignoredStoreIds.any { it.trim() == storeId }
-            if (ignored) throw IllegalStateException("Autosync store unexpectedly ignored in snapshot storeId=${storeId.take(24)}")
+            if (ignored) fail("stores.autosyncNotIgnored", "Autosync store unexpectedly ignored in snapshot storeId=${storeId.take(24)}")
+
+            pass("stores.autosyncPresent")
+            pass("stores.autosyncNotIgnored")
+
+            // Events that we generate in the wizard and that are exported in DriverData.
+            val expDay = expectedPingPromptDay.value?.trim().orEmpty()
+            if (expDay.isNotBlank()) {
+                val promptOk = driverData.promptEvents.any { it.storeId.trim() == storeId && it.day.trim() == expDay }
+                if (!promptOk) fail("promptEvents.present", "PromptEvent missing in snapshot storeId=${storeId.take(24)} day=$expDay")
+                pass("promptEvents.present")
+
+                val pingOk = driverData.pingEvents.any { it.storeId.trim() == storeId && it.day.trim() == expDay }
+                if (!pingOk) fail("pingEvents.present", "PingEvent missing in snapshot storeId=${storeId.take(24)} day=$expDay")
+                pass("pingEvents.present")
+            } else {
+                warn("promptEvents.present", "expected day not set")
+                warn("pingEvents.present", "expected day not set")
+            }
+
+            val visitedOk = driverData.visitedStores.any { it.storeId.trim() == storeId && it.visitCount >= 1 }
+            if (!visitedOk) fail("visitedStores.present", "VisitedStore missing in snapshot storeId=${storeId.take(24)}")
+            pass("visitedStores.present")
+        }
+
+        // Derived: stops[] should be non-empty when trips exist.
+        if (driverData.trips.isNotEmpty() && driverData.stops.isEmpty()) {
+            fail("stops.derived", "Stops not derived in snapshot (stops[] empty while trips[] non-empty)")
+        }
+        if (driverData.trips.isNotEmpty()) pass("stops.derived", "stops=${driverData.stops.size}")
+
+        // Runs should include our seeded run label.
+        val runOk = driverData.runs.any { it.label.trim().equals("Ghost", ignoreCase = true) }
+        if (!runOk) warn("runs.present", "No run with label 'Ghost' found (runs=${driverData.runs.size})") else pass("runs.present")
+
+        // Distance cache should include our deterministic inserted key.
+        val sLat = expectedDistanceStartLatE5.value
+        val sLng = expectedDistanceStartLngE5.value
+        val dLat = expectedDistanceDestLatE5.value
+        val dLng = expectedDistanceDestLngE5.value
+        if (sLat != null && sLng != null && dLat != null && dLng != null) {
+            val dcOk = driverData.distanceCache.any {
+                it.startLatE5 == sLat && it.startLngE5 == sLng && it.destLatE5 == dLat && it.destLngE5 == dLng && it.travelMode.trim() == "DRIVE"
+            }
+            if (!dcOk) fail("distanceCache.present", "DistanceCache missing in snapshot for inserted key")
+            pass("distanceCache.present")
+        } else {
+            warn("distanceCache.present", "distance-cache key not set")
         }
 
         val attachmentByClientRef = driverData.attachments.associateBy { it.clientRef.orEmpty().trim() }
         val missingMeta = expectedEvidenceIds.filterNot { id -> attachmentByClientRef.containsKey(id.trim()) }
         if (missingMeta.isNotEmpty()) {
-            throw IllegalStateException("DriverData snapshot missing attachments: ${missingMeta.joinToString(",") { it.take(8) }}")
+            fail("attachments.metaPresent", "DriverData snapshot missing attachments: ${missingMeta.joinToString(",") { it.take(8) }}")
         }
+        pass("attachments.metaPresent", "count=${expectedEvidenceIds.size}")
 
         val wrongTrip = expectedEvidenceIds
             .mapNotNull { id -> attachmentByClientRef[id.trim()]?.let { id to it.tripClientRef } }
             .filter { (_, tcr) -> tcr.orEmpty().trim() != tripClientRef.trim() }
         if (wrongTrip.isNotEmpty()) {
-            throw IllegalStateException(
+            fail(
+                "attachments.tripLink",
                 "DriverData snapshot attachment tripClientRef mismatch: ${wrongTrip.joinToString(";") { (id, tcr) -> "${id.take(8)}->${tcr.take(8)}" }}",
             )
         }
+        pass("attachments.tripLink")
 
         val receiptId = parkingTicketId.value?.trim().orEmpty()
         if (receiptId.isNotBlank()) {
             val ticket = driverData.parkingTickets.firstOrNull { it.parkingTicketId.orEmpty().trim() == receiptId }
-                ?: throw IllegalStateException("DriverData snapshot missing parkingTicketId=${receiptId.take(8)}")
+                ?: fail("parkingTickets.present", "DriverData snapshot missing parkingTicketId=${receiptId.take(8)}")
             @Suppress("UNUSED_VARIABLE")
             val _ticketOk = ticket
+            pass("parkingTickets.present")
         }
 
         val listRid = UUID.randomUUID().toString()
@@ -844,8 +1071,9 @@ fun GhostTestWizardScreen(
         val foundIds = items.map { it.clientEvidenceId }.toSet()
         val missing = expectedEvidenceIds.filterNot { it in foundIds }
         if (missing.isNotEmpty()) {
-            throw IllegalStateException("Evidence missing on backend: ${missing.joinToString(",") { it.take(8) }}")
+            fail("evidence.listByTrip", "Evidence missing on backend: ${missing.joinToString(",") { it.take(8) }}")
         }
+        pass("evidence.listByTrip", "items=${items.size}")
 
         // 2) Download each expected item (signed URL + bytes).
         val okHttp = AppGraph.backendHttpClient
@@ -890,10 +1118,12 @@ fun GhostTestWizardScreen(
             }
         }
 
+        pass("evidence.downloadBytes", "count=${expectedEvidenceIds.size}")
+
         val handshakeRow = probeRows.firstOrNull { it.name == "handshakeGet" }
         val driverdataRow = probeRows.firstOrNull { it.name == "driverdataGet" }
 
-        buildString {
+        val summary = buildString {
             append("probe: handshake=")
             append(handshakeRow?.status ?: "-")
             append(" driverdataGet=")
@@ -903,6 +1133,8 @@ fun GhostTestWizardScreen(
             append(" | downloads=")
             append(expectedEvidenceIds.size)
         }
+
+        GhostVerifyResult(summary = summary, checks = checks.toList())
     }
 
     fun copyFullLogToClipboard() {
@@ -953,6 +1185,7 @@ fun GhostTestWizardScreen(
         logs.clear()
         busy.value = false
         step.value = GhostStep.Intro
+        lastChecks.value = emptyList()
         storeTripId.value = null
         storeTripClientRef.value = null
         deleteTripId.value = null
@@ -963,6 +1196,11 @@ fun GhostTestWizardScreen(
         expectedBusinessHomeAddress.value = null
         expectedStoreSyncRadiusKm.value = null
         expectedManualTripStoreSortMode.value = null
+        expectedPingPromptDay.value = null
+        expectedDistanceStartLatE5.value = null
+        expectedDistanceStartLngE5.value = null
+        expectedDistanceDestLatE5.value = null
+        expectedDistanceDestLngE5.value = null
     }
 
     LaunchedEffect(Unit) {
@@ -1013,6 +1251,67 @@ fun GhostTestWizardScreen(
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
+
+            if (lastChecks.value.isNotEmpty()) {
+                Text("Deterministic checks", style = MaterialTheme.typography.titleSmall)
+                lastChecks.value.take(8).forEach { c ->
+                    val tag = when (c.status) {
+                        GhostCheckStatus.PASS -> "PASS"
+                        GhostCheckStatus.WARN -> "WARN"
+                        GhostCheckStatus.FAIL -> "FAIL"
+                    }
+                    Text(
+                        "$tag ${c.name}${if (c.detail.isNotBlank()) " · ${c.detail}" else ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("Stress mode", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(
+                    checked = stressEnabled.value,
+                    onCheckedChange = { stressEnabled.value = it },
+                )
+            }
+            if (stressEnabled.value) {
+                OutlinedTextField(
+                    value = stressIterationsText.value,
+                    onValueChange = { stressIterationsText.value = it.take(3) },
+                    label = { Text("Iterations") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = stressDelayMsText.value,
+                    onValueChange = { stressDelayMsText.value = it.take(6) },
+                    label = { Text("Delay between iterations (ms)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        "Stop on first failure",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = stressStopOnFail.value,
+                        onCheckedChange = { stressStopOnFail.value = it },
+                    )
+                }
+            }
 
             HorizontalDivider()
 
@@ -1111,6 +1410,15 @@ fun GhostTestWizardScreen(
                                         addAutosyncLocationForCoverage()
                                         val storeId = ghostStoreId.value?.trim().orEmpty()
                                         log("Autosync OK: storeId=${storeId.take(32)}")
+                                        val dc = listOfNotNull(
+                                            expectedDistanceStartLatE5.value,
+                                            expectedDistanceStartLngE5.value,
+                                            expectedDistanceDestLatE5.value,
+                                            expectedDistanceDestLngE5.value,
+                                        )
+                                        if (dc.size == 4) {
+                                            log("DistanceCache OK: key=${expectedDistanceStartLatE5.value},${expectedDistanceStartLngE5.value} -> ${expectedDistanceDestLatE5.value},${expectedDistanceDestLngE5.value}")
+                                        }
                                         log(
                                             "Geofence sync diag: at=${AppGraph.settings.geofenceLastSyncAtMillis.first() ?: 0} reason=${AppGraph.settings.geofenceLastSyncReason.first()} total=${AppGraph.settings.geofenceLastSyncTotalStores.first()} reg=${AppGraph.settings.geofenceLastSyncRegisteredStores.first()} result=${AppGraph.settings.geofenceLastSyncResult.first()}",
                                         )
@@ -1129,7 +1437,7 @@ fun GhostTestWizardScreen(
                                     GhostStep.Attach -> {
                                         val id = storeTripId.value ?: throw IllegalStateException("Missing tripId")
                                         log("Attaching evidence + receipt...")
-                                        attachEvidenceToTrip(id)
+                                        attachEvidenceToTrip(tripId = id, includeReceipt = true)
                                         log(
                                             "Attach OK: evidenceId=${evidenceId.value?.take(12)} receiptId=${parkingTicketId.value?.take(12)}",
                                         )
@@ -1140,6 +1448,7 @@ fun GhostTestWizardScreen(
                                         requireHandshakeMarker()
                                         log("Sync: enqueue canonical + upload snapshot + upload evidence...")
                                         val out = syncNow()
+                                        lastChecks.value = out.checks
                                         if (out.evidenceUploadLogLines.isNotEmpty()) {
                                             for (line in out.evidenceUploadLogLines) {
                                                 log(line)
@@ -1160,8 +1469,50 @@ fun GhostTestWizardScreen(
                                         if (expected.isEmpty()) throw IllegalStateException("Missing expected evidence ids")
 
                                         log("Verify: listByTrip + download bytes (${expected.size} items)...")
-                                        val msg = verifyBackend(tripClientRef = tripRef, expectedEvidenceIds = expected)
-                                        log("VERIFY PASS: $msg")
+                                        val out = verifyBackend(tripClientRef = tripRef, expectedEvidenceIds = expected)
+                                        lastChecks.value = out.checks
+                                        log("VERIFY PASS: ${out.summary}")
+
+                                        if (stressEnabled.value) {
+                                            val iters = stressIterationsText.value.trim().toIntOrNull() ?: 0
+                                            val delayMs = stressDelayMsText.value.trim().toLongOrNull() ?: 0L
+                                            if (iters <= 0) throw IllegalStateException("Stress enabled but iterations is not a positive number")
+                                            val tripId = storeTripId.value ?: throw IllegalStateException("Missing tripId")
+                                            val receiptId = parkingTicketId.value?.trim().orEmpty()
+                                            if (receiptId.isBlank()) throw IllegalStateException("Stress requires receiptId from initial Attach")
+
+                                            log("STRESS START: iters=$iters delayMs=$delayMs stopOnFail=${stressStopOnFail.value}")
+
+                                            for (i in 1..iters) {
+                                                try {
+                                                    log("STRESS $i/$iters: attach evidence")
+                                                    val attached = attachEvidenceToTrip(tripId = tripId, includeReceipt = false)
+                                                    log("STRESS $i/$iters: sync")
+                                                    val out = syncNow()
+                                                    lastChecks.value = out.checks
+                                                    if (out.evidenceUploadLogLines.isNotEmpty()) {
+                                                        for (line in out.evidenceUploadLogLines) {
+                                                            log(line)
+                                                        }
+                                                    }
+                                                    log("STRESS $i/$iters: verify")
+                                                    val out2 = verifyBackend(
+                                                        tripClientRef = tripRef,
+                                                        expectedEvidenceIds = listOf(receiptId, attached.evidenceId),
+                                                    )
+                                                    lastChecks.value = out2.checks
+                                                    log("STRESS PASS $i/$iters: ${out2.summary}")
+                                                    if (delayMs > 0) delay(delayMs)
+                                                } catch (t: Throwable) {
+                                                    val em = t.message ?: t.javaClass.simpleName
+                                                    log("STRESS FAIL $i/$iters: $em")
+                                                    if (stressStopOnFail.value) throw IllegalStateException("Stress failed on iteration $i/$iters: $em", t)
+                                                }
+                                            }
+
+                                            log("STRESS DONE: iters=$iters")
+                                        }
+
                                         step.value = GhostStep.Done
                                     }
 
