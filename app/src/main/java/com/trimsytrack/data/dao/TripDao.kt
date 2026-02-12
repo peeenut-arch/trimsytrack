@@ -26,6 +26,9 @@ interface TripDao {
     @Update
     suspend fun update(entity: TripEntity)
 
+    @Query("UPDATE trips SET citySnapshot = :citySnapshot WHERE uid = :uid AND id = :id")
+    suspend fun updateCitySnapshot(uid: String, id: Long, citySnapshot: String): Int
+
     @Query("SELECT * FROM trips WHERE uid = :uid AND id = :id")
     suspend fun getById(uid: String, id: Long): TripEntity?
 

@@ -110,10 +110,6 @@
             android:exported="false" />
 
         <receiver
-            android:name=".notifications.TestPingActionReceiver"
-            android:exported="false" />
-
-        <receiver
             android:name=".system.BootReceiver"
             android:exported="true">
             <intent-filter>

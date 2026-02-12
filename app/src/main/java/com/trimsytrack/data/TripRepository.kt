@@ -383,7 +383,7 @@ class TripRepository(
                 val next = normalizeCityCandidate(city)
                 if (next.isBlank()) continue
 
-                tripDao.update(trip.copy(citySnapshot = next))
+                tripDao.updateCitySnapshot(uid = trip.uid, id = trip.id, citySnapshot = next)
             }
         }
     }
@@ -412,7 +412,7 @@ class TripRepository(
                 }
                 if (city.isBlank()) continue
 
-                tripDao.update(trip.copy(citySnapshot = city))
+                tripDao.updateCitySnapshot(uid = trip.uid, id = trip.id, citySnapshot = city)
             }
         }
     }
@@ -442,7 +442,7 @@ class TripRepository(
 
             // Update only the snapshot value; keep everything else unchanged.
             runCatching {
-                tripDao.update(entity.copy(id = tripId, citySnapshot = next))
+                tripDao.updateCitySnapshot(uid = entity.uid, id = tripId, citySnapshot = next)
             }
         }
     }

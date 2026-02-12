@@ -506,11 +506,18 @@ The companion app pulls data from the phone:
 This section defines what the app expects from the backend and what the backend can expect from the app.
 
 ### 11.1 Common request requirements (all backend endpoints)
+- HTTP gateway endpoints are exported as `POST apiV1/<route>`.
 - Requests must include:
   - `Authorization: Bearer <Firebase ID token>`
-  - `X-App-Id: <app-id>` (multi-app isolation; compiled as `BuildConfig.APP_ID`)
-  - `X-Profile-Id: <profile-id>` (per-profile isolation; `settings.profileId` or `"default"`)
-- All endpoints are versioned under `/api/v1/...`.
+  - JSON body fields (route-dependent), typically including:
+    - `clientProtocolVersion` (numeric)
+    - `app_id` (string; compiled as `BuildConfig.APP_ID`)
+    - `clientRequestId` (string; optional but strongly recommended for tracing)
+- Identity + scope:
+  - The backend scopes all data to the Firebase Auth `uid` from the bearer token.
+  - There is no client-supplied `profileId` header; **`profileId == uid`** in the UID-only model.
+- Versioning:
+  - Protocol versioning is carried in JSON (`clientProtocolVersion`), not in the URL path.
 
 ### 11.2 Outbox trip-create sync (small, incremental)
 - Purpose: push newly created trips to backend without uploading the full database.
@@ -536,13 +543,18 @@ This section defines what the app expects from the backend and what the backend 
 
 ### 11.3 Snapshot upload/download (bulk, destructive restore)
 - Purpose: move a full “profile snapshot” across devices or recover from backend.
-- Upload (`PUT /api/v1/driverdata/{driverId}`):
-  - App uploads a full `DriverData` JSON payload.
-  - Backend returns a canonical `DriverData` JSON payload.
-  - App immediately restores local DB/settings from that canonical response.
-- Download (`GET /api/v1/driverdata/{driverId}`):
-  - Backend returns a `DriverData` JSON payload.
-  - App restores local DB/settings from it.
+- Upload (`POST /apiV1/driverdataPut`):
+  - Body: `{ clientProtocolVersion, app_id, clientRequestId, idempotencyKey, snapshot }`
+  - `snapshot` is a full `DriverData` JSON payload.
+  - Backend returns a canonical `DriverData` JSON payload (top-level object; no `{ ok, result }` envelope).
+  - The app immediately restores local DB/settings from that canonical response.
+- Download (`POST /apiV1/driverdataGet`):
+  - Body: `{ clientProtocolVersion, app_id, clientRequestId }`
+  - Backend returns a `DriverData` JSON payload (top-level object; no `{ ok, result }` envelope).
+  - The app restores local DB/settings from it.
+- Ordering guard (backend invariant):
+  - The backend uses `snapshot.exportedAt` to prevent out-of-order uploads from regressing state.
+  - If an incoming snapshot is strictly older than the stored snapshot (by `exportedAt`), the backend **rejects the overwrite** and returns the latest stored snapshot instead.
 - Destructive by design:
   - Snapshot download/restore replaces local DB and key settings.
   - This must remain an explicit user action (no silent background “daily restore”).
