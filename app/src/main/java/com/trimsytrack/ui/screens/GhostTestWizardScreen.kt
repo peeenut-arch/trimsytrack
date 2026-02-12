@@ -892,19 +892,6 @@ fun GhostTestWizardScreen(
         // 1) Canonical flush (async WorkManager)
         runCatching { AppGraph.canonicalWritesSyncManager.enqueueImmediate("ghost_wizard") }
 
-        // Diagnostic: log what the snapshot export currently contains for our edited trip.
-        runCatching {
-            val tripRef = storeTripClientRef.value?.trim().orEmpty()
-            if (tripRef.isNotBlank()) {
-                val snap = AppGraph.driverDataRepository.exportSnapshot()
-                val t = snap.trips.firstOrNull { it.clientRef.trim() == tripRef }
-                val notes = t?.notes?.trim().orEmpty()
-                log(
-                    "SnapshotExport: exportedAt=${snap.exportedAt.take(24)} trips=${snap.trips.size} tripClientRef=${tripRef.take(8)} notes=${notes.take(180)}".trim(),
-                )
-            }
-        }
-
         // 2) Snapshot upload (sync call)
         val snapshotBytes = AppGraph.driverDataRepository.uploadSnapshot().length
 
@@ -1335,15 +1322,32 @@ fun GhostTestWizardScreen(
         val sLng = expectedDistanceStartLngE5.value
         val dLat = expectedDistanceDestLatE5.value
         val dLng = expectedDistanceDestLngE5.value
-        if (sLat != null && sLng != null && dLat != null && dLng != null) {
-            val dcOk = driverData.distanceCache.any {
-                it.startLatE5 == sLat && it.startLngE5 == sLng && it.destLatE5 == dLat && it.destLngE5 == dLng && it.travelMode.trim() == "DRIVE"
-            }
-            if (!dcOk) fail("distanceCache.present", "DistanceCache missing in snapshot for inserted key")
-            pass("distanceCache.present")
-        } else {
-            warn("distanceCache.present", "distance-cache key not set")
+
+        // Resume/wipe can reset in-memory expected key state; fall back to the known deterministic key.
+        val fallbackStartLatE5 = toE5(59.3326)
+        val fallbackStartLngE5 = toE5(18.0649)
+        val fallbackDestLatE5 = toE5(59.3326 + 0.0012)
+        val fallbackDestLngE5 = toE5(18.0649 + 0.0012)
+
+        val keyStartLatE5 = sLat ?: fallbackStartLatE5
+        val keyStartLngE5 = sLng ?: fallbackStartLngE5
+        val keyDestLatE5 = dLat ?: fallbackDestLatE5
+        val keyDestLngE5 = dLng ?: fallbackDestLngE5
+
+        val dcOk = driverData.distanceCache.any {
+            it.startLatE5 == keyStartLatE5 &&
+                it.startLngE5 == keyStartLngE5 &&
+                it.destLatE5 == keyDestLatE5 &&
+                it.destLngE5 == keyDestLngE5 &&
+                it.travelMode.trim() == "DRIVE"
         }
+        if (!dcOk) {
+            fail(
+                "distanceCache.present",
+                "DistanceCache missing in snapshot for inserted key (${keyStartLatE5},${keyStartLngE5} -> ${keyDestLatE5},${keyDestLngE5})",
+            )
+        }
+        pass("distanceCache.present")
 
         val attachmentByClientRef = driverData.attachments.associateBy { it.clientRef.orEmpty().trim() }
         val missingMeta = expectedEvidenceIds.filterNot { id -> attachmentByClientRef.containsKey(id.trim()) }
