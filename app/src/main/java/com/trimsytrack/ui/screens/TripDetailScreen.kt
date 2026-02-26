@@ -23,6 +23,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.TextField
 import androidx.compose.material3.Text
@@ -39,6 +40,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -86,6 +88,12 @@ fun TripDetailScreen(
     val feeInput = remember { mutableStateOf("") }
     val feeInputError = remember { mutableStateOf<String?>(null) }
     val pendingFeeMinor = remember { mutableStateOf<Int?>(null) }
+    val pendingFeeHasMoms = remember { mutableStateOf<Boolean?>(null) }
+    val pendingFeeAccountType = remember { mutableStateOf<String?>(null) }
+
+    // Dialog-local selections (defaulted when opening the dialog)
+    val feeHasMoms = remember { mutableStateOf(false) }
+    val feeAccountType = remember { mutableStateOf("BUSINESS") }
 
     val showSyncRejectedDialog = remember { mutableStateOf(false) }
 
@@ -93,8 +101,12 @@ fun TripDetailScreen(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
             val feeMinor = pendingFeeMinor.value
+            val hasMoms = pendingFeeHasMoms.value
+            val accountType = pendingFeeAccountType.value
             if (uri == null || feeMinor == null) {
                 pendingFeeMinor.value = null
+                pendingFeeHasMoms.value = null
+                pendingFeeAccountType.value = null
                 return@rememberLauncherForActivityResult
             }
 
@@ -109,6 +121,8 @@ fun TripDetailScreen(
             if (t == null) {
                 importMessage.value = "Trip not loaded yet. Try again."
                 pendingFeeMinor.value = null
+                pendingFeeHasMoms.value = null
+                pendingFeeAccountType.value = null
                 return@rememberLauncherForActivityResult
             }
 
@@ -136,12 +150,21 @@ fun TripDetailScreen(
                         displayName = "Parking/Traffic fee ${feeText} — receipt (${parkingTicketId.take(8)})"
                     )
                     AppGraph.tripRepository.addAttachment(entity)
-                    vm.updateTrip(t.copy(parkingTrafficFeeMinor = feeMinor, parkingTicketId = parkingTicketId))
+                    vm.updateTrip(
+                        t.copy(
+                            parkingTrafficFeeMinor = feeMinor,
+                            parkingTicketId = parkingTicketId,
+                            parkingTicketHasMoms = hasMoms,
+                            parkingTicketAccountType = accountType,
+                        )
+                    )
                     importMessage.value = "Fee saved and receipt photo attached."
                 } catch (e: Exception) {
                     importMessage.value = e.message ?: "Failed to upload fee receipt photo"
                 } finally {
                     pendingFeeMinor.value = null
+                    pendingFeeHasMoms.value = null
+                    pendingFeeAccountType.value = null
                 }
             }
         },
@@ -381,6 +404,8 @@ fun TripDetailScreen(
                         onClick = {
                             feeInputError.value = null
                             feeInput.value = feeMinor?.let { formatMinorAmount(it) }.orEmpty()
+                            feeHasMoms.value = t.parkingTicketHasMoms ?: false
+                            feeAccountType.value = t.parkingTicketAccountType ?: "BUSINESS"
                             showFeeDialog.value = true
                         },
                     ) {
@@ -522,6 +547,81 @@ fun TripDetailScreen(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.fillMaxWidth(),
                     )
+
+                    Text(
+                        "Konto",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        val toggleShape = RoundedCornerShape(10.dp)
+                        val selected = feeAccountType.value
+
+                        if (selected == "PRIVATE") {
+                            Button(
+                                onClick = { feeAccountType.value = "PRIVATE" },
+                                shape = toggleShape,
+                            ) { Text("Privat") }
+                        } else {
+                            OutlinedButton(
+                                onClick = { feeAccountType.value = "PRIVATE" },
+                                shape = toggleShape,
+                            ) { Text("Privat") }
+                        }
+
+                        if (selected == "BUSINESS") {
+                            Button(
+                                onClick = { feeAccountType.value = "BUSINESS" },
+                                shape = toggleShape,
+                            ) { Text("Affärskonto") }
+                        } else {
+                            OutlinedButton(
+                                onClick = { feeAccountType.value = "BUSINESS" },
+                                shape = toggleShape,
+                            ) { Text("Affärskonto") }
+                        }
+                    }
+
+                    Text(
+                        "Moms",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        val toggleShape = RoundedCornerShape(10.dp)
+                        val selected = feeHasMoms.value
+
+                        if (selected) {
+                            Button(
+                                onClick = { feeHasMoms.value = true },
+                                shape = toggleShape,
+                            ) { Text("Ja") }
+                        } else {
+                            OutlinedButton(
+                                onClick = { feeHasMoms.value = true },
+                                shape = toggleShape,
+                            ) { Text("Ja") }
+                        }
+
+                        if (!selected) {
+                            Button(
+                                onClick = { feeHasMoms.value = false },
+                                shape = toggleShape,
+                            ) { Text("Nej") }
+                        } else {
+                            OutlinedButton(
+                                onClick = { feeHasMoms.value = false },
+                                shape = toggleShape,
+                            ) { Text("Nej") }
+                        }
+                    }
+
                     if (feeInputError.value != null) {
                         Text(
                             feeInputError.value ?: "",
@@ -547,6 +647,8 @@ fun TripDetailScreen(
                         }
 
                         pendingFeeMinor.value = parsed
+                        pendingFeeHasMoms.value = feeHasMoms.value
+                        pendingFeeAccountType.value = feeAccountType.value
                         showFeeDialog.value = false
                         if (BuildConfig.DEBUG) {
                             Log.d(

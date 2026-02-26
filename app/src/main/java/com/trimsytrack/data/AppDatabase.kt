@@ -31,7 +31,7 @@ import com.trimsytrack.data.entities.VisitedStoreEntity
         DistanceCacheEntity::class,
         RunEntity::class,
     ],
-    version = 23,  // Schema changed; bump to avoid Room identity hash crash
+    version = 24,  // Schema changed; bump to avoid Room identity hash crash
     exportSchema = false
 )
 @TypeConverters(RoomConverters::class)

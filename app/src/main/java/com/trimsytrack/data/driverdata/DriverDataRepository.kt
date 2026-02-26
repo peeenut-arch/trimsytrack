@@ -1927,6 +1927,8 @@ private fun TripEntity.toParkingTicketDto(
         tripId = id,
         costMinor = amount,
         currencyCode = currencyCode,
+        hasMoms = parkingTicketHasMoms,
+        accountType = parkingTicketAccountType,
         syfte = com.trimsytrack.data.SettingsStore
             .normalizeBusinessPurpose(businessPurpose)
             .ifBlank { com.trimsytrack.data.SettingsStore.DEFAULT_BUSINESS_PURPOSE },

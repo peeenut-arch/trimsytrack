@@ -112,4 +112,10 @@ data class TripEntity(
      * are safe to upload to cloud snapshots.
      */
     val parkingTicketId: String? = null,
+
+    /** Whether the parking ticket amount includes VAT (MOMS). */
+    val parkingTicketHasMoms: Boolean? = null,
+
+    /** Which account paid the ticket (e.g. PRIVATE/BUSINESS). */
+    val parkingTicketAccountType: String? = null,
 )

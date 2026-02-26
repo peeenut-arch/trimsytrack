@@ -316,6 +316,12 @@ data class ParkingTicketDto(
     val costMinor: Int,
     val currencyCode: String? = null,
 
+    /** Whether the amount includes VAT (MOMS). */
+    val hasMoms: Boolean? = null,
+
+    /** Which account paid the ticket (e.g. PRIVATE/BUSINESS). */
+    val accountType: String? = null,
+
     // Journal-ish fields (duplicated from the trip for convenience).
     val syfte: String,
     val date: String,
