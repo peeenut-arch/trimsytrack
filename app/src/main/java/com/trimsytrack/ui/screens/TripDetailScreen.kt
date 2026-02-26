@@ -371,6 +371,23 @@ fun TripDetailScreen(
                     )
                 }
 
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            feeInputError.value = null
+                            feeInput.value = feeMinor?.let { formatMinorAmount(it) }.orEmpty()
+                            showFeeDialog.value = true
+                        },
+                    ) {
+                        Text(if (feeMinor == null) "Add parking fee" else "Edit parking fee")
+                    }
+                }
+
                 Spacer(Modifier.height(14.dp))
 
                 val distanceKm = t.distanceMeters / 1000.0

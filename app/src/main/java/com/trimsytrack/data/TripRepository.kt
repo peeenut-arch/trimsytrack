@@ -675,6 +675,28 @@ class TripRepository(
             runCatching { attachmentDao.updateUri(uid = uid, id = insertedId, uri = newUri) }
         }
 
+        // Durable evidence upload queue (gold-standard reliability): enqueue this attachment for upload.
+        runCatching {
+            val nowMillis = System.currentTimeMillis()
+            AppGraph.syncDb.evidenceUploadOutboxDao().insertIgnore(
+                com.trimsytrack.data.sync.EvidenceUploadOutboxEntity(
+                    uid = uid,
+                    attachmentId = insertedId,
+                    tripId = ensured.tripId,
+                    createdAtMillis = nowMillis,
+                )
+            )
+        }
+
+        // Evidence bytes are uploaded by the driverdata snapshot worker.
+        // Enqueue a near-immediate run so TrimsyPC can fetch newly added media quickly.
+        runCatching {
+            AppGraph.driverDataSyncManager.enqueueImmediate(
+                reason = "attachment_added tripId=${ensured.tripId} attId=$insertedId",
+                trigger = "instant",
+            )
+        }
+
         return insertedId
     }
 

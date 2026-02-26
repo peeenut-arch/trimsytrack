@@ -125,6 +125,7 @@ object AppGraph {
                 .build()
 
             syncDb = Room.databaseBuilder(appContext, SyncDatabase::class.java, "trimsytrack.sync.db")
+                .addMigrations(com.trimsytrack.data.sync.SyncMigrations.MIGRATION_3_4)
                 .fallbackToDestructiveMigration()
                 .build()
 

@@ -23,6 +23,9 @@ class CanonicalWritesSyncManager(
             .build()
 
         WorkManager.getInstance(context)
-            .enqueueUniqueWork("canonical-write-outbox-flush", ExistingWorkPolicy.KEEP, request)
+            // Important: this is an *immediate* flush. Using KEEP can leave us stuck behind a
+            // previous job that's in backoff/retry (or otherwise blocked), which makes
+            // foreground flows (Ghost Wizard / user actions) look broken.
+            .enqueueUniqueWork("canonical-write-outbox-flush", ExistingWorkPolicy.REPLACE, request)
     }
 }

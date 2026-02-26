@@ -5,6 +5,12 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
 import androidx.work.Constraints
@@ -49,11 +55,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -78,6 +86,7 @@ import com.trimsytrack.data.entities.PlaceType
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.geofence.GeofenceEventEngine
+import kotlinx.coroutines.CancellationException
 import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.system.AppPermissionChecks
 import com.trimsytrack.system.BackendEndpointProbe
@@ -92,6 +101,7 @@ import java.time.ZoneId
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
@@ -111,7 +121,7 @@ import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
 
-private const val GHOST_WIZARD_BUILD_STAMP = "2026-02-11j"
+private const val GHOST_WIZARD_BUILD_STAMP = "2026-02-14c"
 
 private enum class GhostCheckStatus {
     PASS,
@@ -139,6 +149,8 @@ private data class GhostSyncNowResult(
     val summary: String,
     val evidenceUploadLogLines: List<String>,
     val checks: List<GhostCheck>,
+    val pendingEvidenceAfter: Int,
+    val readyEvidenceAfter: Int,
 )
 
 private enum class GhostStep {
@@ -176,6 +188,7 @@ private data class GhostResumeState(
     val expectedEvidenceIds: List<String> = emptyList(),
     val backendBaseUrl: String? = null,
     val backendProtocolVersion: Int? = null,
+    val autoContinueWhenOnline: Boolean = false,
 )
 
 @Serializable
@@ -356,6 +369,8 @@ fun GhostTestWizardScreen(
 
     val lastChecks = remember { mutableStateOf<List<GhostCheck>>(emptyList()) }
 
+    val autoContinueWhenOnline = remember { mutableStateOf(false) }
+
     val stressEnabled = remember { mutableStateOf(false) }
     val stressIterationsText = remember { mutableStateOf("5") }
     val stressDelayMsText = remember { mutableStateOf("0") }
@@ -363,10 +378,16 @@ fun GhostTestWizardScreen(
 
     val includeWipeReloginRestore = remember { mutableStateOf(true) }
 
-    // Legacy debug utilities migrated from SettingsScreen.
-    val toolsStressRoundsText = remember { mutableStateOf("5") }
-    val toolsPurgeBackendConfirmText = remember { mutableStateOf("") }
-    val toolsDeleteAccountConfirmText = remember { mutableStateOf("") }
+    // Advanced test controls (optional).
+    val tripsLargeSnapshotEnabled = remember { mutableStateOf(false) }
+    val seedExtraTripsText = remember { mutableStateOf("0") }
+
+    val evidenceMultiUploadEnabled = remember { mutableStateOf(false) }
+    val evidenceExtraItemsText = remember { mutableStateOf("2") }
+    val extraEvidenceIds = remember { mutableStateListOf<String>() }
+
+    val verifyBaseUrlOverrideEnabled = remember { mutableStateOf(false) }
+    val verifyBaseUrlOverrideText = remember { mutableStateOf("") }
 
     val runMarker = remember { mutableStateOf<String?>(null) }
 
@@ -388,6 +409,58 @@ fun GhostTestWizardScreen(
     val expectedDistanceStartLngE5 = remember { mutableStateOf<Int?>(null) }
     val expectedDistanceDestLatE5 = remember { mutableStateOf<Int?>(null) }
     val expectedDistanceDestLngE5 = remember { mutableStateOf<Int?>(null) }
+
+    fun isOnlineNow(cm: ConnectivityManager?): Boolean {
+        if (cm == null) return true
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    val isOnline = remember { mutableStateOf(true) }
+    DisposableEffect(Unit) {
+        val cm = runCatching { context.getSystemService(ConnectivityManager::class.java) }.getOrNull()
+        val mainHandler = Handler(Looper.getMainLooper())
+        fun setOnline(v: Boolean) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                isOnline.value = v
+            } else {
+                mainHandler.post { isOnline.value = v }
+            }
+        }
+
+        setOnline(isOnlineNow(cm))
+
+        if (cm == null) {
+            onDispose { }
+        } else {
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    setOnline(isOnlineNow(cm))
+                }
+
+                override fun onLost(network: Network) {
+                    setOnline(isOnlineNow(cm))
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    setOnline(isOnlineNow(cm))
+                }
+            }
+
+            runCatching {
+                val req = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build()
+                cm.registerNetworkCallback(req, cb)
+            }
+
+            onDispose {
+                runCatching { cm.unregisterNetworkCallback(cb) }
+            }
+        }
+    }
 
     fun toE5(v: Double): Int = (v * 100_000.0).toInt()
 
@@ -412,7 +485,7 @@ fun GhostTestWizardScreen(
             ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
     }
 
-    suspend fun seedTrips(marker: String): GhostSeedResult = withContext(Dispatchers.IO) {
+    suspend fun seedTrips(marker: String, extraTrips: Int): GhostSeedResult = withContext(Dispatchers.IO) {
         val uid = AppGraph.settings.requireUid()
 
         // Keep the wizard idempotent.
@@ -485,6 +558,40 @@ fun GhostTestWizardScreen(
         )
         val deleteId = AppGraph.tripRepository.createTrip(deleteTrip)
 
+        val bulk = extraTrips.coerceIn(0, 2500)
+        if (bulk > 0) {
+            // Bulk seed must NOT go through TripRepository.createTrip because that schedules background
+            // geocoding updates (expensive N times) and can introduce nondeterminism.
+            val entities = ArrayList<TripEntity>(bulk)
+            for (i in 1..bulk) {
+                val endedAt = storeEndedAt.minusSeconds((15L * 60L) + (i.toLong() * 60L))
+                val bulkDay = endedAt.atZone(zone).toLocalDate()
+                val bulkTrip = storeTrip.copy(
+                    id = 0L,
+                    uid = uid,
+                    createdAt = endedAt.plusSeconds(10),
+                    day = bulkDay,
+                    startedAt = TripTimes.deriveStartedAt(endedAt = endedAt, durationMinutes = 8),
+                    endedAt = endedAt,
+                    storeId = "ghost:bulk:${marker.lowercase()}:$i",
+                    storeNameSnapshot = "Ghost Bulk $i",
+                    citySnapshot = "Stockholm",
+                    notes = "GHOST_WIZARD|v1|bulk=$marker|i=$i",
+                    parkingTrafficFeeMinor = null,
+                    parkingTicketId = null,
+                    syncStatus = SyncStatus.LOCAL_ONLY,
+                    clientRef = UUID.randomUUID().toString(),
+                    backendId = null,
+                    syncErrorMachineCode = null,
+                    syncErrorMessage = null,
+                    runId = runId,
+                )
+                entities.add(bulkTrip)
+            }
+            AppGraph.db.tripDao().insertAll(entities)
+            log("Seed: bulk inserted extraTrips=$bulk")
+        }
+
         // Close the run with a HOME trip to force canonical flush enqueuing.
         val homeEndedAt = now
         val homeTrip = storeTrip.copy(
@@ -523,10 +630,11 @@ fun GhostTestWizardScreen(
     suspend fun persistResumeState(stage: String) = withContext(Dispatchers.IO) {
         val marker = runMarker.value?.trim().orEmpty().ifBlank { "unknown" }
         val tripRef = storeTripClientRef.value?.trim().orEmpty()
-        val expected = listOfNotNull(
-            evidenceId.value?.trim()?.takeIf { it.isNotBlank() },
-            parkingTicketId.value?.trim()?.takeIf { it.isNotBlank() },
-        )
+        val expected = buildList {
+            evidenceId.value?.trim()?.takeIf { it.isNotBlank() }?.let { add(it) }
+            parkingTicketId.value?.trim()?.takeIf { it.isNotBlank() }?.let { add(it) }
+            extraEvidenceIds.map { it.trim() }.filter { it.isNotBlank() }.forEach { add(it) }
+        }
 
         if (tripRef.isBlank()) return@withContext
 
@@ -546,6 +654,7 @@ fun GhostTestWizardScreen(
             expectedEvidenceIds = expected,
             backendBaseUrl = baseUrlRaw,
             backendProtocolVersion = protocol,
+            autoContinueWhenOnline = autoContinueWhenOnline.value,
         )
 
         runCatching {
@@ -872,16 +981,25 @@ fun GhostTestWizardScreen(
             if (receipt != null) add(receipt)
         }
         AppGraph.db.attachmentDao().insertAll(toInsert)
-
-        evidenceId.value = evId
-        if (includeReceipt) parkingTicketId.value = ticketId
-
         GhostAttachedEvidenceIds(evidenceId = evId, receiptId = receipt?.clientRef)
     }
 
     suspend fun syncNow(): GhostSyncNowResult = withContext(Dispatchers.IO) {
         val pendingCanonicalBefore = runCatching { AppGraph.syncDb.canonicalWriteOutboxDao().countPending() }.getOrDefault(-1)
         val pendingTrackEventsBefore = runCatching { AppGraph.syncDb.trackEventOutboxDao().countPending() }.getOrDefault(-1)
+
+        val uid = runCatching { AppGraph.settings.backendIdentityUid.first().trim() }.getOrDefault("")
+        val evidenceOutboxDao = AppGraph.syncDb.evidenceUploadOutboxDao()
+        val pendingEvidenceBefore = if (uid.isBlank()) {
+            -1
+        } else {
+            runCatching { evidenceOutboxDao.countPending(uid) }.getOrDefault(-1)
+        }
+        val readyEvidenceBefore = if (uid.isBlank()) {
+            -1
+        } else {
+            runCatching { evidenceOutboxDao.countReady(uid, System.currentTimeMillis()) }.getOrDefault(-1)
+        }
 
         val evidenceLines = mutableListOf<String>()
         fun captureEv(line: String) {
@@ -896,7 +1014,7 @@ fun GhostTestWizardScreen(
         val snapshotBytes = AppGraph.driverDataRepository.uploadSnapshot().length
 
         // 3) Evidence bytes upload (sync call)
-        val evUploaded = AppGraph.driverDataRepository.uploadEvidenceBytesBestEffort(
+        val evUploaded = AppGraph.driverDataRepository.uploadEvidenceOutboxBestEffort(
             limit = 10,
             onLog = ::captureEv,
         )
@@ -928,6 +1046,17 @@ fun GhostTestWizardScreen(
             }
         }
 
+        val pendingEvidenceAfter = if (uid.isBlank()) {
+            -1
+        } else {
+            runCatching { evidenceOutboxDao.countPending(uid) }.getOrDefault(-1)
+        }
+        val readyEvidenceAfter = if (uid.isBlank()) {
+            -1
+        } else {
+            runCatching { evidenceOutboxDao.countReady(uid, System.currentTimeMillis()) }.getOrDefault(-1)
+        }
+
         val checks = buildList {
             add(
                 GhostCheck(
@@ -944,6 +1073,17 @@ fun GhostTestWizardScreen(
                         else -> GhostCheckStatus.WARN
                     },
                     detail = "uploaded=$evUploaded",
+                ),
+            )
+            add(
+                GhostCheck(
+                    name = "evidenceOutboxDrain",
+                    status = when {
+                        pendingEvidenceAfter == 0 -> GhostCheckStatus.PASS
+                        pendingEvidenceAfter < 0 -> GhostCheckStatus.WARN
+                        else -> GhostCheckStatus.WARN
+                    },
+                    detail = "pending(before=$pendingEvidenceBefore after=$pendingEvidenceAfter) ready(before=$readyEvidenceBefore after=$readyEvidenceAfter)",
                 ),
             )
             add(
@@ -978,13 +1118,19 @@ fun GhostTestWizardScreen(
         }
 
         GhostSyncNowResult(
-            summary = "snapshotBytes=$snapshotBytes evidenceUploaded=$evUploaded pendingCanonical(before=$pendingCanonicalBefore after=$pendingCanonicalAfter) pendingTrackEvents(before=$pendingTrackEventsBefore after=${if (trackEventsSupported) pendingTrackEventsAfter else "-"})",
+            summary = "snapshotBytes=$snapshotBytes evidenceUploaded=$evUploaded pendingEvidence(before=$pendingEvidenceBefore after=$pendingEvidenceAfter) readyEvidence(before=$readyEvidenceBefore after=$readyEvidenceAfter) pendingCanonical(before=$pendingCanonicalBefore after=$pendingCanonicalAfter) pendingTrackEvents(before=$pendingTrackEventsBefore after=${if (trackEventsSupported) pendingTrackEventsAfter else "-"})",
             evidenceUploadLogLines = evidenceLines.toList(),
             checks = checks,
+            pendingEvidenceAfter = pendingEvidenceAfter,
+            readyEvidenceAfter = readyEvidenceAfter,
         )
     }
 
-    suspend fun verifyBackend(tripClientRef: String, expectedEvidenceIds: List<String>): GhostVerifyResult = withContext(Dispatchers.IO) {
+    suspend fun verifyBackend(
+        tripClientRef: String,
+        expectedEvidenceIds: List<String>,
+        baseUrlOverride: String? = null,
+    ): GhostVerifyResult = withContext(Dispatchers.IO) {
         val marker = requireHandshakeMarker()
 
         val checks = mutableListOf<GhostCheck>()
@@ -1000,13 +1146,19 @@ fun GhostTestWizardScreen(
         }
 
         // 1) Probe handshake + driverdataGet quickly (HTTP).
-        val probeRows = BackendEndpointProbe.probeAll(
-            settings = AppGraph.settings,
-            includeTrackEvents = false,
-            includeCallable = false,
-        )
+        // If baseUrlOverride is provided, we intentionally skip the global probe (it uses Settings baseUrl).
+        val probeRows = if (baseUrlOverride.isNullOrBlank()) {
+            BackendEndpointProbe.probeAll(
+                settings = AppGraph.settings,
+                includeTrackEvents = false,
+                includeCallable = false,
+            )
+        } else {
+            emptyList()
+        }
 
-        val baseUrlRaw = AppGraph.settings.backendBaseUrl.first().trim().ifBlank { BuildConfig.BACKEND_API_BASE }
+        val baseUrlRaw = baseUrlOverride?.trim().takeIf { !it.isNullOrBlank() }
+            ?: AppGraph.settings.backendBaseUrl.first().trim().ifBlank { BuildConfig.BACKEND_API_BASE }
         val baseUrl = normalizeBaseUrl(baseUrlRaw)
 
         val retrofit = Retrofit.Builder()
@@ -1416,6 +1568,15 @@ fun GhostTestWizardScreen(
 
         // 2) Download each expected item (signed URL + bytes).
         val okHttp = AppGraph.backendHttpClient
+        fun isOfflineStorageFailure(t: Throwable): Boolean {
+            if (t is java.net.UnknownHostException) return true
+            val msg = (t.message ?: "").lowercase()
+            return msg.contains("unable to resolve host") ||
+                msg.contains("no address associated with hostname")
+        }
+
+        var downloadsCompleted = 0
+        var downloadsSkippedOffline = false
         for (id in expectedEvidenceIds) {
             val dlRid = UUID.randomUUID().toString()
             val dlReq = TripEvidenceDownloadRequest(
@@ -1448,15 +1609,32 @@ fun GhostTestWizardScreen(
             val url = dlEnv.result?.downloadUrl?.trim().orEmpty()
             if (url.isBlank()) throw IllegalStateException("Missing downloadUrl for ${id.take(8)}")
 
-            val req = Request.Builder().url(url).get().build()
-            okHttp.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) throw IllegalStateException("Download GET failed http=${resp.code}")
-                val bytes = resp.body?.bytes() ?: ByteArray(0)
-                if (bytes.isEmpty()) throw IllegalStateException("Downloaded 0 bytes for ${id.take(8)}")
+            try {
+                val req = Request.Builder().url(url).get().build()
+                okHttp.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IllegalStateException("Download GET failed http=${resp.code}")
+                    val bytes = resp.body?.bytes() ?: ByteArray(0)
+                    if (bytes.isEmpty()) throw IllegalStateException("Downloaded 0 bytes for ${id.take(8)}")
+                }
+                downloadsCompleted += 1
+            } catch (t: Throwable) {
+                // During restore testing it's valid to be offline (e.g., airplane mode).
+                // Signed URLs point to storage.googleapis.com; DNS/network failures should be treated as a WARN.
+                if (isOfflineStorageFailure(t)) {
+                    downloadsSkippedOffline = true
+                    warn(
+                        "evidence.downloadBytes",
+                        "offline (skipped at ${downloadsCompleted}/${expectedEvidenceIds.size}): ${(t.message ?: t::class.java.simpleName).take(140)}",
+                    )
+                    break
+                }
+                throw t
             }
         }
 
-        pass("evidence.downloadBytes", "count=${expectedEvidenceIds.size}")
+        if (!downloadsSkippedOffline) {
+            pass("evidence.downloadBytes", "count=${expectedEvidenceIds.size}")
+        }
 
         val handshakeRow = probeRows.firstOrNull { it.name == "handshakeGet" }
         val driverdataRow = probeRows.firstOrNull { it.name == "driverdataGet" }
@@ -1466,10 +1644,19 @@ fun GhostTestWizardScreen(
             append(handshakeRow?.status ?: "-")
             append(" driverdataGet=")
             append(driverdataRow?.status ?: "-")
+            if (!baseUrlOverride.isNullOrBlank()) {
+                append(" | overrideBaseUrl=")
+                append(baseUrl.take(60))
+            }
             append(" | evidence items=")
             append(items.size)
             append(" | downloads=")
+            append(downloadsCompleted)
+            append("/")
             append(expectedEvidenceIds.size)
+            if (downloadsSkippedOffline) {
+                append(" (offline)")
+            }
         }
 
         GhostVerifyResult(summary = summary, checks = checks.toList())
@@ -1537,6 +1724,7 @@ fun GhostTestWizardScreen(
         deleteTripClientRef.value = null
         evidenceId.value = null
         parkingTicketId.value = null
+        extraEvidenceIds.clear()
         ghostStoreId.value = null
         expectedBusinessHomeAddress.value = null
         expectedStoreSyncRadiusKm.value = null
@@ -1546,6 +1734,15 @@ fun GhostTestWizardScreen(
         expectedDistanceStartLngE5.value = null
         expectedDistanceDestLatE5.value = null
         expectedDistanceDestLngE5.value = null
+
+        tripsLargeSnapshotEnabled.value = false
+        seedExtraTripsText.value = "0"
+        evidenceMultiUploadEnabled.value = false
+        evidenceExtraItemsText.value = "2"
+        verifyBaseUrlOverrideEnabled.value = false
+        verifyBaseUrlOverrideText.value = ""
+
+        autoContinueWhenOnline.value = false
     }
 
     LaunchedEffect(Unit) {
@@ -1576,6 +1773,11 @@ fun GhostTestWizardScreen(
                 if (st.expectedEvidenceIds.size >= 2) {
                     parkingTicketId.value = st.expectedEvidenceIds[1]
                 }
+                extraEvidenceIds.clear()
+                if (st.expectedEvidenceIds.size > 2) {
+                    extraEvidenceIds.addAll(st.expectedEvidenceIds.drop(2).map { it.trim() }.filter { it.isNotBlank() })
+                }
+                autoContinueWhenOnline.value = st.autoContinueWhenOnline
                 step.value = GhostStep.RestoreAfterRelogin
                 log(
                     "RESUME: loaded stage=${st.stage} run=${st.runMarker} tripRef=${st.storeTripClientRef.take(12)} expectedEvidence=${st.expectedEvidenceIds.size}",
@@ -1589,6 +1791,54 @@ fun GhostTestWizardScreen(
 
     fun isResumeStep(s: GhostStep): Boolean {
         return s == GhostStep.RestoreAfterRelogin || s == GhostStep.VerifyRestored
+    }
+
+    fun isAutoContinueEligibleStep(s: GhostStep): Boolean {
+        // If auto-continue is enabled, allow it to resume any step that can become blocked
+        // due to airplane mode / transient network loss.
+        return s == GhostStep.RestoreAfterRelogin ||
+            s == GhostStep.VerifyRestored ||
+            s == GhostStep.Sync ||
+            s == GhostStep.Verify
+    }
+
+    fun isNetworkOfflineThrowable(t: Throwable): Boolean {
+        var cur: Throwable? = t
+        while (cur != null) {
+            if (cur is java.net.UnknownHostException) return true
+            if (cur is java.net.ConnectException) return true
+            if (cur is java.net.SocketTimeoutException) return true
+            cur = cur.cause
+        }
+        return false
+    }
+
+    val autoContinueAttemptedForStep = remember { mutableStateOf<GhostStep?>(null) }
+    val autoContinueBlockUntilUptimeMs = remember { mutableStateOf(0L) }
+    fun allowAutoContinueRetry() {
+        autoContinueAttemptedForStep.value = null
+        autoContinueBlockUntilUptimeMs.value = 0L
+    }
+
+    fun blockAutoContinueRetry(step: GhostStep, delayMs: Long, reason: String) {
+        autoContinueAttemptedForStep.value = step
+        autoContinueBlockUntilUptimeMs.value = SystemClock.uptimeMillis() + delayMs
+        log("AUTO: backoff ${delayMs}ms step=$step reason=$reason")
+    }
+    LaunchedEffect(step.value) {
+        autoContinueAttemptedForStep.value = null
+        autoContinueBlockUntilUptimeMs.value = 0L
+    }
+    LaunchedEffect(autoContinueWhenOnline.value) {
+        autoContinueAttemptedForStep.value = null
+        autoContinueBlockUntilUptimeMs.value = 0L
+    }
+    LaunchedEffect(isOnline.value) {
+        if (!isOnline.value) {
+            // Allow auto-continue to re-trigger when Internet returns.
+            autoContinueAttemptedForStep.value = null
+            autoContinueBlockUntilUptimeMs.value = 0L
+        }
     }
 
     suspend fun runFullTestFromCurrentStep() {
@@ -1638,7 +1888,12 @@ fun GhostTestWizardScreen(
                 GhostStep.Seed -> {
                     log("Seeding trips...")
                     val marker = runMarker.value?.trim().orEmpty().ifBlank { "unknown" }
-                    val seeded = seedTrips(marker)
+                    val extra = if (tripsLargeSnapshotEnabled.value) {
+                        (seedExtraTripsText.value.trim().toIntOrNull() ?: 0).coerceIn(0, 500)
+                    } else {
+                        0
+                    }
+                    val seeded = seedTrips(marker, extraTrips = extra)
                     storeTripId.value = seeded.storeTripId
                     deleteTripId.value = seeded.deleteCandidateTripId
                     val trip = withContext(Dispatchers.IO) { AppGraph.tripRepository.get(seeded.storeTripId) }
@@ -1712,24 +1967,68 @@ fun GhostTestWizardScreen(
 
                 GhostStep.Attach -> {
                     val id = storeTripId.value ?: throw IllegalStateException("Missing tripId")
-                    log("Attaching evidence + receipt...")
-                    attachEvidenceToTrip(tripId = id, includeReceipt = true)
+                    log("Attaching evidence...")
+                    extraEvidenceIds.clear()
+
+                    val primary = attachEvidenceToTrip(tripId = id, includeReceipt = true)
+                    evidenceId.value = primary.evidenceId
+                    if (!primary.receiptId.isNullOrBlank()) parkingTicketId.value = primary.receiptId
+
+                    val extraCount = if (evidenceMultiUploadEnabled.value) {
+                        (evidenceExtraItemsText.value.trim().toIntOrNull() ?: 0).coerceIn(0, 20)
+                    } else {
+                        0
+                    }
+                    if (extraCount > 0) {
+                        log("Evidence: attaching extra items count=$extraCount")
+                        repeat(extraCount) {
+                            val attached = attachEvidenceToTrip(tripId = id, includeReceipt = false)
+                            extraEvidenceIds.add(attached.evidenceId)
+                        }
+                    }
                     log(
-                        "Attach OK: evidenceId=${evidenceId.value?.take(12)} receiptId=${parkingTicketId.value?.take(12)}",
+                        "Attach OK: evidence=${1 + extraEvidenceIds.size} receiptId=${parkingTicketId.value?.take(12)}",
                     )
                     step.value = GhostStep.Sync
                 }
 
                 GhostStep.Sync -> {
                     requireHandshakeMarker()
+                    if (!isOnline.value) {
+                        log("SYNC: offline, waiting for Internet")
+                        snackbarHostState.showSnackbar("Offline: waiting for Internet")
+                        blockAutoContinueRetry(step = GhostStep.Sync, delayMs = 10_000L, reason = "sync_offline")
+                        return
+                    }
                     log("Sync: enqueue canonical + upload snapshot + upload evidence + sync TrackEvents...")
-                    val syncResult = syncNow()
+                    val syncResult = try {
+                        syncNow()
+                    } catch (t: Throwable) {
+                        if (isNetworkOfflineThrowable(t)) {
+                            val msg = t.message ?: t.javaClass.simpleName
+                            log("SYNC: network error ($msg); waiting for Internet")
+                            snackbarHostState.showSnackbar("Network error: waiting for Internet")
+                            blockAutoContinueRetry(step = GhostStep.Sync, delayMs = 10_000L, reason = "sync_network_error")
+                            return
+                        }
+                        throw t
+                    }
                     lastChecks.value = syncResult.checks
                     if (syncResult.evidenceUploadLogLines.isNotEmpty()) {
                         for (line in syncResult.evidenceUploadLogLines) {
                             log(line)
                         }
                     }
+
+                    if (syncResult.pendingEvidenceAfter > 0) {
+                        log(
+                            "SYNC: evidence outbox still pending=${syncResult.pendingEvidenceAfter} (ready=${syncResult.readyEvidenceAfter}); waiting",
+                        )
+                        snackbarHostState.showSnackbar("Evidence still pending: waiting")
+                        blockAutoContinueRetry(step = GhostStep.Sync, delayMs = 10_000L, reason = "sync_pending_evidence")
+                        return
+                    }
+
                     log("Sync OK: ${syncResult.summary}")
                     step.value = GhostStep.Verify
                 }
@@ -1738,14 +2037,59 @@ fun GhostTestWizardScreen(
                     val tripRef = storeTripClientRef.value?.trim().orEmpty()
                     if (tripRef.isBlank()) throw IllegalStateException("Missing tripClientRef")
 
-                    val expected = listOfNotNull(
-                        evidenceId.value?.trim()?.takeIf { it.isNotBlank() },
-                        parkingTicketId.value?.trim()?.takeIf { it.isNotBlank() },
-                    )
+                    val expected = buildList {
+                        evidenceId.value?.trim()?.takeIf { it.isNotBlank() }?.let { add(it) }
+                        parkingTicketId.value?.trim()?.takeIf { it.isNotBlank() }?.let { add(it) }
+                        extraEvidenceIds.map { it.trim() }.filter { it.isNotBlank() }.forEach { add(it) }
+                    }
                     if (expected.isEmpty()) throw IllegalStateException("Missing expected evidence ids")
 
+                    if (!isOnline.value) {
+                        log("VERIFY: offline, waiting for Internet")
+                        snackbarHostState.showSnackbar("Offline: waiting for Internet")
+                        blockAutoContinueRetry(step = GhostStep.Verify, delayMs = 10_000L, reason = "verify_offline")
+                        return
+                    }
+
                     log("Verify: listByTrip + download bytes (${expected.size} items)...")
-                    val backendVerifyResult = verifyBackend(tripClientRef = tripRef, expectedEvidenceIds = expected)
+                    val override = if (verifyBaseUrlOverrideEnabled.value) verifyBaseUrlOverrideText.value.trim() else ""
+                    val backendVerifyResult = try {
+                        verifyBackend(
+                            tripClientRef = tripRef,
+                            expectedEvidenceIds = expected,
+                            baseUrlOverride = override.takeIf { it.isNotBlank() },
+                        )
+                    } catch (t: Throwable) {
+                        if (isNetworkOfflineThrowable(t)) {
+                            val msg = t.message ?: t.javaClass.simpleName
+                            log("VERIFY: network error ($msg); waiting for Internet")
+                            snackbarHostState.showSnackbar("Network error: waiting for Internet")
+                            blockAutoContinueRetry(step = GhostStep.Verify, delayMs = 10_000L, reason = "verify_network_error")
+                            return
+                        }
+
+                        val msg = t.message?.trim().orEmpty()
+                        if (msg.startsWith("Evidence missing on backend:")) {
+                            val uid = runCatching { AppGraph.settings.requireUid() }.getOrNull().orEmpty()
+                            val pending = if (uid.isBlank()) 0 else runCatching {
+                                AppGraph.syncDb.evidenceUploadOutboxDao().countPending(uid)
+                            }.getOrDefault(0)
+
+                            if (pending > 0) {
+                                log("VERIFY: $msg (pendingEvidenceOutbox=$pending); waiting")
+                                snackbarHostState.showSnackbar("Evidence still uploading: waiting")
+                                blockAutoContinueRetry(step = GhostStep.Verify, delayMs = 10_000L, reason = "verify_missing_evidence_pending_outbox")
+                                return
+                            }
+
+                            log("VERIFY: $msg (outbox empty); retrying after backoff")
+                            snackbarHostState.showSnackbar("Backend not ready yet: retrying")
+                            blockAutoContinueRetry(step = GhostStep.Verify, delayMs = 10_000L, reason = "verify_missing_evidence_eventual")
+                            return
+                        }
+
+                        throw t
+                    }
                     lastChecks.value = backendVerifyResult.checks
                     log("VERIFY PASS: ${backendVerifyResult.summary}")
 
@@ -1772,9 +2116,11 @@ fun GhostTestWizardScreen(
                                     }
                                 }
                                 log("STRESS $i/$iters: verify")
+                                val override = if (verifyBaseUrlOverrideEnabled.value) verifyBaseUrlOverrideText.value.trim() else ""
                                 val stressBackendVerifyResult = verifyBackend(
                                     tripClientRef = tripRef,
                                     expectedEvidenceIds = listOf(receiptId, attached.evidenceId),
+                                    baseUrlOverride = override.takeIf { it.isNotBlank() },
                                 )
                                 lastChecks.value = stressBackendVerifyResult.checks
                                 log("STRESS PASS $i/$iters: ${stressBackendVerifyResult.summary}")
@@ -1807,20 +2153,36 @@ fun GhostTestWizardScreen(
                 }
 
                 GhostStep.RestoreAfterRelogin -> {
+                    if (!isOnline.value) {
+                        log("RESTORE: offline, waiting for Internet (autoContinue=${autoContinueWhenOnline.value})")
+                        snackbarHostState.showSnackbar("Offline: waiting for Internet")
+                        return
+                    }
                     log("RESTORE: waiting for handshake + uid...")
                     val marker = awaitHandshakeMarker()
                     val uid = awaitBackendUid()
                     log("RESTORE: handshakeMarker=$marker uid=${uid.take(8)}")
 
-                    log("RESTORE: downloadAndRestore")
-                    val snap = AppGraph.driverDataRepository.downloadAndRestore()
-                    log(
-                        "RESTORE OK: schema=${snap.schemaVersion} trips=${snap.trips.size} stores=${snap.stores.size} attachments=${snap.attachments.size}",
-                    )
+                    try {
+                        log("RESTORE: downloadAndRestore")
+                        val snap = AppGraph.driverDataRepository.downloadAndRestore()
+                        log(
+                            "RESTORE OK: schema=${snap.schemaVersion} trips=${snap.trips.size} stores=${snap.stores.size} attachments=${snap.attachments.size}",
+                        )
 
-                    log("RESTORE: verifyAndRepairRegionFilesFromCloud(force=true)")
-                    val reg = AppGraph.driverDataRepository.verifyAndRepairRegionFilesFromCloud(force = true)
-                    log("REGIONS: $reg")
+                        log("RESTORE: verifyAndRepairRegionFilesFromCloud(force=true)")
+                        val reg = AppGraph.driverDataRepository.verifyAndRepairRegionFilesFromCloud(force = true)
+                        log("REGIONS: $reg")
+                    } catch (t: Throwable) {
+                        if (isNetworkOfflineThrowable(t)) {
+                            val msg = t.message ?: t.javaClass.simpleName
+                            log("RESTORE: network error ($msg); waiting for Internet")
+                            snackbarHostState.showSnackbar("Network error: waiting for Internet")
+                            blockAutoContinueRetry(step = GhostStep.RestoreAfterRelogin, delayMs = 10_000L, reason = "restore_network_error")
+                            return
+                        }
+                        throw t
+                    }
 
                     step.value = GhostStep.VerifyRestored
                 }
@@ -1848,10 +2210,31 @@ fun GhostTestWizardScreen(
                     log("LOCAL PASS: ${local.summary}")
 
                     if (expected.isNotEmpty()) {
+                        if (!isOnline.value) {
+                            log("VERIFY RESTORED: offline, waiting for Internet to verify backend evidence")
+                            snackbarHostState.showSnackbar("Offline: waiting for Internet")
+                            return
+                        }
                         log("VERIFY RESTORED: backend evidence list+download (${expected.size})")
-                        val backendVerifyResult = verifyBackend(tripClientRef = tripRef, expectedEvidenceIds = expected)
-                        lastChecks.value = backendVerifyResult.checks
-                        log("BACKEND PASS: ${backendVerifyResult.summary}")
+                        val override = if (verifyBaseUrlOverrideEnabled.value) verifyBaseUrlOverrideText.value.trim() else ""
+                        try {
+                            val backendVerifyResult = verifyBackend(
+                                tripClientRef = tripRef,
+                                expectedEvidenceIds = expected,
+                                baseUrlOverride = override.takeIf { it.isNotBlank() },
+                            )
+                            lastChecks.value = backendVerifyResult.checks
+                            log("BACKEND PASS: ${backendVerifyResult.summary}")
+                        } catch (t: Throwable) {
+                            if (isNetworkOfflineThrowable(t)) {
+                                val msg = t.message ?: t.javaClass.simpleName
+                                log("VERIFY RESTORED: network error ($msg); waiting for Internet")
+                                snackbarHostState.showSnackbar("Network error: waiting for Internet")
+                                blockAutoContinueRetry(step = GhostStep.VerifyRestored, delayMs = 10_000L, reason = "verify_restored_network_error")
+                                return
+                            }
+                            throw t
+                        }
                     } else {
                         log("VERIFY RESTORED: backend skipped (no expected evidence ids)")
                     }
@@ -1867,6 +2250,57 @@ fun GhostTestWizardScreen(
                 }
             }
         }
+    }
+
+    data class GhostAutoContinueSnapshot(
+        val enabled: Boolean,
+        val online: Boolean,
+        val step: GhostStep,
+        val busy: Boolean,
+        val attemptedFor: GhostStep?,
+        val blockUntilUptimeMs: Long,
+    )
+
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            GhostAutoContinueSnapshot(
+                enabled = autoContinueWhenOnline.value,
+                online = isOnline.value,
+                step = step.value,
+                busy = busy.value,
+                attemptedFor = autoContinueAttemptedForStep.value,
+                blockUntilUptimeMs = autoContinueBlockUntilUptimeMs.value,
+            )
+        }
+            .distinctUntilChanged()
+            .collect { snap ->
+                if (!snap.enabled) return@collect
+                if (!isAutoContinueEligibleStep(snap.step)) return@collect
+                if (!snap.online) return@collect
+                if (snap.busy) return@collect
+                if (SystemClock.uptimeMillis() < snap.blockUntilUptimeMs) return@collect
+
+                // Allow retrying the same step after backoff, even if we already attempted it.
+                if (snap.attemptedFor == snap.step) {
+                    autoContinueAttemptedForStep.value = null
+                }
+
+                autoContinueAttemptedForStep.value = snap.step
+                busy.value = true
+                try {
+                    log("AUTO: online detected, continuing from ${snap.step}")
+                    runFullTestFromCurrentStep()
+                } catch (t: CancellationException) {
+                    // Normal during navigation/config changes; don't surface as a failure.
+                    throw t
+                } catch (t: Throwable) {
+                    val msg = t.message ?: t.javaClass.simpleName
+                    log("AUTO FAIL: $msg")
+                    snackbarHostState.showSnackbar(msg)
+                } finally {
+                    busy.value = false
+                }
+            }
     }
 
     fun enqueueSyncDebugStress(rounds: Int) {
@@ -2418,6 +2852,113 @@ fun GhostTestWizardScreen(
                     enabled = !isResumeStep(step.value),
                 )
             }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "Auto-continue when online",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = autoContinueWhenOnline.value,
+                    onCheckedChange = { autoContinueWhenOnline.value = it },
+                    enabled = !busy.value,
+                )
+            }
+
+            Text("Optional tests", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Toggle these on/off before running the full test.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "Trips: large snapshot",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = tripsLargeSnapshotEnabled.value,
+                    onCheckedChange = { tripsLargeSnapshotEnabled.value = it },
+                    enabled = !busy.value && !isResumeStep(step.value),
+                )
+            }
+            if (tripsLargeSnapshotEnabled.value) {
+                OutlinedTextField(
+                    value = seedExtraTripsText.value,
+                    onValueChange = { seedExtraTripsText.value = it.filter { ch -> ch.isDigit() }.take(5) },
+                    label = { Text("Extra trips to seed") },
+                    supportingText = { Text("Try 50, then 200 (stresses snapshot payload)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy.value && !isResumeStep(step.value),
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "Evidence: upload multiple items",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = evidenceMultiUploadEnabled.value,
+                    onCheckedChange = { evidenceMultiUploadEnabled.value = it },
+                    enabled = !busy.value && !isResumeStep(step.value),
+                )
+            }
+            if (evidenceMultiUploadEnabled.value) {
+                OutlinedTextField(
+                    value = evidenceExtraItemsText.value,
+                    onValueChange = { evidenceExtraItemsText.value = it.filter { ch -> ch.isDigit() }.take(2) },
+                    label = { Text("Extra evidence items") },
+                    supportingText = { Text("Adds N extra photos to the same trip") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy.value && !isResumeStep(step.value),
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "Backend: verify against URL",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = verifyBaseUrlOverrideEnabled.value,
+                    onCheckedChange = { verifyBaseUrlOverrideEnabled.value = it },
+                    enabled = !busy.value,
+                )
+            }
+            if (verifyBaseUrlOverrideEnabled.value) {
+                OutlinedTextField(
+                    value = verifyBaseUrlOverrideText.value,
+                    onValueChange = { verifyBaseUrlOverrideText.value = it.take(220) },
+                    label = { Text("Backend base URL") },
+                    supportingText = { Text("Example: https://europe-north1-<project>.cloudfunctions.net/apiV1") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy.value,
+                )
+            }
+
             if (stressEnabled.value) {
                 OutlinedTextField(
                     value = stressIterationsText.value,
@@ -2466,6 +3007,12 @@ fun GhostTestWizardScreen(
                 fontFamily = FontFamily.Monospace,
             )
 
+            Text(
+                "Network: ${if (isOnline.value) "online" else "offline"}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+
             if (includeWipeReloginRestore.value && !isResumeStep(step.value)) {
                 Text(
                     "Note: this run will wipe local data and sign out. After relogin, reopen Ghost Wizard and press Continue.",
@@ -2481,6 +3028,10 @@ fun GhostTestWizardScreen(
                         busy.value = true
                         try {
                             runFullTestFromCurrentStep()
+                        } catch (t: CancellationException) {
+                            // Normal if user navigates away mid-run.
+                            log("CANCELLED: ${t.javaClass.simpleName}")
+                            throw t
                         } catch (t: Throwable) {
                             val msg = t.message ?: t.javaClass.simpleName
                             log("FAIL: $msg")
@@ -2496,345 +3047,6 @@ fun GhostTestWizardScreen(
                 Text(if (busy.value) "Working…" else primaryLabel)
             }
 
-            val showAdvanced = remember { mutableStateOf(false) }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    "Show advanced tools",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f),
-                )
-                Switch(
-                    checked = showAdvanced.value,
-                    onCheckedChange = { showAdvanced.value = it },
-                    enabled = !busy.value,
-                )
-            }
-
-            if (showAdvanced.value) {
-                HorizontalDivider()
-                Text("Advanced tools", style = MaterialTheme.typography.titleSmall)
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                probeBackendEndpointsToLog()
-                                snackbarHostState.showSnackbar("Endpoint probe done")
-                            } catch (t: Throwable) {
-                                val msg = t.message ?: t.javaClass.simpleName
-                                log("TOOLS FAIL: probe: $msg")
-                                snackbarHostState.showSnackbar(msg)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Probe endpoints") }
-
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                dumpToolsStatusToLog()
-                                snackbarHostState.showSnackbar("Status dumped")
-                            } catch (t: Throwable) {
-                                val msg = t.message ?: t.javaClass.simpleName
-                                log("TOOLS FAIL: dump: $msg")
-                                snackbarHostState.showSnackbar(msg)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Dump status") }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        log("TOOLS: enqueue canonical flush")
-                        AppGraph.canonicalWritesSyncManager.enqueueImmediate("ghost_tools")
-                        scope.launch { snackbarHostState.showSnackbar("Canonical flush enqueued") }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Canonical flush") }
-
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        log("TOOLS: enqueue DriverData snapshot upload")
-                        AppGraph.driverDataSyncManager.enqueueImmediate(reason = "ghost_tools", trigger = "ghost_wizard")
-                        scope.launch { snackbarHostState.showSnackbar("Snapshot upload enqueued") }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Upload snapshot") }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            log("TOOLS: sync TrackEvents now")
-                            val supported = runCatching { AppGraph.settings.trackEventsBackendSupported.first() }.getOrDefault(true)
-                            if (!supported) {
-                                TrackEventsCapabilityProbeWorker.enqueueNow(context, reason = "ghost_tools")
-                            } else {
-                                TrackEventsOutboxWorker.enqueue(context, reason = "ghost_tools")
-                            }
-                            snackbarHostState.showSnackbar("TrackEvents enqueued")
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Sync TrackEvents") }
-
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                forceRestoreFromCloud()
-                                snackbarHostState.showSnackbar("Force restore complete")
-                            } catch (t: Throwable) {
-                                val msg = t.message ?: t.javaClass.simpleName
-                                log("TOOLS FAIL: restore: $msg")
-                                snackbarHostState.showSnackbar(msg)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Force restore") }
-            }
-
-            OutlinedTextField(
-                value = toolsStressRoundsText.value,
-                onValueChange = { toolsStressRoundsText.value = it.filter { ch -> ch.isDigit() }.take(3) },
-                label = { Text("Stress rounds") },
-                supportingText = { Text("Unique WorkManager chain: canonical → snapshot → trackEvents") },
-                enabled = !busy.value,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        val rounds = toolsStressRoundsText.value.toIntOrNull()?.coerceIn(1, 200) ?: 5
-                        enqueueSyncDebugStress(rounds)
-                        scope.launch { snackbarHostState.showSnackbar("Stress enqueued: $rounds rounds") }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Start stress") }
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        workManager.cancelUniqueWork("sync-debug-stress")
-                        log("TOOLS: stress canceled")
-                        scope.launch { snackbarHostState.showSnackbar("Stress canceled") }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Cancel stress") }
-            }
-
-            HorizontalDivider()
-
-            Text("Data generators", style = MaterialTheme.typography.titleSmall)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                val (trips, runs) = generateSampleTrips()
-                                log("TOOLS: sample generated trips=$trips runs=$runs")
-                                snackbarHostState.showSnackbar("Generated $trips sample trips ($runs runs)")
-                            } catch (t: Throwable) {
-                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Gen sample") }
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                val (deletedTrips, deletedRuns) = deleteTripsByNotesPrefix("SAMPLE_TRIP_SEED")
-                                log("TOOLS: sample deleted trips=$deletedTrips orphanRuns=$deletedRuns")
-                                snackbarHostState.showSnackbar("Deleted $deletedTrips sample trips ($deletedRuns orphan runs)")
-                            } catch (t: Throwable) {
-                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Del sample") }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                val (trips, runs, days) = generateStressTrips()
-                                log("TOOLS: stress generated trips=$trips runs=$runs days=$days")
-                                snackbarHostState.showSnackbar("Generated $trips stress trips ($runs runs over $days days)")
-                            } catch (t: Throwable) {
-                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Gen stress") }
-                OutlinedButton(
-                    enabled = !busy.value,
-                    onClick = {
-                        scope.launch {
-                            if (busy.value) return@launch
-                            busy.value = true
-                            try {
-                                val (deletedTrips, deletedRuns) = deleteTripsByNotesPrefix("STRESS_TRIP_SEED")
-                                log("TOOLS: stress deleted trips=$deletedTrips orphanRuns=$deletedRuns")
-                                snackbarHostState.showSnackbar("Deleted $deletedTrips stress trips ($deletedRuns orphan runs)")
-                            } catch (t: Throwable) {
-                                snackbarHostState.showSnackbar(t.message ?: t.javaClass.simpleName)
-                            } finally {
-                                busy.value = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Del stress") }
-            }
-
-            HorizontalDivider()
-
-            Text("Danger zone", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error)
-            Text(
-                "These will wipe local data and sign you out.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-            )
-
-            OutlinedTextField(
-                value = toolsPurgeBackendConfirmText.value,
-                onValueChange = { toolsPurgeBackendConfirmText.value = it },
-                label = { Text("Type PURGE_MY_DATA_FOREVER") },
-                enabled = !busy.value,
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Button(
-                enabled = !busy.value && toolsPurgeBackendConfirmText.value.trim() == "PURGE_MY_DATA_FOREVER",
-                onClick = {
-                    scope.launch {
-                        if (busy.value) return@launch
-                        busy.value = true
-                        try {
-                            log("TOOLS: purge backend user data")
-                            val result = withContext(Dispatchers.IO) {
-                                AppGraph.driverDataRepository.purgeBackendUserData("PURGE_MY_DATA_FOREVER")
-                            }
-                            log("TOOLS: purge result=${result.take(200)}")
-                            snackbarHostState.showSnackbar("Backend purged. Signing out...")
-                            wipeLocalDataAndSignOut()
-                        } catch (t: Throwable) {
-                            val msg = t.message ?: t.javaClass.simpleName
-                            log("TOOLS FAIL: purge: $msg")
-                            snackbarHostState.showSnackbar(msg)
-                        } finally {
-                            busy.value = false
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Purge backend + reset")
-            }
-
-            OutlinedTextField(
-                value = toolsDeleteAccountConfirmText.value,
-                onValueChange = { toolsDeleteAccountConfirmText.value = it },
-                label = { Text("Type DELETE_MY_AUTH_ACCOUNT_FOREVER") },
-                enabled = !busy.value,
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Button(
-                enabled = !busy.value && toolsDeleteAccountConfirmText.value.trim() == "DELETE_MY_AUTH_ACCOUNT_FOREVER",
-                onClick = {
-                    scope.launch {
-                        if (busy.value) return@launch
-                        busy.value = true
-                        try {
-                            log("TOOLS: delete backend+auth user")
-                            val result = withContext(Dispatchers.IO) {
-                                AppGraph.driverDataRepository.deleteBackendAuthUser("DELETE_MY_AUTH_ACCOUNT_FOREVER")
-                            }
-                            log("TOOLS: delete result=${result.take(200)}")
-                            snackbarHostState.showSnackbar("Account deleted. Signing out...")
-                            wipeLocalDataAndSignOut()
-                        } catch (t: Throwable) {
-                            val msg = t.message ?: t.javaClass.simpleName
-                            log("TOOLS FAIL: delete: $msg")
-                            snackbarHostState.showSnackbar(msg)
-                        } finally {
-                            busy.value = false
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Delete account + reset")
-            }
-
             val seededTripId = storeTripId.value
             if (seededTripId != null) {
                 Text("Trip seeded: id=$seededTripId  clientRef=${storeTripClientRef.value?.take(12) ?: "-"}")
@@ -2843,24 +3055,21 @@ fun GhostTestWizardScreen(
                 }
             }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = { reset() },
-                        enabled = !busy.value,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Reset wizard") }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { reset() },
+                    enabled = !busy.value,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Reset wizard") }
 
-                    OutlinedButton(
-                        onClick = { copyFullLogToClipboard() },
-                        enabled = !busy.value,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Copy log") }
-                }
-
-                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = { copyFullLogToClipboard() },
+                    enabled = !busy.value,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Copy log") }
             }
 
             Spacer(Modifier.height(6.dp))

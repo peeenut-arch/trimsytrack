@@ -48,6 +48,7 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.trimsytrack.AppGraph
+import com.trimsytrack.ui.media.fileFromOurFileProviderUri
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.ui.media.moveTempFileProviderUriToTripFiles
 import com.trimsytrack.ui.vm.TripDetailViewModel
@@ -275,8 +276,13 @@ fun TripMediaReviewScreen(
                 )
             } else {
                 if (current.mimeType.startsWith("image/")) {
+                    // For our own FileProvider URIs, pass the underlying File to Coil.
+                    // This ensures EXIF orientation is applied (fixes portrait images showing sideways).
+                    val model: Any = remember(current.uri) {
+                        fileFromOurFileProviderUri(context, current.uri) ?: current.uri
+                    }
                     AsyncImage(
-                        model = current.uri,
+                        model = model,
                         contentDescription = null,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -294,8 +300,11 @@ fun TripMediaReviewScreen(
             if (items.value.isNotEmpty()) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     itemsIndexed(items.value) { idx, item ->
+                        val thumbModel: Any = remember(item.uri) {
+                            fileFromOurFileProviderUri(context, item.uri) ?: item.uri
+                        }
                         AsyncImage(
-                            model = item.uri,
+                            model = thumbModel,
                             contentDescription = null,
                             modifier = Modifier
                                 .size(64.dp)

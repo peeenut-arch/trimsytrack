@@ -274,6 +274,130 @@ class DriverDataRepository(
         throw IOException("Unable to open evidence uri")
     }
 
+    private fun computeEvidenceBackoffMs(attempts: Int): Long {
+        // Exponential-ish backoff with sane bounds.
+        val base = 15_000L
+        val max = 15L * 60_000L
+        val factor = (1L shl attempts.coerceIn(0, 10))
+        return (base * factor).coerceAtMost(max)
+    }
+
+    private fun isEvidenceUploadFatalError(t: Throwable): Boolean {
+        val msg = (t.message ?: "").lowercase()
+        return msg.contains("sha256 mismatch") ||
+            msg.contains("bytes mismatch") ||
+            msg.contains("evidence too large") ||
+            msg.contains("evidence bytes empty")
+    }
+
+    /**
+     * Drains the durable evidence upload outbox.
+     *
+     * - Canonical writes/runs remain higher priority (worker gates before calling this).
+     * - Each item gets retry/backoff so we don't hot-loop on bad files or transient backend failures.
+     */
+    suspend fun uploadEvidenceOutboxBestEffort(
+        limit: Int = 3,
+        onLog: ((String) -> Unit)? = null,
+    ): Int = withContext(Dispatchers.IO) {
+        settings.backendProtocolVersion.first()
+            ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
+        val uid = settings.uidOrEmpty()
+        if (uid.isBlank()) return@withContext 0
+
+        // Backfill: ensure any existing attachments get an outbox entry (safe, idempotent).
+        val nowMillis = System.currentTimeMillis()
+        val outbox = AppGraph.syncDb.evidenceUploadOutboxDao()
+        val allAttachments = runCatching { AppGraph.db.attachmentDao().listAll(uid) }.getOrDefault(emptyList())
+        for (a in allAttachments) {
+            val hasClientRef = a.clientRef?.trim().orEmpty().isNotBlank()
+            val hasUri = a.uri.trim().isNotBlank()
+            if (!hasClientRef || !hasUri) continue
+            runCatching {
+                outbox.insertIgnore(
+                    com.trimsytrack.data.sync.EvidenceUploadOutboxEntity(
+                        uid = uid,
+                        attachmentId = a.id,
+                        tripId = a.tripId,
+                        createdAtMillis = a.addedAt.toEpochMilli(),
+                    )
+                )
+            }
+        }
+
+        val readyItems = outbox.listReady(
+            uid = uid,
+            nowMillis = nowMillis,
+            // Fetch more than we upload so we still make progress if some are already uploaded.
+            limit = (limit * 12).coerceAtMost(240),
+        )
+        if (readyItems.isEmpty()) return@withContext 0
+
+        val tripById = runCatching { AppGraph.db.tripDao().listAll(uid) }.getOrDefault(emptyList())
+            .associateBy { it.id }
+        val attachmentById = runCatching { AppGraph.db.attachmentDao().listAll(uid) }.getOrDefault(emptyList())
+            .associateBy { it.id }
+
+        val outboxByAttachmentId = readyItems.associateBy { it.attachmentId }
+        val eligible = mutableListOf<AttachmentEntity>()
+
+        for (item in readyItems) {
+            val attachment = attachmentById[item.attachmentId]
+            if (attachment == null) {
+                runCatching { outbox.markDead(item.id, "Missing attachment (deleted locally)") }
+                continue
+            }
+
+            val clientEvidenceId = attachment.clientRef?.trim().orEmpty()
+            if (clientEvidenceId.isBlank()) {
+                runCatching { outbox.markDead(item.id, "Missing attachment.clientRef") }
+                continue
+            }
+            if (attachment.uri.trim().isBlank()) {
+                runCatching { outbox.markDead(item.id, "Missing attachment.uri") }
+                continue
+            }
+            if (runCatching { Uri.parse(attachment.uri) }.getOrNull() == null) {
+                runCatching { outbox.markDead(item.id, "Invalid attachment.uri") }
+                continue
+            }
+
+            val trip = tripById[attachment.tripId]
+            val tripClientRef = trip?.clientRef?.trim().orEmpty()
+            if (trip == null || tripClientRef.isBlank()) {
+                val waitMs = computeEvidenceBackoffMs(item.attempts + 1)
+                val reason = if (trip == null) "Missing trip" else "Missing trip.clientRef"
+                runCatching { outbox.markAttempted(item.id, nowMillis, nowMillis + waitMs, reason) }
+                continue
+            }
+
+            eligible.add(attachment)
+        }
+
+        if (eligible.isEmpty()) return@withContext 0
+
+        uploadEvidenceBytesBestEffort(
+            limit = limit,
+            onLog = onLog,
+            candidatesOverride = eligible,
+            onSuccessAttachment = { a ->
+                val item = outboxByAttachmentId[a.id] ?: return@uploadEvidenceBytesBestEffort
+                runCatching { outbox.markUploaded(item.id, System.currentTimeMillis()) }
+            },
+            onFailureAttachment = { a, t ->
+                val item = outboxByAttachmentId[a.id] ?: return@uploadEvidenceBytesBestEffort
+                val err = (t.message ?: t::class.java.simpleName).take(220)
+                if (isEvidenceUploadFatalError(t)) {
+                    runCatching { outbox.markDead(item.id, err) }
+                } else {
+                    val n = System.currentTimeMillis()
+                    val waitMs = computeEvidenceBackoffMs(item.attempts + 1)
+                    runCatching { outbox.markAttempted(item.id, n, n + waitMs, err) }
+                }
+            },
+        )
+    }
+
     /**
      * Uploads evidence bytes (photos/PDF receipts) to backend storage.
      * This is best-effort and intentionally independent of snapshot fingerprints.
@@ -281,6 +405,9 @@ class DriverDataRepository(
     suspend fun uploadEvidenceBytesBestEffort(
         limit: Int = 3,
         onLog: ((String) -> Unit)? = null,
+        candidatesOverride: List<AttachmentEntity>? = null,
+        onSuccessAttachment: (suspend (AttachmentEntity) -> Unit)? = null,
+        onFailureAttachment: (suspend (AttachmentEntity, Throwable) -> Unit)? = null,
     ): Int = withContext(Dispatchers.IO) {
         val handshakeMarker = settings.backendProtocolVersion.first()
             ?: throw IllegalStateException("Handshake required (missing backendProtocolVersion)")
@@ -301,14 +428,15 @@ class DriverDataRepository(
         val trips = runCatching { AppGraph.db.tripDao().listAll(uid) }.getOrDefault(emptyList())
         val tripById = trips.associateBy { it.id }
 
-        val candidates = runCatching { AppGraph.db.attachmentDao().listAll(uid) }.getOrDefault(emptyList())
-            .asSequence()
-            .filter { it.clientRef?.trim().orEmpty().isNotBlank() }
-            .filter { it.uri.trim().isNotBlank() }
-            .sortedByDescending { it.addedAt }
-            // Scan more than we upload so we still make progress if some are already uploaded.
-            .take((limit * 12).coerceAtMost(240))
-            .toList()
+        val candidates = candidatesOverride
+            ?: runCatching { AppGraph.db.attachmentDao().listAll(uid) }.getOrDefault(emptyList())
+                .asSequence()
+                .filter { it.clientRef?.trim().orEmpty().isNotBlank() }
+                .filter { it.uri.trim().isNotBlank() }
+                .sortedByDescending { it.addedAt }
+                // Scan more than we upload so we still make progress if some are already uploaded.
+                .take((limit * 12).coerceAtMost(240))
+                .toList()
 
         val startLine = "EvidenceUpload: start uid=${uid.take(8)} limit=$limit candidates=${candidates.size} baseUrl=${baseUrl.take(80)}"
         Log.i("TrimsyTrack", startLine)
@@ -405,6 +533,7 @@ class DriverDataRepository(
                 )
 
                 if (result.alreadyUploaded) {
+                    onSuccessAttachment?.invoke(a)
                     return@runCatching
                 }
 
@@ -605,6 +734,7 @@ class DriverDataRepository(
                 if (signedUrlPutSucceeded) {
                     val missing = verifyDownloadAndRangeOrThrow(reasonLabel = "post_put")
                     if (!missing) {
+                        onSuccessAttachment?.invoke(a)
                         uploaded += 1
                         return@runCatching
                     }
@@ -697,9 +827,11 @@ class DriverDataRepository(
                         throw IOException("Evidence still missing after fallbackPutBytes (EVIDENCE_BYTES_MISSING)")
                     }
 
+                    onSuccessAttachment?.invoke(a)
                     uploaded += 1
                 }
             }.onFailure { t ->
+                onFailureAttachment?.invoke(a, t)
                 val enriched = if (t is HttpException) {
                     val code = t.code()
                     val errBody = runCatching { t.response()?.errorBody()?.string() }.getOrNull().orEmpty()
@@ -1321,7 +1453,13 @@ class DriverDataRepository(
             // Treat that as "no snapshot".
             if (trimmed.isBlank() || trimmed == "null") return null
             try {
-                json.decodeFromString(DriverData.serializer(), trimmed)
+                val decoded = json.decodeFromString(DriverData.serializer(), trimmed)
+                val be = decoded.backendError
+                if (be != null && be.code.isNotBlank()) {
+                    val msg = be.message.trim().ifBlank { "DriverData download failed" }
+                    throw IOException("DriverData download failed: ${be.code}: $msg")
+                }
+                decoded
             } catch (t: SerializationException) {
                 // Backward/forward compat:
                 // Some deployments may return an ok/result envelope instead of the raw DriverData snapshot.
@@ -1339,7 +1477,18 @@ class DriverDataRepository(
                         ?: obj["snapshot"]
                         ?: obj["data"]
                     if (resultEl != null) {
-                        return json.decodeFromString(DriverData.serializer(), resultEl.toString())
+                        val decoded = runCatching {
+                            json.decodeFromString(DriverData.serializer(), resultEl.toString())
+                        }.getOrNull()
+
+                        if (decoded != null) {
+                            val be = decoded.backendError
+                            if (be != null && be.code.isNotBlank()) {
+                                val msg = be.message.trim().ifBlank { "DriverData download failed" }
+                                throw IOException("DriverData download failed: ${be.code}: $msg")
+                            }
+                            return decoded
+                        }
                     }
                 }
 

@@ -14,6 +14,9 @@ data class DriverData(
     val driverId: String,
     val appId: String = "com.trimsytrack",
 
+    @SerialName("_backendError")
+    val backendError: BackendError? = null,
+
     val settings: DriverSettings,
 
     val regions: Map<String, String> = emptyMap(),
@@ -41,6 +44,14 @@ data class DriverData(
 
     // Parking/traffic fee receipts: metadata snapshot; media bytes are synced via the evidence upload flow.
     val parkingTickets: List<ParkingTicketDto> = emptyList(),
+)
+
+@Serializable
+data class BackendError(
+    val code: String = "",
+    val message: String = "",
+    val route: String? = null,
+    val clientRequestId: String? = null,
 )
 
 @Serializable

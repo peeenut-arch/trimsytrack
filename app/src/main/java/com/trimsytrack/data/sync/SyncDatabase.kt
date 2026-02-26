@@ -9,12 +9,15 @@ import com.trimsytrack.data.canonical.CanonicalWriteOutboxEntity
     entities = [
         TrackEventOutboxEntity::class,
         CanonicalWriteOutboxEntity::class,
+        EvidenceUploadOutboxEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class SyncDatabase : RoomDatabase() {
     abstract fun trackEventOutboxDao(): TrackEventOutboxDao
 
     abstract fun canonicalWriteOutboxDao(): CanonicalWriteOutboxDao
+
+    abstract fun evidenceUploadOutboxDao(): EvidenceUploadOutboxDao
 }

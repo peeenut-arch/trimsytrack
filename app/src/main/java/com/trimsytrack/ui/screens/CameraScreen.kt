@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.location.Location
 import android.location.Geocoder
 import android.view.Surface
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -90,6 +91,7 @@ import com.trimsytrack.data.entities.StoreEntity
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.logic.TripTimes
 import com.trimsytrack.ui.components.TrimsyWhiteRadioButton
+import com.trimsytrack.ui.media.fileFromOurFileProviderUri
 import com.trimsytrack.ui.media.importDocumentToTripFiles
 import com.trimsytrack.util.Hashing
 import java.io.File
@@ -115,6 +117,7 @@ fun CameraScreen(
     returnCaptureToCaller: Boolean = false,
     autoSaveToTrip: Boolean = false,
     quickLogTripOnAutoSave: Boolean = false,
+    continuousAutoSave: Boolean = false,
     onCaptureConfirmed: (
         uri: String,
         mimeType: String,
@@ -181,6 +184,17 @@ fun CameraScreen(
     val pendingIsTempLocalFileProviderUri = remember { mutableStateOf<Boolean?>(null) }
 
     val autoSaving = remember { mutableStateOf(false) }
+
+    fun exitCamera() {
+        // If user backs out mid-preview, ensure we don't leak temp files.
+        pendingTempFile.value?.let { runCatching { it.delete() } }
+        pendingTempFile.value = null
+        onBack()
+    }
+
+    BackHandler {
+        exitCamera()
+    }
 
     val pendingQuickLogPurposeDialog = remember { mutableStateOf(false) }
 
@@ -572,7 +586,11 @@ fun CameraScreen(
                     }
                 }.onSuccess {
                     saveStatus.value = "Saved."
-                    onBack()
+                    if (continuousAutoSave) {
+                        autoSaving.value = false
+                    } else {
+                        exitCamera()
+                    }
                 }.onFailure {
                     autoSaving.value = false
                     saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
@@ -669,7 +687,11 @@ fun CameraScreen(
                                 }
                             }.onSuccess {
                                 saveStatus.value = "Saved."
-                                onBack()
+                                if (continuousAutoSave) {
+                                    autoSaving.value = false
+                                } else {
+                                    exitCamera()
+                                }
                             }.onFailure {
                                 autoSaving.value = false
                                 saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
@@ -735,6 +757,8 @@ fun CameraScreen(
             runCatching { cameraProviderState.value?.unbindAll() }
             boundCamera.value = null
             boundOnce.value = false
+            pendingTempFile.value?.let { runCatching { it.delete() } }
+            pendingTempFile.value = null
         }
     }
 
@@ -745,7 +769,7 @@ fun CameraScreen(
             TopAppBar(
                 title = { Text("Camera") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { exitCamera() }) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
@@ -883,8 +907,16 @@ fun CameraScreen(
                 )
                 val mime = pendingMimeType.value
                 if (mime != null && mime.startsWith("image/")) {
+                    val uriString = pendingPreviewUri.value
+                    val previewModel: Any = remember(uriString) {
+                        val u = uriString
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { runCatching { android.net.Uri.parse(it) }.getOrNull() }
+
+                        if (u != null) fileFromOurFileProviderUri(context, u) ?: u else (uriString ?: "")
+                    }
                     AsyncImage(
-                        model = pendingPreviewUri.value,
+                        model = previewModel,
                         contentDescription = null,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -927,7 +959,7 @@ fun CameraScreen(
                                         }
                                     }.onSuccess {
                                         saveStatus.value = "Saved."
-                                        onBack()
+                                        exitCamera()
                                     }.onFailure {
                                         saveStatus.value = "Failed to save: ${it.message ?: it.javaClass.simpleName}"
                                     }

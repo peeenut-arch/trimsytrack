@@ -98,13 +98,13 @@ class DriverDataSnapshotUploadWorker(
                 break
             } catch (t: Throwable) {
                 if (t is BackendBlockedException) {
-                    val code = t.machineCode?.trim()?.uppercase()
+                    val code = t.machineCode?.let { it.trim().uppercase() }
 
                     if (code == "UID_DATA_MISSING") {
                         runCatching {
                             AppGraph.settings.setBackendWritesEnabled(false)
                             AppGraph.settings.setBackendSafetyModeReason(
-                                t.message?.trim().orEmpty().ifBlank { "UID_DATA_MISSING (provisioning required)" },
+                                t.message.trim().ifBlank { "UID_DATA_MISSING (provisioning required)" },
                             )
                         }
                         return Result.success()
@@ -124,7 +124,7 @@ class DriverDataSnapshotUploadWorker(
                         runCatching {
                             AppGraph.settings.setBackendWritesEnabled(false)
                             AppGraph.settings.setBackendSafetyModeReason(
-                                t.message?.trim().orEmpty().ifBlank { "App update required" },
+                                t.message.trim().ifBlank { "App update required" },
                             )
                         }
                         return Result.success()
@@ -170,11 +170,19 @@ class DriverDataSnapshotUploadWorker(
             return Result.retry()
         }
 
-        // Best-effort: evidence/media bytes should be synced alongside metadata.
+        // Best-effort (but durable queue): evidence/media bytes should be synced alongside metadata.
         // This runs even if the DriverData snapshot fingerprint has not changed.
-        val evUploaded = runCatching { AppGraph.driverDataRepository.uploadEvidenceBytesBestEffort(limit = 3) }
+        val evUploaded = runCatching {
+            AppGraph.driverDataRepository.uploadEvidenceOutboxBestEffort(
+                limit = 3,
+                onLog = { line -> Log.i("TrimsyTrack", "SmokeSync: $line") },
+            )
+        }
             .onFailure { t ->
-                Log.w("TrimsyTrack", "SmokeSync: evidence upload failed: ${t.message?.take(200) ?: t::class.java.simpleName}")
+                Log.w(
+                    "TrimsyTrack",
+                    "SmokeSync: evidence upload failed: ${(t.message ?: t::class.java.simpleName).take(200)}",
+                )
             }
             .getOrDefault(0)
 

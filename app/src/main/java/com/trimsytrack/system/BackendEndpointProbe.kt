@@ -292,7 +292,7 @@ object BackendEndpointProbe {
 
         // 4) drivingTripCreate (HTTP) - existence probe only (send minimal invalid; any non-404 implies route exists).
         runCatching {
-            val payload = """{"app_id":"$appId","clientProtocolVersion":$clientProtocolVersion,"clientRequestId":"${UUID.randomUUID()}"}"""
+            val payload = """{"app_id":"$appId","clientProtocolVersion":$clientProtocolVersion,"clientRequestId":"${UUID.randomUUID()}","idempotencyKey":"probe:${UUID.randomUUID()}"}"""
             val resp = api.drivingTripCreate(body = payload.toRequestBody(jsonMediaType))
             rows += httpRowFromResponse(
                 name = "drivingTripCreate",

@@ -99,6 +99,7 @@ object BackendBaselineProbe {
                 "app_id" to BuildConfig.APP_ID,
                 "clientProtocolVersion" to protocol,
                 "clientRequestId" to requestId,
+                "idempotencyKey" to "probe:${UUID.randomUUID()}",
             )
         )
 

@@ -7,6 +7,11 @@ This document tells TrimsyPC exactly:
 - what TrimsyPC can fetch (read-only),
 - how to retrieve **parking fee** + **trip media** (evidence bytes).
 
+TL;DR (trip photos / media):
+- Get trips via `driverdataGet`.
+- For each trip, list media via `tripEvidenceListByTrip(tripClientRef = Trip.clientRef)`.
+- For each returned item, download bytes via `tripEvidenceDownload(clientEvidenceId)`.
+
 Authoritative route implementation:
 - `BACKENDTRIMSY/functions/src/index.ts`
 - Evidence routes: `BACKENDTRIMSY/functions/src/tripEvidence.ts`
@@ -68,11 +73,15 @@ TrimsyPC should treat this as:
 
 ### 3.2 Trip evidence bytes (media)
 
-Evidence/media bytes (photos/PDF receipts) are stored in backend storage and retrieved via:
+Evidence/media bytes (photos / receipts / other attachments) are stored in backend storage and retrieved via:
 - `tripEvidenceListByTrip` (metadata list)
 - `tripEvidenceDownload` (signed download URL)
 
 DriverData snapshots do **not** inline evidence bytes.
+
+Important clarification:
+- `driverdataGet.attachments[]` (when present) is **metadata only** and must not be treated as “the media bytes”.
+- To fetch **all photos attached to a trip**, TrimsyPC must use `tripEvidenceListByTrip` for that trip, then download each item via `tripEvidenceDownload`.
 
 ---
 
@@ -103,6 +112,8 @@ For each trip with a non-empty `trip.clientRef`:
    - `tripClientRef = trip.clientRef`
 2) This returns metadata items including:
    - `clientEvidenceId`, `contentType`, `displayName`, `sha256`, `sizeBytes`, `parkingTicketId`
+
+TrimsyPC should treat these returned items as the authoritative list of “trip media attachments” for that trip.
 
 ### Step C: Download each evidence item
 For each evidence item:

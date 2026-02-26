@@ -268,11 +268,11 @@ fun AppNavHost(intent: Intent) {
             HomeScreen(
                 onAddTrip = { /* handled in HomeScreen via modal */ },
                 onAddTripQuickLogWithPhoto = {
-                    navController.navigate("${Routes.Camera}?tripId=-1&return=0&autoSave=1&quickLog=1")
+                    navController.navigate("${Routes.Camera}?tripId=-1&return=0&autoSave=1&quickLog=1&continuous=0")
                 },
                 onReviewPlaces = { navController.navigate(Routes.PingHistory) },
                 onJournal = { navController.navigate(Routes.Journal) },
-                onCamera = { navController.navigate(Routes.Camera) },
+                onCamera = { navController.navigate("${Routes.Camera}?tripId=-1&return=0&autoSave=0&quickLog=0&continuous=0") },
                 onOpenSettings = { navController.navigate(Routes.Settings) },
             )
         }
@@ -309,7 +309,8 @@ fun AppNavHost(intent: Intent) {
                     // Hard-bind the selected stop/trip context.
                     // This prevents evidence from being accidentally linked to the wrong trip.
                     // Also auto-open the camera to keep the UX as "tap camera on stop".
-                    navController.navigate("${Routes.MediaReview}/$tripId?autoTake=1")
+                    // Keep camera open and auto-save each capture until user backs out.
+                    navController.navigate("${Routes.Camera}?tripId=$tripId&return=0&autoSave=1&quickLog=0&continuous=1")
                 },
             )
         }
@@ -348,7 +349,7 @@ fun AppNavHost(intent: Intent) {
         }
 
         composable(
-            route = "${Routes.Camera}?tripId={tripId}&return={return}&autoSave={autoSave}&quickLog={quickLog}",
+            route = "${Routes.Camera}?tripId={tripId}&return={return}&autoSave={autoSave}&quickLog={quickLog}&continuous={continuous}",
             arguments = listOf(
                 navArgument("tripId") {
                     type = NavType.LongType
@@ -357,17 +358,20 @@ fun AppNavHost(intent: Intent) {
                 navArgument("return") { type = NavType.IntType; defaultValue = 0 },
                 navArgument("autoSave") { type = NavType.IntType; defaultValue = 0 },
                 navArgument("quickLog") { type = NavType.IntType; defaultValue = 0 },
+                navArgument("continuous") { type = NavType.IntType; defaultValue = 0 },
             )
         ) {
             val tripId = it.arguments?.getLong("tripId") ?: -1L
             val returnCapture = (it.arguments?.getInt("return") ?: 0) == 1
             val autoSave = (it.arguments?.getInt("autoSave") ?: 0) == 1
             val quickLog = (it.arguments?.getInt("quickLog") ?: 0) == 1
+            val continuous = (it.arguments?.getInt("continuous") ?: 0) == 1
             CameraScreen(
                 tripId = tripId.takeIf { id -> id > 0L },
                 returnCaptureToCaller = returnCapture,
                 autoSaveToTrip = autoSave,
                 quickLogTripOnAutoSave = quickLog,
+                continuousAutoSave = continuous,
                 onCaptureConfirmed = { uri, mimeType, isTempLocalFileProviderUri, capturedAt ->
                     val prev = navController.previousBackStackEntry
                     prev?.savedStateHandle?.set("cameraCaptureUri", uri)
@@ -397,7 +401,8 @@ fun AppNavHost(intent: Intent) {
                     // Keep the selected trip context all the way into the camera flow.
                     // Even though we return the capture via SavedStateHandle, passing tripId here
                     // prevents any ambiguity in the camera UI and avoids accidental mis-linking.
-                    navController.navigate("${Routes.Camera}?tripId=$tripId&return=1")
+                    // Auto-save each capture and keep the camera open until user backs out.
+                    navController.navigate("${Routes.Camera}?tripId=$tripId&return=0&autoSave=1&quickLog=0&continuous=1")
                 },
                 onDone = { navController.popBackStack() },
                 onBack = { navController.popBackStack() },
@@ -456,9 +461,9 @@ fun AppNavHost(intent: Intent) {
                 onOpenCameraForTrip = { id, scheduleReceiptReminder ->
                     if (scheduleReceiptReminder) {
                         scheduleReceiptReminder(id)
-                        navController.navigate("${Routes.Camera}?tripId=$id&return=0&autoSave=1")
+                        navController.navigate("${Routes.Camera}?tripId=$id&return=0&autoSave=1&quickLog=0&continuous=0")
                     } else {
-                        navController.navigate("${Routes.Camera}?tripId=$id&return=0")
+                        navController.navigate("${Routes.Camera}?tripId=$id&return=0&autoSave=0&quickLog=0&continuous=0")
                     }
                 },
                 onOpenMediaReviewForTrip = { id ->
