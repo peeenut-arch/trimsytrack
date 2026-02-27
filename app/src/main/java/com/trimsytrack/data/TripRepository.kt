@@ -8,15 +8,20 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.trimsytrack.AppGraph
+import com.trimsytrack.BuildConfig
 import com.trimsytrack.distance.MapsKeyProvider
 import com.trimsytrack.data.dao.AttachmentDao
 import com.trimsytrack.data.dao.RunDao
 import com.trimsytrack.data.dao.TripDao
+import com.trimsytrack.data.canonical.DrivingRunAllocateBody
+import com.trimsytrack.data.canonical.DrivingRunAllocateResponse
 import com.trimsytrack.data.entities.AttachmentEntity
 import com.trimsytrack.data.entities.RunEntity
 import com.trimsytrack.data.entities.SyncStatus
 import com.trimsytrack.data.entities.TripEntity
 import com.trimsytrack.data.canonical.CanonicalWriteEnqueuerLike
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -64,6 +69,10 @@ class TripRepository(
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val googleJson = Json { ignoreUnknownKeys = true }
+    private val canonicalJson = Json {
+        ignoreUnknownKeys = true
+        explicitNulls = false
+    }
     private val googleGeocodingApi by lazy {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
@@ -766,16 +775,43 @@ class TripRepository(
 
     suspend fun createRun(day: LocalDate, label: String): Long {
         val uid = settings.requireUid()
-        return runDao.insert(
+
+        val clientRef = UUID.randomUUID().toString()
+        val protocol = settings.backendProtocolVersion.first()
+            ?: throw IllegalStateException("Backend protocol not established yet")
+
+        val requestBody = DrivingRunAllocateBody(
+            idempotencyKey = "drivingRunAllocate:$clientRef",
+            occurredAt = Instant.now().toString(),
+            clientProtocolVersion = protocol,
+            clientRequestId = UUID.randomUUID().toString(),
+            app_id = BuildConfig.APP_ID,
+        )
+
+        val raw = AppGraph.canonicalApi.drivingRunAllocate(
+            body = canonicalJson.encodeToString(DrivingRunAllocateBody.serializer(), requestBody)
+        )
+
+        val parsed = runCatching {
+            canonicalJson.decodeFromString(DrivingRunAllocateResponse.serializer(), raw)
+        }.getOrNull()
+
+        val runId = parsed?.result?.runId
+            ?.takeIf { it > 0L }
+            ?: throw IllegalStateException(parsed?.error?.message ?: "drivingRunAllocate failed")
+
+        runDao.insert(
             RunEntity(
+                id = runId,
                 uid = uid,
-                clientRef = UUID.randomUUID().toString(),
+                clientRef = clientRef,
                 syncStatus = SyncStatus.PENDING,
                 day = day,
                 createdAt = Instant.now(),
                 label = label
             )
         )
+        return runId
     }
 
     suspend fun deleteRun(runId: Long) {

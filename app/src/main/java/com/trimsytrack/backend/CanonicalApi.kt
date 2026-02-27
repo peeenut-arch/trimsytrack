@@ -15,4 +15,10 @@ interface CanonicalApi {
         @Header("Content-Type") contentType: String = "application/json",
         @Body body: String,
     ): String
+    
+    @POST("drivingRunAllocate")
+    suspend fun drivingRunAllocate(
+        @Header("Content-Type") contentType: String = "application/json",
+        @Body body: String,
+    ): String
 }

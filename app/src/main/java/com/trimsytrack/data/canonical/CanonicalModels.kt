@@ -86,11 +86,33 @@ internal data class DrivingTripCreateBody(
 internal data class DrivingTripCreateResult(
     val drivingTripId: String? = null,
     val tripId: String? = null,
+    val runId: Long? = null,
 )
 
 @Serializable
 internal data class DrivingTripCreateResponse(
     val ok: Boolean,
     val result: DrivingTripCreateResult? = null,
+    val error: BackendApiError? = null,
+)
+
+@Serializable
+internal data class DrivingRunAllocateBody(
+    val idempotencyKey: String,
+    val occurredAt: String,
+    val clientProtocolVersion: Int,
+    val clientRequestId: String,
+    val app_id: String,
+)
+
+@Serializable
+internal data class DrivingRunAllocateResult(
+    val runId: Long? = null,
+)
+
+@Serializable
+internal data class DrivingRunAllocateResponse(
+    val ok: Boolean,
+    val result: DrivingRunAllocateResult? = null,
     val error: BackendApiError? = null,
 )

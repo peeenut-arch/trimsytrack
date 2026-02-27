@@ -7,7 +7,8 @@ import java.time.LocalDate
 
 @Entity(tableName = "runs")
 data class RunEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    /** Backend-issued run id (journal trip number). */
+    @PrimaryKey(autoGenerate = false) val id: Long,
 
     /** Auth UID that owns this run. */
     val uid: String,
