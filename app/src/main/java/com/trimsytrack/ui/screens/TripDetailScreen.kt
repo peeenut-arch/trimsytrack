@@ -35,6 +35,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -78,6 +79,14 @@ fun TripDetailScreen(
 
     val trip by vm.trip.collectAsState()
     val attachments by AppGraph.tripRepository.observeAttachments(tripId).collectAsState(initial = emptyList())
+    val displayTripNumber by produceState<Int?>(initialValue = null, key1 = trip?.id, key2 = trip?.runId) {
+        val currentTripId = trip?.id ?: 0L
+        value = if (currentTripId > 0L) {
+            runCatching { AppGraph.tripRepository.completedTripNumberForTrip(currentTripId) }.getOrNull()
+        } else {
+            null
+        }
+    }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -143,17 +152,19 @@ fun TripDetailScreen(
                         tripStoreNameSnapshot = t.storeNameSnapshot,
                         sourceUri = uri,
                     )
-                    val feeText = formatMinorAmount(feeMinor)
-                    val parkingTicketId = t.parkingTicketId ?: UUID.randomUUID().toString()
+                    val parkingTicketId = (t.parkingTicketId?.trim()?.takeIf { it.isNotBlank() }
+                        ?: AppGraph.tripRepository.allocateNextParkingTicketId(t.uid))
+                    val receiptEvidenceId = UUID.randomUUID().toString()
                     val entity = baseEntity.copy(
-                        clientRef = parkingTicketId,
-                        displayName = "Parking/Traffic fee ${feeText} — receipt (${parkingTicketId.take(8)})"
+                        clientRef = receiptEvidenceId,
+                        displayName = "PT-$parkingTicketId",
                     )
                     AppGraph.tripRepository.addAttachment(entity)
                     vm.updateTrip(
                         t.copy(
                             parkingTrafficFeeMinor = feeMinor,
                             parkingTicketId = parkingTicketId,
+                            parkingTicketReceiptClientRef = receiptEvidenceId,
                             parkingTicketHasMoms = hasMoms,
                             parkingTicketAccountType = accountType,
                         )
@@ -186,9 +197,8 @@ fun TripDetailScreen(
             TopAppBar(
                 title = {
                     val stopId = trip?.clientRef?.trim().orEmpty()
-                    val runId = trip?.runId ?: 0L
                     Column {
-                        Text(if (runId > 0L) "Trip ID #$runId" else "Trip")
+                        Text(displayTripNumber?.let { "Trip #$it" } ?: "Trip")
                         if (stopId.isNotBlank()) {
                             Text(
                                 text = "Stop ID $stopId",
@@ -387,8 +397,12 @@ fun TripDetailScreen(
                 val feeMinor = t.parkingTrafficFeeMinor
                 if (feeMinor != null) {
                     Spacer(Modifier.height(4.dp))
+                    val ticketId = t.parkingTicketId?.trim().orEmpty()
                     Text(
-                        "Parking fee: ${formatMinorAmount(feeMinor)}",
+                        buildString {
+                            append("Parking fee: ${formatMinorAmount(feeMinor)}")
+                            if (ticketId.isNotBlank()) append(" ($ticketId)")
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
                     )

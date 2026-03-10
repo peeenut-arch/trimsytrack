@@ -269,7 +269,12 @@ fun TodayScreen(
 
                                                     runCatching { AppGraph.geofenceSyncManager.scheduleSync("today_current_trip_home_button") }
 
-                                                    homeTripStatus = "Completed Trip ID #$tripId (Home)."
+                                                    val completedTripNumber = runCatching {
+                                                        AppGraph.tripRepository.completedTripNumberForTrip(tripId)
+                                                    }.getOrNull()
+                                                    homeTripStatus = completedTripNumber
+                                                        ?.let { "Completed Trip #$it (Home)." }
+                                                        ?: "Completed trip (Home)."
                                                 } catch (e: Exception) {
                                                     homeTripStatus = e.message ?: "Failed to create Home trip"
                                                 } finally {
@@ -300,13 +305,17 @@ fun TodayScreen(
                                 currentRun.forEachIndexed { index, t ->
                                     val time = timeFormatter.format(t.endedAt.atZone(ZoneId.systemDefault()))
                                     val stopId = t.clientRef?.trim().orEmpty()
-                                    val tripId = t.runId ?: 0L
                                     Text(
                                         text = buildString {
-                                            if (tripId > 0L) append("Trip ID #").append(tripId)
-                                            if (stopId.isNotBlank()) append(" · Stop ID ").append(stopId)
-                                            append(" · ").append(time)
-                                            append(" · ").append(t.storeNameSnapshot)
+                                            if (stopId.isNotBlank()) append("Stop ID ").append(stopId)
+                                            if (time.isNotBlank()) {
+                                                if (isNotEmpty()) append(" · ")
+                                                append(time)
+                                            }
+                                            if (t.storeNameSnapshot.isNotBlank()) {
+                                                if (isNotEmpty()) append(" · ")
+                                                append(t.storeNameSnapshot)
+                                            }
                                         },
                                         style = MaterialTheme.typography.bodyMedium,
                                     )

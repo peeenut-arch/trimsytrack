@@ -50,6 +50,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,12 +78,15 @@ import com.trimsytrack.logic.RunGrouping
 import com.trimsytrack.ui.theme.TrimsyGreen
 import coil.compose.AsyncImage
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.delay
 import java.time.DayOfWeek
+import java.time.Duration
 import java.time.LocalDateTime
 import java.time.LocalDate
 import java.time.Instant
 import java.time.YearMonth
 import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.TextStyle
 import java.time.format.DateTimeFormatter
 import java.time.temporal.WeekFields
@@ -221,7 +225,7 @@ fun JournalScreen(
 
     var tripListPeriod by rememberSaveable { mutableStateOf(TripListPeriod.Today) }
 
-    val today = LocalDate.now()
+    val today = rememberToday(zone)
 
     val listStartDay = remember(today, tripListPeriod, trips) {
         when (tripListPeriod) {
@@ -328,10 +332,13 @@ fun JournalScreen(
 
     val periodRuns = remember(completedRuns, today, period) {
         val start = when (period) {
-            JournalPeriod.Week -> today.minusDays(6)
-            JournalPeriod.Month -> today.minusDays(29)
-            JournalPeriod.Quarter -> today.minusDays(90)
-            JournalPeriod.Year -> today.minusDays(364)
+            JournalPeriod.Week -> today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+            JournalPeriod.Month -> today.withDayOfMonth(1)
+            JournalPeriod.Quarter -> {
+                val startMonth = ((today.monthValue - 1) / 3) * 3 + 1
+                LocalDate.of(today.year, startMonth, 1)
+            }
+            JournalPeriod.Year -> LocalDate.of(today.year, 1, 1)
         }
         completedRuns.filter { it.day >= start && it.day <= today }
     }
@@ -503,9 +510,9 @@ private fun RunCard(
     timeFmt: DateTimeFormatter,
     onOpen: () -> Unit,
 ) {
-    // Trip ID is the runId (one per Home→...→Home). For legacy/unscoped rows, key is -tripId.
-    val tripId = kotlin.math.abs(run.key)
-    val runTitle = if (tripId > 0) "Trip ID #$tripId" else "Trip"
+    // User-facing numbering stays contiguous from the local set of completed runs so backend gaps
+    // do not leak into Journal.
+    val runTitle = if (run.runSequenceNumber > 0) "Trip #${run.runSequenceNumber}" else "Trip"
 
     val timeRange = runCatching {
         "${run.start.format(timeFmt)}–${run.end.format(timeFmt)}"
@@ -683,8 +690,7 @@ private fun RunDetailsDialog(
                     TopAppBar(
                         title = {
                             Column {
-                                val tripId = kotlin.math.abs(run.key)
-                                Text(if (tripId > 0) "Trip ID #$tripId" else "Trip")
+                                Text(if (run.runSequenceNumber > 0) "Trip #${run.runSequenceNumber}" else "Trip")
                             }
                         },
                         navigationIcon = {
@@ -781,7 +787,6 @@ private fun RunDetailsDialog(
                             if (stopId.isNotBlank()) {
                                 append("Stop ID ").append(stopId)
                             }
-                            // Trip ID is the runId shown in the dialog title.
                             if (isLastStopBeforeHome && endTime.isNotBlank() && departTimeFromLastStop.isNotBlank()) {
                                 if (stopId.isNotBlank()) append(" · ")
                                 append("Arrive ").append(endTime)
@@ -833,6 +838,19 @@ private fun RunDetailsDialog(
             }
         }
     }
+}
+
+@Composable
+private fun rememberToday(zone: ZoneId): LocalDate {
+    return produceState(initialValue = LocalDate.now(zone), key1 = zone) {
+        while (true) {
+            val now = ZonedDateTime.now(zone)
+            value = now.toLocalDate()
+            val nextMidnight = now.toLocalDate().plusDays(1).atStartOfDay(zone)
+            val delayMillis = Duration.between(now, nextMidnight).toMillis().coerceAtLeast(250L)
+            delay(delayMillis)
+        }
+    }.value
 }
 
 @Composable
