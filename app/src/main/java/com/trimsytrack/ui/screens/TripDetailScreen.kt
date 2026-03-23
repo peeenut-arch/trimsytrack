@@ -152,11 +152,10 @@ fun TripDetailScreen(
                         tripStoreNameSnapshot = t.storeNameSnapshot,
                         sourceUri = uri,
                     )
-                    val parkingTicketId = (t.parkingTicketId?.trim()?.takeIf { it.isNotBlank() }
-                        ?: AppGraph.tripRepository.allocateNextParkingTicketId(t.uid))
-                    val receiptEvidenceId = UUID.randomUUID().toString()
+                    val parkingTicketId = t.parkingTicketId?.trim()?.takeIf { it.isNotBlank() }
+                        ?: UUID.randomUUID().toString()
                     val entity = baseEntity.copy(
-                        clientRef = receiptEvidenceId,
+                        clientRef = parkingTicketId,
                         displayName = "PT-$parkingTicketId",
                     )
                     AppGraph.tripRepository.addAttachment(entity)
@@ -164,7 +163,6 @@ fun TripDetailScreen(
                         t.copy(
                             parkingTrafficFeeMinor = feeMinor,
                             parkingTicketId = parkingTicketId,
-                            parkingTicketReceiptClientRef = receiptEvidenceId,
                             parkingTicketHasMoms = hasMoms,
                             parkingTicketAccountType = accountType,
                         )
